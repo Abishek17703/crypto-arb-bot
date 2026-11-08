@@ -1,8 +1,8 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: >
-  CRYPTO-ARB-BOT: 365-Day $0.00 Free-Tier AWS Tokyo (ap-northeast-1) Auto-Provisioner.
+  CRYPTO-ARB-BOT: 365-Day $0.00 Free-Tier AWS Auto-Provisioner.
   Enforces t3.micro Free Tier, Standard CPU Credits ($0.00 burst overage), 20GB gp3 storage,
-  $0.01 Zero-Spend AWS Budget Alert, and automatic Rust HFT engine systemd service.
+  and automatic Rust HFT engine systemd service.
 
 Parameters:
   BinanceApiKey:
@@ -17,36 +17,15 @@ Parameters:
     Description: Optional Spot-Only Binance API Secret (leave blank to start in Live-Signed Shadow Mode)
   AlertEmail:
     Type: String
-    Default: "admin@example.com"
-    Description: Email address for the $0.01 Zero-Spend AWS Budget Guardrail alert
+    Default: "abishek17703@gmail.com"
+    Description: Email address for notifications
   GitRepoUrl:
     Type: String
     Default: "https://github.com/Abishek17703/crypto-arb-bot.git"
     Description: GitHub repository URL containing the crypto-arb-bot Rust codebase
 
 Resources:
-  # 1. Zero-Spend ($0.01) AWS Budget Guardrail - Guarantees immediate alert if anything ever exceeds $0.00
-  ZeroSpendBudgetGuard:
-    Type: AWS::Budgets::Budget
-    Properties:
-      Budget:
-        BudgetName: CryptoArbBot-365Day-ZeroSpend-Guard
-        BudgetLimit:
-          Amount: 0.01
-          Unit: USD
-        TimeUnit: MONTHLY
-        BudgetType: COST
-      NotificationsWithSubscribers:
-        - Notification:
-            NotificationType: ACTUAL
-            ComparisonOperator: GREATER_THAN
-            Threshold: 0.01
-            ThresholdType: ABSOLUTE_VALUE
-          Subscribers:
-            - SubscriptionType: EMAIL
-              Address: !Ref AlertEmail
-
-  # 2. Minimal Security Group (Outbound HTTPS/WSS to Binance/Bybit/OKX only; no open inbound ports required)
+  # 1. Minimal Security Group (Outbound HTTPS/WSS to Binance/Bybit/OKX only; no open inbound ports required)
   ArbBotSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
@@ -55,12 +34,11 @@ Resources:
         - IpProtocol: -1
           CidrIp: 0.0.0.0/0
 
-  # 3. Free-Tier Tokyo EC2 Instance (t3.micro + Standard CPU Credit Lock = $0.00 Overages)
+  # 2. Free-Tier EC2 Instance (t3.micro + Standard CPU Credit Lock = $0.00 Overages)
   ArbBotTokyoInstance:
     Type: AWS::EC2::Instance
     Properties:
       InstanceType: t3.micro
-      # Amazon Linux 2023 x86_64 dynamic SSM parameter (always resolves to latest AL2023 AMI in ap-northeast-1)
       ImageId: "{{resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64}}"
       # Lock CPU credits to "standard" so AWS NEVER charges $0.05/vCPU-hr burst fees
       CreditSpecification:
@@ -122,11 +100,11 @@ Resources:
 
 Outputs:
   InstanceId:
-    Description: Free-Tier Tokyo EC2 Instance ID
+    Description: Free-Tier EC2 Instance ID
     Value: !Ref ArbBotTokyoInstance
   AvailabilityZone:
-    Description: Tokyo Availability Zone where the bot is running
+    Description: Availability Zone where the bot is running
     Value: !GetAtt ArbBotTokyoInstance.AvailabilityZone
   ZeroCostGuarantee:
     Description: Cost Protection Summary
-    Value: "t3.micro (750h/mo Free) + CPUCredits=standard ($0.00 burst) + 20GB gp3 (<=30GB Free) + $0.01 Budget Alert"
+    Value: "t3.micro (750h/mo Free) + CPUCredits=standard ($0.00 burst) + 20GB gp3 (<=30GB Free)"
