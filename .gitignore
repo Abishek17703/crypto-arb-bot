@@ -1,0 +1,4 @@
+/target
+telemetry.json
+*.log
+.env
