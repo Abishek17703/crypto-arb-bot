@@ -133,4 +133,72 @@ impl ArbitrageDetector {
 
         best_signal
     }
+
+    /// Ultra-fast HFT Orderbook Imbalance (OBI) + Cross-Exchange Lead-Lag Micro-Scalp Scanner
+    /// for Binance Zero-Fee FDUSD Pairs (`BTCFDUSD`, `ETHFDUSD`, `SOLFDUSD` — `0.00%` Maker Fee).
+    #[inline(always)]
+    pub fn scan_hft_obi_scalp(
+        &self,
+        matrix: &OrderBookMatrix,
+        symbol: Symbol,
+        now_ns: u64,
+    ) -> Option<ArbitrageSignal> {
+        let start = Instant::now();
+        let quotes = matrix.get_symbol_row(symbol);
+        let binance_q = &quotes[Exchange::Binance.index()];
+        if !binance_q.is_valid()
+            || now_ns.saturating_sub(binance_q.timestamp_ns) > self.config.max_quote_staleness_ns
+        {
+            return None;
+        }
+
+        let total_top_qty = binance_q.bid_qty + binance_q.ask_qty;
+        if total_top_qty <= 0.0 {
+            return None;
+        }
+
+        // 1. Orderbook Imbalance (OBI) in [-1.0, +1.0]: > +0.32 means > 2:1 bid pressure
+        let obi = ((binance_q.bid_qty - binance_q.ask_qty) / total_top_qty).abs();
+
+        // 2. Lead-Lag Fair Mid from OKX / Bybit vs Binance Mid
+        let binance_mid = (binance_q.bid_price + binance_q.ask_price) * 0.5;
+        let okx_q = &quotes[Exchange::Okx.index()];
+        let lead_lag_bps = if okx_q.is_valid() {
+            let okx_mid = (okx_q.bid_price + okx_q.ask_price) * 0.5;
+            ((okx_mid - binance_mid).abs() / binance_mid) * 10_000.0
+        } else {
+            0.0
+        };
+
+        // Combined micro-edge in basis points on 0.00% Maker Fee FDUSD book
+        let micro_edge_bps = (obi * 2.4) + (lead_lag_bps * 0.45);
+        if micro_edge_bps < 1.15 {
+            return None;
+        }
+
+        let exec_qty = binance_q
+            .ask_qty
+            .min(binance_q.bid_qty)
+            .min(self.config.max_notional_usdt / binance_q.ask_price);
+        if exec_qty <= 0.0 {
+            return None;
+        }
+
+        let notional_usdt = exec_qty * binance_q.ask_price;
+        let expected_net_profit_usdt = notional_usdt * (micro_edge_bps / 10_000.0);
+
+        Some(ArbitrageSignal {
+            symbol,
+            buy_exchange: Exchange::Binance,
+            sell_exchange: Exchange::Binance,
+            buy_ask_price: binance_q.bid_price,
+            sell_bid_price: binance_q.ask_price,
+            max_executable_qty: exec_qty,
+            gross_spread_bps: micro_edge_bps,
+            net_spread_bps: micro_edge_bps,
+            expected_net_profit_usdt,
+            detection_latency_ns: start.elapsed().as_nanos() as u64,
+            timestamp_ns: now_ns,
+        })
+    }
 }
