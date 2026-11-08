@@ -152,12 +152,36 @@ jobs:
             --output table 2>&1 || true
           aws freetier get-free-tier-usage --output table 2>&1 || true
 
-      - name: Run Live Binance Spot Testnet WS v3 Paper Execution & Verify Binance Order Book Fills
+      - name: Execute Live Binance Spot Testnet WS v3 Session on AWS EC2 Instance (Asia-Pacific)
         env:
           BINANCE_TESTNET_API_KEY: ${{ inputs.binance_api_key || secrets.BINANCE_API_KEY }}
           BINANCE_TESTNET_API_SECRET: ${{ inputs.binance_api_secret || secrets.BINANCE_API_SECRET }}
         run: |
+          REGION="${{ steps.region_probe.outputs.aws_region }}"
+          INST_ID=$(aws cloudformation describe-stacks --region "$REGION" --stack-name crypto-arb-bot-zero-cost --query "Stacks[0].Outputs[?OutputKey=='InstanceId'].OutputValue" --output text)
+          SG_ID=$(aws ec2 describe-instances --region "$REGION" --instance-ids "$INST_ID" --query "Reservations[0].Instances[0].SecurityGroups[0].GroupId" --output text)
+          PUB_IP=$(aws ec2 describe-instances --region "$REGION" --instance-ids "$INST_ID" --query "Reservations[0].Instances[0].PublicIpAddress" --output text)
+          AZ=$(aws ec2 describe-instances --region "$REGION" --instance-ids "$INST_ID" --query "Reservations[0].Instances[0].Placement.AvailabilityZone" --output text)
+          RUNNER_IP=$(curl -s https://checkip.amazonaws.com | tr -d '[:space:]')
+
+          echo "Connecting to live AWS EC2 Instance $INST_ID ($PUB_IP in $AZ) from $RUNNER_IP/32..."
+          ssh-keygen -t ed25519 -f /tmp/ec2_key -N "" -q
+
+          trap 'aws ec2 revoke-security-group-ingress --region "$REGION" --group-id "$SG_ID" --protocol tcp --port 22 --cidr "$RUNNER_IP/32" >/dev/null 2>&1 || true' EXIT
+          aws ec2 authorize-security-group-ingress --region "$REGION" --group-id "$SG_ID" --protocol tcp --port 22 --cidr "$RUNNER_IP/32" >/dev/null 2>&1 || true
+
+          aws ec2-instance-connect send-ssh-public-key \
+            --region "$REGION" \
+            --instance-id "$INST_ID" \
+            --availability-zone "$AZ" \
+            --instance-os-user ec2-user \
+            --ssh-public-key file:///tmp/ec2_key.pub
+
+          ssh -i /tmp/ec2_key -o StrictHostKeyChecking=no -o ConnectTimeout=15 ec2-user@"$PUB_IP" \
+            "BINANCE_TESTNET_API_KEY='$BINANCE_TESTNET_API_KEY' BINANCE_TESTNET_API_SECRET='$BINANCE_TESTNET_API_SECRET' bash -s" << 'REMOTEEOF'
+          set -e
           echo "================================================================================"
+          echo "   RUNNING ON LIVE AWS EC2 INSTANCE ($(hostname) - Asia-Pacific Zero-Geoblock)"
           echo "   1. QUERYING BINANCE SPOT TESTNET WALLET BALANCES (BEFORE PAPER RUN)"
           echo "================================================================================"
           python3 - << 'PYEOF'
@@ -183,10 +207,50 @@ jobs:
           PYEOF
 
           echo -e "\n================================================================================"
-          echo "   2. COMPILING & EXECUTING RUST HFT BOT AGAINST BINANCE SPOT TESTNET WS v3"
+          echo "   2. UPDATING & EXECUTING RUST HFT BOT ON AWS EC2 AGAINST BINANCE TESTNET WS v3"
           echo "================================================================================"
-          cargo build --release
-          ./target/release/crypto-arb-bot --total-capital 10.0 --testnet --realistic --pin-core 0 --ping-bench --duration-secs 10
+          # Wait if cloud-init is still finishing initial compile, or update /opt/crypto-arb-bot
+          sudo bash -c '
+            export HOME=/root
+            if [ ! -f /root/.cargo/env ]; then
+              curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+            fi
+            source /root/.cargo/env
+            if [ ! -d /opt/crypto-arb-bot/.git ]; then
+              rm -rf /opt/crypto-arb-bot
+              git clone https://github.com/Abishek17703/crypto-arb-bot.git /opt/crypto-arb-bot
+            fi
+            cd /opt/crypto-arb-bot
+            git fetch origin main && git reset --hard origin/main
+            cargo build --release
+          '
+
+          sudo env BINANCE_TESTNET_API_KEY="$BINANCE_TESTNET_API_KEY" \
+                   BINANCE_TESTNET_API_SECRET="$BINANCE_TESTNET_API_SECRET" \
+                   /opt/crypto-arb-bot/target/release/crypto-arb-bot \
+                   --total-capital 10.0 --testnet --realistic --pin-core 0 --ping-bench --duration-secs 10
+
+          # Update the 24/7 background systemd service with Testnet keys
+          sudo bash -c "cat << EOF > /etc/systemd/system/crypto-arb-bot.service
+          [Unit]
+          Description=Ultra-Low Latency Rust Crypto Arbitrage Engine (\\\$10 Capital Guard)
+          After=network-online.target
+
+          [Service]
+          Type=simple
+          WorkingDirectory=/opt/crypto-arb-bot
+          Environment=\"BINANCE_TESTNET_API_KEY=$BINANCE_TESTNET_API_KEY\"
+          Environment=\"BINANCE_TESTNET_API_SECRET=$BINANCE_TESTNET_API_SECRET\"
+          ExecStart=/opt/crypto-arb-bot/target/release/crypto-arb-bot --total-capital 10.0 --testnet --realistic --pin-core 0 --ping-bench --duration-secs 0
+          Restart=always
+          RestartSec=5
+
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+          systemctl daemon-reload
+          systemctl enable --now crypto-arb-bot.service
+          systemctl restart crypto-arb-bot.service"
 
           echo -e "\n================================================================================"
           echo "   3. VERIFYING EXECUTED ORDERS & BALANCES INSIDE BINANCE SPOT TESTNET"
@@ -208,7 +272,7 @@ jobs:
                   with urllib.request.urlopen(req) as resp:
                       trades = json.loads(resp.read().decode())
                       if trades:
-                          print(f"\nRecent Verified Binance Testnet Fills for {sym} ({len(trades)} shown):")
+                          print(f"\n✅ Verified Binance Testnet Fills for {sym} ({len(trades)} recent fills):")
                           for t in trades[-3:]:
                               side = "BUY" if t.get("isBuyer") else "SELL"
                               tid = t["id"]
@@ -237,4 +301,5 @@ jobs:
                   if asset in ("USDT","FDUSD","BTC","ETH","SOL","BNB","USDC"):
                       print(f"  - {asset:6s} : Free = {free} | Locked = {locked}")
           PYEOF
+          REMOTEEOF
 
