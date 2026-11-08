@@ -225,6 +225,12 @@ async fn main() {
         tri_fee_bps,
         args.realistic,
     );
+    let mut hft_engine = PaperExecutionEngine::new(
+        args.total_capital,
+        StrategyMode::ZeroFeeHftObiScalp,
+        [0.0, 0.0, 0.0],
+        args.realistic,
+    );
     let mut perp_engine = PaperExecutionEngine::new(
         args.total_capital,
         StrategyMode::CrossExchangePerp,
@@ -283,7 +289,6 @@ async fn main() {
             // 1. Evaluate Same-Exchange Zero-Fee FDUSD Triangular Loop ($10 in 1 account)
             if let Some(sig) = tri_detector.scan_symbol(&matrix, event.symbol, event.timestamp_ns) {
                 if let Some(trade) = tri_engine.try_execute(&sig) {
-                    // Construct & HMAC-SHA256 sign all 3 legs of the Binance WS v3 Order Bundle
                     if let Some(bundle) = live_signer.build_and_sign_triangular_loop(
                         sig.symbol,
                         trade.notional_usdt,
@@ -306,20 +311,26 @@ async fn main() {
                         }
                     }
 
-                    // Update safety circuit breaker ($9.60 hard floor & max 3 consecutive unwind losses)
                     live_signer
                         .circuit_breaker
                         .record_trade_outcome(trade.net_profit_usdt, trade.legged_out);
                 }
             }
 
-            // 2. Evaluate Cross-Exchange 5x Perp ($5 Binance + $5 Bybit)
+            // 2. Evaluate Zero-Fee HFT OBI + Lead-Lag Maker Scalper (`BTCFDUSD`/`ETHFDUSD`/`SOLFDUSD`)
+            if let Some(hft_sig) =
+                tri_detector.scan_hft_obi_scalp(&matrix, event.symbol, event.timestamp_ns)
+            {
+                let _ = hft_engine.try_execute(&hft_sig);
+            }
+
+            // 3. Evaluate Cross-Exchange 5x Perp ($5 Binance + $5 Bybit)
             if let Some(sig) = perp_detector.scan_symbol(&matrix, event.symbol, event.timestamp_ns)
             {
                 let _ = perp_engine.try_execute(&sig);
             }
 
-            // 3. Evaluate Classic Cross-Exchange Spot ($3.33 per exchange)
+            // 4. Evaluate Classic Cross-Exchange Spot ($3.33 per exchange)
             if let Some(sig) = spot_detector.scan_symbol(&matrix, event.symbol, event.timestamp_ns)
             {
                 let _ = spot_engine.try_execute(&sig);
@@ -383,6 +394,25 @@ async fn main() {
         tri_engine.current_equity_usdt,
         tri_engine.cumulative_net_pnl_usdt,
         (tri_engine.cumulative_net_pnl_usdt / args.total_capital) * 100.0
+    );
+    println!("------------------------------------------------------------------------------------------");
+    println!(
+        "2. BINANCE ZERO-FEE HFT OBI + LEAD-LAG MAKER SCALPER (${:.2} Starting Capital, 0.00% Fee)",
+        args.total_capital
+    );
+    println!(
+        "   - Executed Scalps   : {} total ({} Wins / {} 2s-Time-Stop Scratches | Win Rate: {:.1}%)",
+        hft_engine.trades.len(),
+        hft_engine.total_wins,
+        hft_engine.total_legged_losses,
+        hft_engine.win_rate_pct()
+    );
+    println!(
+        "   - Starting -> Final : ${:.2} -> ${:.4} USDT (Net Profit: +${:.4} / +{:.2}%)",
+        args.total_capital,
+        hft_engine.current_equity_usdt,
+        hft_engine.cumulative_net_pnl_usdt,
+        (hft_engine.cumulative_net_pnl_usdt / args.total_capital) * 100.0
     );
     println!("==========================================================================================\n");
 
