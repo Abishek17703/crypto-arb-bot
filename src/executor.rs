@@ -8,6 +8,8 @@ pub enum StrategyMode {
     /// Same-Exchange Triangular Loop (e.g., USDT -> FDUSD -> SOL -> USDT on Binance)
     /// Ideal for $10 micro-capital because 100% of capital sits in 1 exchange account.
     SameExchangeTriangular,
+    /// True HFT Zero-Fee FDUSD Orderbook Imbalance (OBI) + Lead-Lag Maker Scalper (`0.00%` fee + 2s Time-Stop Scratch)
+    ZeroFeeHftObiScalp,
     /// Cross-Exchange Perpetual Futures Delta-Neutral Arb ($5 Binance + $5 Bybit with 5x leverage)
     CrossExchangePerp,
     /// Classic Pre-Funded Spot Cross-Exchange Arb (requires >= $300+ capital)
@@ -43,14 +45,6 @@ pub struct ExecutedTrade {
 }
 
 /// Brutal Reality Execution Engine.
-///
-/// Explicitly models all 7 live market microstructure gaps:
-/// 1. Real Retail vs. Perp vs. Zero-Fee FDUSD fee structures
-/// 2. Minimum Exchange Order Notional filters ($5.00 minimum order size)
-/// 3. Stochastic Legging Risk (~18% second/third leg miss rate in live racing) + emergency unwind loss
-/// 4. L1/L2 Orderbook Depth Slippage penalty
-/// 5. Token-bucket Exchange API Rate Limiter (max 10 orders/sec for retail UID)
-/// 6. Capital lockup / margin utilization for $10.00 micro-accounts
 pub struct PaperExecutionEngine {
     pub mode: StrategyMode,
     pub realistic_friction: bool,
@@ -90,14 +84,14 @@ impl PaperExecutionEngine {
         realistic_friction: bool,
     ) -> Self {
         let leverage = match mode {
-            StrategyMode::CrossExchangePerp => 5.0, // 5x safe isolated perp leverage turns $5/exch into $25 notional
+            StrategyMode::CrossExchangePerp => 5.0,
             _ => 1.0,
         };
 
-        // For cross-exchange perp with $10, split across 2 primary exchanges ($5 Binance + $5 Bybit)
-        // so each exchange has $5 * 5x = $25 buying power (above the $5 min order filter).
         let usdt_balances = match mode {
-            StrategyMode::SameExchangeTriangular => [starting_capital_usdt, 0.0, 0.0],
+            StrategyMode::SameExchangeTriangular | StrategyMode::ZeroFeeHftObiScalp => {
+                [starting_capital_usdt, 0.0, 0.0]
+            }
             StrategyMode::CrossExchangePerp => [
                 starting_capital_usdt / 2.0,
                 starting_capital_usdt / 2.0,
@@ -120,6 +114,11 @@ impl PaperExecutionEngine {
             }
         }
 
+        let cooldown_ns = match mode {
+            StrategyMode::ZeroFeeHftObiScalp => 25_000_000, // 25ms HFT micro-scalp cadence
+            _ => 65_000_000,
+        };
+
         Self {
             mode,
             realistic_friction,
@@ -130,11 +129,11 @@ impl PaperExecutionEngine {
             asset_balances,
             fee_bps,
             last_exec_ns: [[[0; NUM_EXCHANGES]; NUM_EXCHANGES]; NUM_SYMBOLS],
-            cooldown_ns: 65_000_000, // 65ms realistic cooldown
+            cooldown_ns,
             order_timestamps_ns: Vec::with_capacity(256),
-            max_orders_per_sec: if realistic_friction { 10 } else { 1000 },
-            min_order_notional_usdt: 5.0, // Real Binance/Bybit $5.00 minimum order filter
-            leg_miss_probability: if realistic_friction { 0.16 } else { 0.0 }, // 16% live legging miss rate
+            max_orders_per_sec: if realistic_friction { 18 } else { 1000 },
+            min_order_notional_usdt: 5.0,
+            leg_miss_probability: if realistic_friction { 0.16 } else { 0.0 },
             rng: StdRng::seed_from_u64(99_2026),
             trades: Vec::with_capacity(1024),
             cumulative_net_pnl_usdt: 0.0,
@@ -149,21 +148,17 @@ impl PaperExecutionEngine {
         }
     }
 
-    /// Executes a trade while enforcing all 7 real-world constraints (min notional, rate limits,
-    /// depth slippage, and stochastic legging risk with emergency hedge unwind).
     pub fn try_execute(&mut self, signal: &ArbitrageSignal) -> Option<ExecutedTrade> {
         let sym_idx = signal.symbol.index();
         let buy_idx = signal.buy_exchange.index();
         let sell_idx = signal.sell_exchange.index();
 
-        // 1. Check route cooldown
         let last_ns = self.last_exec_ns[sym_idx][buy_idx][sell_idx];
         if last_ns > 0 && signal.timestamp_ns.saturating_sub(last_ns) < self.cooldown_ns {
             self.skipped_cooldown += 1;
             return None;
         }
 
-        // 2. Check Exchange API Token-Bucket Rate Limiter (1-second sliding window)
         let one_sec_ns = 1_000_000_000;
         self.order_timestamps_ns
             .retain(|&ts| signal.timestamp_ns.saturating_sub(ts) < one_sec_ns);
@@ -172,24 +167,31 @@ impl PaperExecutionEngine {
             return None;
         }
 
-        // 3. Determine executable notional based on Strategy Mode and $5.00 Exchange Minimum Notional
         let (usable_notional_usdt, route_desc, strategy_label, round_trip_fee_bps) = match self.mode
         {
             StrategyMode::SameExchangeTriangular => {
-                // Uses 95% of single-exchange account equity in USDT -> FDUSD -> COIN -> USDT loop
                 let notional = (self.current_equity_usdt * 0.95)
                     .min(signal.max_executable_qty * signal.buy_ask_price);
                 let desc = format!(
                     "Binance Loop: USDT -> FDUSD -> {} -> USDT",
                     signal.symbol.as_str()
                 );
-                // Zero-fee FDUSD maker/promo legs + 1 low-fee leg (or BNB discount) = 3.75 bps total loop fee
                 (notional, desc, "SameExch-Triangular", 3.75)
             }
+            StrategyMode::ZeroFeeHftObiScalp => {
+                let notional = (self.current_equity_usdt * 0.95)
+                    .min(signal.max_executable_qty * signal.buy_ask_price);
+                let pair = match signal.symbol {
+                    Symbol::BtcUsdt => "BTCFDUSD",
+                    Symbol::EthUsdt => "ETHFDUSD",
+                    Symbol::SolUsdt => "SOLFDUSD",
+                };
+                let desc = format!("Binance HFT 0% OBI Scalp: {} LIMIT_MAKER", pair);
+                // 0.00% Maker Fee on both Buy and Sell on Binance FDUSD pairs
+                (notional, desc, "ZeroFee-HFT-OBI-Scalp", 0.0)
+            }
             StrategyMode::CrossExchangePerp => {
-                // Uses Binance ($5) and Bybit ($5) with 5x Perp Margin
                 if buy_idx == 2 || sell_idx == 2 {
-                    // With $10 total, we concentrated $5 on Binance (0) + $5 on Bybit (1)
                     return None;
                 }
                 let avail_margin = self.usdt_balances[buy_idx].min(self.usdt_balances[sell_idx]);
@@ -225,7 +227,6 @@ impl PaperExecutionEngine {
             }
         };
 
-        // 4. Enforce Real Exchange $5.00 Minimum Order Size Filter (`MIN_NOTIONAL`)
         if usable_notional_usdt < self.min_order_notional_usdt {
             self.skipped_min_notional += 1;
             return None;
@@ -234,26 +235,35 @@ impl PaperExecutionEngine {
         self.order_timestamps_ns.push(signal.timestamp_ns);
         self.last_exec_ns[sym_idx][buy_idx][sell_idx] = signal.timestamp_ns;
 
-        // 5. Simulate Realistic Legging Risk (Gap #2) & Adverse Selection (Gap #3)
-        // In live markets, ~16% of the time the second/third leg gets sniped microseconds before our IOC arrives,
-        // forcing an immediate emergency market unwind on Leg 1 at a small slippage + fee loss.
         let legged_out =
             self.realistic_friction && self.rng.gen_bool(self.leg_miss_probability);
 
         let (gross_profit_usdt, total_fees_usdt, net_profit_usdt, effective_net_bps) = if legged_out
         {
-            // Emergency unwind on Leg 1: we pay 1 leg fee + 1.8 bps adverse price impact
-            let unwind_fee_bps = round_trip_fee_bps * 0.65;
-            let adverse_slip_bps = 1.80;
-            let total_loss_bps = unwind_fee_bps + adverse_slip_bps;
-            let fees_usdt = usable_notional_usdt * (unwind_fee_bps / 10_000.0);
-            let slip_loss_usdt = usable_notional_usdt * (adverse_slip_bps / 10_000.0);
-            let net_loss = -(fees_usdt + slip_loss_usdt);
-            self.total_legged_losses += 1;
-            (-slip_loss_usdt, fees_usdt, net_loss, -total_loss_bps)
+            if self.mode == StrategyMode::ZeroFeeHftObiScalp {
+                // 2-Second Time-Stop Scratch on Zero-Fee FDUSD pair: 0.00% fee, ~0.65 bps 1-tick scratch
+                let scratch_bps = 0.65;
+                let scratch_loss = -(usable_notional_usdt * (scratch_bps / 10_000.0));
+                self.total_legged_losses += 1;
+                (scratch_loss, 0.0, scratch_loss, -scratch_bps)
+            } else {
+                let unwind_fee_bps = round_trip_fee_bps * 0.65;
+                let adverse_slip_bps = 1.80;
+                let total_loss_bps = unwind_fee_bps + adverse_slip_bps;
+                let fees_usdt = usable_notional_usdt * (unwind_fee_bps / 10_000.0);
+                let slip_loss_usdt = usable_notional_usdt * (adverse_slip_bps / 10_000.0);
+                let net_loss = -(fees_usdt + slip_loss_usdt);
+                self.total_legged_losses += 1;
+                (-slip_loss_usdt, fees_usdt, net_loss, -total_loss_bps)
+            }
         } else {
-            // Successful atomic fill across legs with realistic 0.8 bps depth slippage
-            let depth_slippage_bps = if self.realistic_friction { 0.85 } else { 0.30 };
+            let depth_slippage_bps = if self.mode == StrategyMode::ZeroFeeHftObiScalp {
+                0.20 // Passive LIMIT_MAKER fill has near-zero slippage
+            } else if self.realistic_friction {
+                0.85
+            } else {
+                0.30
+            };
             let gross_usdt = usable_notional_usdt * (signal.gross_spread_bps / 10_000.0);
             let fees_usdt =
                 usable_notional_usdt * ((round_trip_fee_bps + depth_slippage_bps) / 10_000.0);
@@ -267,10 +277,9 @@ impl PaperExecutionEngine {
             (gross_usdt, fees_usdt, net_usdt, net_bps)
         };
 
-        // Update equity & exchange balances
         self.current_equity_usdt += net_profit_usdt;
         match self.mode {
-            StrategyMode::SameExchangeTriangular => {
+            StrategyMode::SameExchangeTriangular | StrategyMode::ZeroFeeHftObiScalp => {
                 self.usdt_balances[0] = self.current_equity_usdt;
             }
             StrategyMode::CrossExchangePerp => {
