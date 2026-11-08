@@ -207,19 +207,17 @@ jobs:
           PYEOF
 
           echo -e "\n================================================================================"
-          echo "   2. UPDATING & EXECUTING RUST HFT BOT ON AWS EC2 AGAINST BINANCE TESTNET WS v3"
+          echo "   2. APPLYING KERNEL BBR + BUSY-POLL & RUNNING WARM-SOCKET PING ON AWS EC2"
           echo "================================================================================"
-          # Wait if cloud-init is still finishing initial compile, or update /opt/crypto-arb-bot
           sudo bash -c '
+            modprobe tcp_bbr 2>/dev/null || true
+            sysctl -w net.core.default_qdisc=fq >/dev/null 2>&1 || true
+            sysctl -w net.ipv4.tcp_congestion_control=bbr >/dev/null 2>&1 || true
+            sysctl -w net.core.busy_poll=50 >/dev/null 2>&1 || true
+            sysctl -w net.core.busy_read=50 >/dev/null 2>&1 || true
+            sysctl -w net.ipv4.tcp_fastopen=3 >/dev/null 2>&1 || true
             export HOME=/root
-            if [ ! -f /root/.cargo/env ]; then
-              curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-            fi
             source /root/.cargo/env
-            if [ ! -d /opt/crypto-arb-bot/.git ]; then
-              rm -rf /opt/crypto-arb-bot
-              git clone https://github.com/Abishek17703/crypto-arb-bot.git /opt/crypto-arb-bot
-            fi
             cd /opt/crypto-arb-bot
             git fetch origin main && git reset --hard origin/main
             cargo build --release
