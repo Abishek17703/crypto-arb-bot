@@ -141,3 +141,80 @@ jobs:
             --metrics "UnblendedCost" "NetUnblendedCost" \
             --output table 2>&1 || true
           aws freetier get-free-tier-usage --output table 2>&1 || true
+
+      - name: Run Live Binance Spot Testnet WS v3 Paper Execution & Verify Binance Order Book Fills
+        env:
+          BINANCE_TESTNET_API_KEY: ${{ secrets.BINANCE_API_KEY }}
+          BINANCE_TESTNET_API_SECRET: ${{ secrets.BINANCE_API_SECRET }}
+        run: |
+          echo "================================================================================"
+          echo "   1. QUERYING BINANCE SPOT TESTNET WALLET BALANCES (BEFORE PAPER RUN)"
+          echo "================================================================================"
+          python3 -c '
+          import hmac, hashlib, time, urllib.request, json, os
+          key = os.environ["BINANCE_TESTNET_API_KEY"]
+          secret = os.environ["BINANCE_TESTNET_API_SECRET"].encode()
+          ts = int(time.time() * 1000)
+          qs = f"recvWindow=5000&timestamp={ts}"
+          sig = hmac.new(secret, qs.encode(), hashlib.sha256).hexdigest()
+          req = urllib.request.Request(
+              f"https://testnet.binance.vision/api/v3/account?{qs}&signature={sig}",
+              headers={"X-MBX-APIKEY": key}
+          )
+          with urllib.request.urlopen(req) as resp:
+              data = json.loads(resp.read().decode())
+              bals = [b for b in data.get("balances", []) if float(b["free"]) > 0 or b["asset"] in ("USDT","FDUSD","BTC","ETH","SOL","BNB")]
+              print("Account Type:", data.get("accountType"), "| CanTrade:", data.get("canTrade"))
+              for b in bals:
+                  if b["asset"] in ("USDT","FDUSD","BTC","ETH","SOL","BNB","USDC"):
+                      print(f"  - {b[\"asset\"]:6s} : Free = {b[\"free\"]} | Locked = {b[\"locked\"]}")
+          '
+
+          echo -e "\n================================================================================"
+          echo "   2. COMPILING & EXECUTING RUST HFT BOT AGAINST BINANCE SPOT TESTNET WS v3"
+          echo "================================================================================"
+          cargo build --release
+          ./target/release/crypto-arb-bot --total-capital 10.0 --testnet --realistic --pin-core 0 --ping-bench --duration-secs 10
+
+          echo -e "\n================================================================================"
+          echo "   3. VERIFYING EXECUTED ORDERS & BALANCES INSIDE BINANCE SPOT TESTNET"
+          echo "================================================================================"
+          python3 -c '
+          import hmac, hashlib, time, urllib.request, json, os
+          key = os.environ["BINANCE_TESTNET_API_KEY"]
+          secret = os.environ["BINANCE_TESTNET_API_SECRET"].encode()
+
+          for sym in ["BNBUSDT", "BTCUSDT", "ETHUSDT", "SOLUSDT"]:
+              ts = int(time.time() * 1000)
+              qs = f"limit=5&recvWindow=5000&symbol={sym}&timestamp={ts}"
+              sig = hmac.new(secret, qs.encode(), hashlib.sha256).hexdigest()
+              req = urllib.request.Request(
+                  f"https://testnet.binance.vision/api/v3/myTrades?{qs}&signature={sig}",
+                  headers={"X-MBX-APIKEY": key}
+              )
+              try:
+                  with urllib.request.urlopen(req) as resp:
+                      trades = json.loads(resp.read().decode())
+                      if trades:
+                          print(f"\nRecent Verified Binance Testnet Fills for {sym} ({len(trades)} shown):")
+                          for t in trades[-3:]:
+                              side = "BUY" if t.get("isBuyer") else "SELL"
+                              print(f"  [Trade #{t[\"id\"]}] OrderID={t[\"orderId\"]} | {side} {t[\"qty\"]} {sym} @ ${t[\"price\"]} (QuoteQty=${t[\"quoteQty\"]})")
+              except Exception as e:
+                  print(f"Error querying {sym}: {e}")
+
+          ts = int(time.time() * 1000)
+          qs = f"recvWindow=5000&timestamp={ts}"
+          sig = hmac.new(secret, qs.encode(), hashlib.sha256).hexdigest()
+          req = urllib.request.Request(
+              f"https://testnet.binance.vision/api/v3/account?{qs}&signature={sig}",
+              headers={"X-MBX-APIKEY": key}
+          )
+          with urllib.request.urlopen(req) as resp:
+              data = json.loads(resp.read().decode())
+              print("\nUpdated Binance Spot Testnet Balances (AFTER PAPER RUN):")
+              for b in data.get("balances", []):
+                  if b["asset"] in ("USDT","FDUSD","BTC","ETH","SOL","BNB","USDC"):
+                      print(f"  - {b[\"asset\"]:6s} : Free = {b[\"free\"]} | Locked = {b[\"locked\"]}")
+          '
+
