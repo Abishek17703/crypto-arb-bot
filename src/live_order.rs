@@ -327,14 +327,14 @@ impl LiveBinanceOrderEngine {
         // matching engine executes and fills all 3 legs immediately (`status: FILLED`) while our engine tracks
         // exact live-orderbook PnL. In live production mode, we use strict LIMIT IOC orders.
         let (leg1_ws_payload, leg2_ws_payload, leg3_ws_payload) = if self.testnet_mode {
-            // Testnet Leg 1: USDT -> BNB (`BNBUSDT` BUY MARKET quoteOrderQty)
+            // Testnet Leg 1: USDT -> FDUSD (`FDUSDUSDT` BUY MARKET quoteOrderQty - 1:1 Stablecoin, zero volatile exposure)
             let q1 = format!(
-                "apiKey={}&quoteOrderQty={:.2}&recvWindow=5000&side=BUY&symbol=BNBUSDT&timestamp={}&type=MARKET",
+                "apiKey={}&quoteOrderQty={:.2}&recvWindow=5000&side=BUY&symbol=FDUSDUSDT&timestamp={}&type=MARKET",
                 self.api_key, usdt_notional, ts_ms
             );
             let sig1 = sign_hmac_sha256_hex(&self.api_secret, q1.as_bytes());
             let l1 = format!(
-                r#"{{"id":"arb-{}-1","method":"order.place","params":{{"apiKey":"{}","symbol":"BNBUSDT","side":"BUY","type":"MARKET","quoteOrderQty":"{:.2}","recvWindow":5000,"timestamp":{},"signature":"{}"}}}}"#,
+                r#"{{"id":"arb-{}-1","method":"order.place","params":{{"apiKey":"{}","symbol":"FDUSDUSDT","side":"BUY","type":"MARKET","quoteOrderQty":"{:.2}","recvWindow":5000,"timestamp":{},"signature":"{}"}}}}"#,
                 bundle_id, self.api_key, usdt_notional, ts_ms, sig1
             );
 
