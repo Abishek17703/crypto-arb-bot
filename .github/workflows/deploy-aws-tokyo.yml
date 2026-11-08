@@ -228,9 +228,9 @@ jobs:
           sudo env BINANCE_TESTNET_API_KEY="$BINANCE_TESTNET_API_KEY" \
                    BINANCE_TESTNET_API_SECRET="$BINANCE_TESTNET_API_SECRET" \
                    /opt/crypto-arb-bot/target/release/crypto-arb-bot \
-                   --total-capital 10.0 --testnet --realistic --pin-core 0 --ping-bench --duration-secs 10
+                   --total-capital 10.0 --testnet --sim --realistic --pin-core 0 --ping-bench --duration-secs 4
 
-          # Update the 24/7 background systemd service with Testnet keys
+          # Update the 24/7 background systemd service with Testnet keys on LIVE production orderbooks
           sudo bash -c "cat << EOF > /etc/systemd/system/crypto-arb-bot.service
           [Unit]
           Description=Ultra-Low Latency Rust Crypto Arbitrage Engine (\\\$10 Capital Guard)
@@ -241,7 +241,7 @@ jobs:
           WorkingDirectory=/opt/crypto-arb-bot
           Environment=\"BINANCE_TESTNET_API_KEY=$BINANCE_TESTNET_API_KEY\"
           Environment=\"BINANCE_TESTNET_API_SECRET=$BINANCE_TESTNET_API_SECRET\"
-          ExecStart=/opt/crypto-arb-bot/target/release/crypto-arb-bot --total-capital 10.0 --testnet --realistic --pin-core 0 --ping-bench --duration-secs 0
+          ExecStart=/opt/crypto-arb-bot/target/release/crypto-arb-bot --total-capital 10.0 --testnet --min-net-bps 1.5 --realistic --pin-core 0 --ping-bench --duration-secs 0
           Restart=always
           RestartSec=5
 
