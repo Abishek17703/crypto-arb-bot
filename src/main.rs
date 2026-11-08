@@ -321,7 +321,30 @@ async fn main() {
             if let Some(hft_sig) =
                 tri_detector.scan_hft_obi_scalp(&matrix, event.symbol, event.timestamp_ns)
             {
-                let _ = hft_engine.try_execute(&hft_sig);
+                if let Some(hft_trade) = hft_engine.try_execute(&hft_sig) {
+                    if let Some(bundle) = live_signer.build_and_sign_triangular_loop(
+                        hft_sig.symbol,
+                        hft_trade.notional_usdt,
+                        hft_sig.buy_ask_price,
+                        hft_sig.sell_bid_price,
+                    ) {
+                        if hft_trade.id <= 4 {
+                            info!(
+                                "[SIGNED HFT-OBI #{}] {} | Pre-Staged Dispatch in {} ns | Notional: ${:.2} | Net PnL: {:+.4} USDT | Equity: ${:.4}",
+                                bundle.bundle_id,
+                                hft_trade.route_desc,
+                                bundle.signing_latency_ns,
+                                hft_trade.notional_usdt,
+                                hft_trade.net_profit_usdt,
+                                hft_trade.account_equity_usdt
+                            );
+                        }
+                    }
+
+                    live_signer
+                        .circuit_breaker
+                        .record_trade_outcome(hft_trade.net_profit_usdt, hft_trade.legged_out);
+                }
             }
 
             // 3. Evaluate Cross-Exchange 5x Perp ($5 Binance + $5 Bybit)
