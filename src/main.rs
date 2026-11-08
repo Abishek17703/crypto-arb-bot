@@ -34,6 +34,10 @@ struct Args {
     #[arg(long, default_value_t = false)]
     live_armed: bool,
 
+    /// Execute signed WS v3 orders against Binance Spot Testnet (wss://ws-api.testnet.binance.vision/ws-api/v3) while reading Live Production Orderbooks
+    #[arg(long, default_value_t = true)]
+    testnet: bool,
+
     /// Run live exchange TCP_NODELAY network ping & RTT profiler
     #[arg(long, default_value_t = false)]
     ping_bench: bool,
@@ -206,7 +210,8 @@ async fn main() {
         );
     }
 
-    let mut live_signer = LiveBinanceOrderEngine::from_env(args.total_capital, args.live_armed);
+    let mut live_signer =
+        LiveBinanceOrderEngine::from_env(args.total_capital, args.live_armed, args.testnet).await;
 
     let matrix = Arc::new(OrderBookMatrix::new());
     let (tx, mut rx) = unbounded_channel::<MarketUpdateEvent>();
