@@ -1,8 +1,16 @@
 use crate::types::Symbol;
+use futures_util::{SinkExt, StreamExt};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
+use tokio_tungstenite::{connect_async_with_config, tungstenite::Message};
 use tracing::{error, info, warn};
+
+/// Official Binance Spot Testnet WebSocket v3 API Endpoint
+pub const BINANCE_TESTNET_WS_V3_URL: &str = "wss://ws-api.testnet.binance.vision/ws-api/v3";
+/// Official Binance Live Production WebSocket v3 API Endpoint
+pub const BINANCE_LIVE_WS_V3_URL: &str = "wss://ws-api.binance.com:443/ws-api/v3";
 
 /// Zero-allocation HMAC-SHA256 implementation (RFC 2104) using pre-existing `sha2` crate.
 /// Computes a 64-character lowercase hex signature in ~380 nanoseconds.
@@ -109,7 +117,7 @@ impl CircuitBreaker {
     }
 }
 
-/// Signed Binance WebSocket API v3 (`wss://ws-api.binance.com:443/ws-api/v3`) Order Bundle
+/// Signed Binance WebSocket API v3 Order Bundle
 /// for a 3-Leg Zero-Fee FDUSD Triangular Arbitrage Loop:
 ///   Leg 1: `FDUSDUSDT` BUY (0.00% Maker / Promo Taker)
 ///   Leg 2: `{BTC|ETH|SOL}FDUSD` BUY (0.00% Fee Promo)
@@ -119,6 +127,7 @@ pub struct SignedTriangularOrderBundle {
     pub bundle_id: u64,
     pub symbol: Symbol,
     pub live_armed: bool,
+    pub testnet_mode: bool,
     pub signing_latency_ns: u64,
     pub leg1_ws_payload: String,
     pub leg2_ws_payload: String,
@@ -129,15 +138,31 @@ pub struct LiveBinanceOrderEngine {
     api_key: String,
     api_secret: Vec<u8>,
     pub live_armed: bool,
+    pub testnet_mode: bool,
     pub has_real_credentials: bool,
     pub circuit_breaker: CircuitBreaker,
     pub signed_bundles_count: u64,
+    pub transmitted_bundles_count: u64,
+    ws_tx: Option<UnboundedSender<SignedTriangularOrderBundle>>,
 }
 
 impl LiveBinanceOrderEngine {
-    pub fn from_env(initial_capital_usdt: f64, live_armed: bool) -> Self {
-        let env_key = std::env::var("BINANCE_API_KEY").unwrap_or_default();
-        let env_secret = std::env::var("BINANCE_API_SECRET").unwrap_or_default();
+    pub async fn from_env(
+        initial_capital_usdt: f64,
+        live_armed: bool,
+        testnet_mode: bool,
+    ) -> Self {
+        let env_key = std::env::var("BINANCE_TESTNET_API_KEY")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .or_else(|| std::env::var("BINANCE_API_KEY").ok())
+            .unwrap_or_default();
+        let env_secret = std::env::var("BINANCE_TESTNET_API_SECRET")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .or_else(|| std::env::var("BINANCE_API_SECRET").ok())
+            .unwrap_or_default();
+
         let has_real_credentials = !env_key.is_empty() && !env_secret.is_empty();
 
         let api_key = if has_real_credentials {
@@ -151,26 +176,94 @@ impl LiveBinanceOrderEngine {
             b"SHADOW_DEMO_BINANCE_SECRET_KEY_ULTRA_FAST_HFT".to_vec()
         };
 
-        if live_armed && !has_real_credentials {
-            warn!("--live-armed passed, but BINANCE_API_KEY / BINANCE_API_SECRET env vars are not set! Running in Live-Signed Shadow Mode (constructs & HMAC-signs real Binance WS v3 payloads without transmitting).");
-        } else if has_real_credentials && live_armed {
-            info!("🔥 LIVE BINANCE EXECUTION ARMED with user API key! Circuit Breaker Floor = ${:.2} USDT", initial_capital_usdt * 0.96);
+        let should_transmit = (live_armed || testnet_mode) && has_real_credentials;
+        let ws_endpoint = if testnet_mode {
+            BINANCE_TESTNET_WS_V3_URL
         } else {
-            info!("🛡️ Running in Live-Signed Shadow Mode (Full HMAC-SHA256 signing active; pass --live-armed with BINANCE_API_KEY to transmit real orders).");
+            BINANCE_LIVE_WS_V3_URL
+        };
+
+        let mut ws_tx = None;
+        if should_transmit {
+            let (tx, mut rx) = unbounded_channel::<SignedTriangularOrderBundle>();
+            ws_tx = Some(tx);
+            let endpoint = ws_endpoint.to_string();
+
+            tokio::spawn(async move {
+                match tokio::time::timeout(
+                    Duration::from_secs(4),
+                    connect_async_with_config(&endpoint, None, true),
+                )
+                .await
+                {
+                    Ok(Ok((ws_stream, _))) => {
+                        info!(
+                            "⚡ Connected TCP_NODELAY Execution Socket to Binance WS v3: {}",
+                            endpoint
+                        );
+                        let (mut write, mut read) = ws_stream.split();
+
+                        // Spawn response reader for Binance WS v3 execution ACKs
+                        tokio::spawn(async move {
+                            while let Some(Ok(msg)) = read.next().await {
+                                if let Message::Text(txt) = msg {
+                                    info!("📥 [BINANCE WS v3 ACK]: {}", txt);
+                                }
+                            }
+                        });
+
+                        // Transmit signed 3-leg bundles in pipeline
+                        while let Some(bundle) = rx.recv().await {
+                            let _ = write.send(Message::Text(bundle.leg1_ws_payload.into())).await;
+                            let _ = write.send(Message::Text(bundle.leg2_ws_payload.into())).await;
+                            let _ = write.send(Message::Text(bundle.leg3_ws_payload.into())).await;
+                        }
+                    }
+                    Ok(Err(e)) => {
+                        warn!("Could not connect to Binance WS v3 ({}): {}", endpoint, e);
+                    }
+                    Err(_) => {
+                        warn!("Timeout connecting to Binance WS v3 ({})", endpoint);
+                    }
+                }
+            });
+        }
+
+        if testnet_mode && has_real_credentials {
+            info!(
+                "🧪 BINANCE SPOT TESTNET PAPER EXECUTION ARMED ({}) with your Testnet API key!",
+                BINANCE_TESTNET_WS_V3_URL
+            );
+        } else if testnet_mode && !has_real_credentials {
+            warn!(
+                "--testnet passed, but BINANCE_TESTNET_API_KEY / BINANCE_TESTNET_API_SECRET env vars are not set yet! Constructing & signing real Testnet WS v3 payloads in local shadow mode."
+            );
+        } else if live_armed && has_real_credentials {
+            info!(
+                "🔥 LIVE BINANCE EXECUTION ARMED with user API key! Circuit Breaker Floor = ${:.2} USDT",
+                initial_capital_usdt * 0.96
+            );
+        } else {
+            info!(
+                "🛡️ Running in Live-Signed Shadow Mode (Full HMAC-SHA256 signing active; set BINANCE_TESTNET_API_KEY & --testnet to execute on testnet.binance.vision)."
+            );
         }
 
         Self {
             api_key,
             api_secret,
-            live_armed: live_armed && has_real_credentials,
+            live_armed: should_transmit,
+            testnet_mode,
             has_real_credentials,
-            circuit_breaker: CircuitBreaker::new(initial_capital_usdt, 4.0), // Max 4% drawdown ($9.60 floor on $10)
+            circuit_breaker: CircuitBreaker::new(initial_capital_usdt, 4.0),
             signed_bundles_count: 0,
+            transmitted_bundles_count: 0,
+            ws_tx,
         }
     }
 
     /// Constructs and cryptographically signs all 3 legs of the Binance Zero-Fee FDUSD Triangular Loop
-    /// using Binance WebSocket API v3 (`order.place`) format.
+    /// using Binance WebSocket API v3 (`order.place`) format, and transmits over WS v3 if armed.
     #[inline(always)]
     pub fn build_and_sign_triangular_loop(
         &mut self,
@@ -202,8 +295,10 @@ impl LiveBinanceOrderEngine {
         let formatted_qty = format!("{:.prec$}", coin_qty, prec = qty_precision);
 
         // Leg 1: Convert USDT -> FDUSD (`FDUSDUSDT` BUY @ 1.0000)
+        // Strict ASCII alphabetical parameter order required by Binance WS v3 HMAC-SHA256:
+        // apiKey, price, quantity, recvWindow, side, symbol, timeInForce, timestamp, type
         let q1 = format!(
-            "apiKey={}&Price=1.0000&quantity={:.2}&recvWindow=1000&side=BUY&symbol=FDUSDUSDT&timeInForce=IOC&timestamp={}&type=LIMIT",
+            "apiKey={}&price=1.0000&quantity={:.2}&recvWindow=1000&side=BUY&symbol=FDUSDUSDT&timeInForce=IOC&timestamp={}&type=LIMIT",
             self.api_key, usdt_notional, ts_ms
         );
         let sig1 = sign_hmac_sha256_hex(&self.api_secret, q1.as_bytes());
@@ -236,14 +331,23 @@ impl LiveBinanceOrderEngine {
 
         let signing_latency_ns = t0.elapsed().as_nanos() as u64;
 
-        Some(SignedTriangularOrderBundle {
+        let bundle = SignedTriangularOrderBundle {
             bundle_id,
             symbol,
             live_armed: self.live_armed,
+            testnet_mode: self.testnet_mode,
             signing_latency_ns,
             leg1_ws_payload,
             leg2_ws_payload,
             leg3_ws_payload,
-        })
+        };
+
+        if let Some(tx) = &self.ws_tx {
+            if tx.send(bundle.clone()).is_ok() {
+                self.transmitted_bundles_count += 1;
+            }
+        }
+
+        Some(bundle)
     }
 }
