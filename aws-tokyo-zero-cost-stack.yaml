@@ -25,14 +25,11 @@ Parameters:
     Description: GitHub repository URL containing the crypto-arb-bot Rust codebase
 
 Resources:
-  # 1. Minimal Security Group (Outbound HTTPS/WSS to Binance/Bybit/OKX only; no open inbound ports required)
+  # 1. Minimal Security Group (AWS allows all outbound HTTPS/WSS traffic by default; zero inbound ports open)
   ArbBotSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
       GroupDescription: Ultra-low latency outbound WebSocket access for crypto-arb-bot
-      SecurityGroupEgress:
-        - IpProtocol: -1
-          CidrIp: 0.0.0.0/0
 
   # 2. Free-Tier EC2 Instance (t3.micro + Standard CPU Credit Lock = $0.00 Overages)
   ArbBotTokyoInstance:
