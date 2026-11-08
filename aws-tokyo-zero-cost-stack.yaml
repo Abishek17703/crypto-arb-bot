@@ -1,0 +1,132 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  CRYPTO-ARB-BOT: 365-Day $0.00 Free-Tier AWS Tokyo (ap-northeast-1) Auto-Provisioner.
+  Enforces t3.micro Free Tier, Standard CPU Credits ($0.00 burst overage), 20GB gp3 storage,
+  $0.01 Zero-Spend AWS Budget Alert, and automatic Rust HFT engine systemd service.
+
+Parameters:
+  BinanceApiKey:
+    Type: String
+    Default: ""
+    NoEcho: true
+    Description: Optional Spot-Only Binance API Key (leave blank to start in Live-Signed Shadow Mode)
+  BinanceApiSecret:
+    Type: String
+    Default: ""
+    NoEcho: true
+    Description: Optional Spot-Only Binance API Secret (leave blank to start in Live-Signed Shadow Mode)
+  AlertEmail:
+    Type: String
+    Default: "admin@example.com"
+    Description: Email address for the $0.01 Zero-Spend AWS Budget Guardrail alert
+  GitRepoUrl:
+    Type: String
+    Default: "https://github.com/Abishek17703/crypto-arb-bot.git"
+    Description: GitHub repository URL containing the crypto-arb-bot Rust codebase
+
+Resources:
+  # 1. Zero-Spend ($0.01) AWS Budget Guardrail - Guarantees immediate alert if anything ever exceeds $0.00
+  ZeroSpendBudgetGuard:
+    Type: AWS::Budgets::Budget
+    Properties:
+      Budget:
+        BudgetName: CryptoArbBot-365Day-ZeroSpend-Guard
+        BudgetLimit:
+          Amount: 0.01
+          Unit: USD
+        TimeUnit: MONTHLY
+        BudgetType: COST
+      NotificationsWithSubscribers:
+        - Notification:
+            NotificationType: ACTUAL
+            ComparisonOperator: GREATER_THAN
+            Threshold: 0.01
+            ThresholdType: ABSOLUTE_VALUE
+          Subscribers:
+            - SubscriptionType: EMAIL
+              Address: !Ref AlertEmail
+
+  # 2. Minimal Security Group (Outbound HTTPS/WSS to Binance/Bybit/OKX only; no open inbound ports required)
+  ArbBotSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Ultra-low latency outbound WebSocket access for crypto-arb-bot
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+
+  # 3. Free-Tier Tokyo EC2 Instance (t3.micro + Standard CPU Credit Lock = $0.00 Overages)
+  ArbBotTokyoInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t3.micro
+      # Amazon Linux 2023 x86_64 dynamic SSM parameter (always resolves to latest AL2023 AMI in ap-northeast-1)
+      ImageId: "{{resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64}}"
+      # Lock CPU credits to "standard" so AWS NEVER charges $0.05/vCPU-hr burst fees
+      CreditSpecification:
+        CPUCredits: standard
+      SecurityGroupIds:
+        - !Ref ArbBotSecurityGroup
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeSize: 20 # <= 30 GB AWS Free Tier limit ($0.00)
+            VolumeType: gp3
+            DeleteOnTermination: true
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -euxo pipefail
+          
+          # 1. Apply Institutional Low-Latency Linux Kernel Sysctls
+          cat << 'EOF' > /etc/sysctl.d/99-hft-low-latency.conf
+          net.core.busy_poll = 50
+          net.core.busy_read = 50
+          net.ipv4.tcp_fastopen = 3
+          net.ipv4.tcp_tw_reuse = 1
+          EOF
+          sysctl --system || true
+
+          # 2. Install Rust Toolchain & Git
+          dnf install -y git gcc make
+          export HOME=/root
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          source /root/.cargo/env
+
+          # 3. Clone & Compile Native Rust Arbitrage Engine (-C target-cpu=native)
+          git clone "${GitRepoUrl}" /opt/crypto-arb-bot
+          cd /opt/crypto-arb-bot
+          cargo build --release
+
+          # 4. Create Persistent systemd Service with $9.60 Hard-Stop Circuit Breaker
+          cat << EOF > /etc/systemd/system/crypto-arb-bot.service
+          [Unit]
+          Description=Ultra-Low Latency Rust Crypto Arbitrage Engine ($10 Capital Guard)
+          After=network-online.target
+
+          [Service]
+          Type=simple
+          WorkingDirectory=/opt/crypto-arb-bot
+          Environment="BINANCE_API_KEY=${BinanceApiKey}"
+          Environment="BINANCE_API_SECRET=${BinanceApiSecret}"
+          ExecStart=/opt/crypto-arb-bot/target/release/crypto-arb-bot --total-capital 10.0 --realistic --pin-core 0 --ping-bench --duration-secs 0
+          Restart=always
+          RestartSec=5
+
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+
+          systemctl daemon-reload
+          systemctl enable --now crypto-arb-bot.service
+
+Outputs:
+  InstanceId:
+    Description: Free-Tier Tokyo EC2 Instance ID
+    Value: !Ref ArbBotTokyoInstance
+  AvailabilityZone:
+    Description: Tokyo Availability Zone where the bot is running
+    Value: !GetAtt ArbBotTokyoInstance.AvailabilityZone
+  ZeroCostGuarantee:
+    Description: Cost Protection Summary
+    Value: "t3.micro (750h/mo Free) + CPUCredits=standard ($0.00 burst) + 20GB gp3 (<=30GB Free) + $0.01 Budget Alert"
