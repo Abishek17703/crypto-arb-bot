@@ -17,6 +17,14 @@ on:
         required: false
         type: boolean
         default: true
+      binance_api_key:
+        description: 'Binance Spot Testnet or Live API Key'
+        required: false
+        default: ''
+      binance_api_secret:
+        description: 'Binance Spot Testnet or Live API Secret'
+        required: false
+        default: ''
 
 jobs:
   deploy-zero-cost:
@@ -53,14 +61,16 @@ jobs:
         run: |
           REGION="${{ steps.region_probe.outputs.aws_region }}"
           REPO_URL="https://github.com/${{ github.repository }}.git"
+          B_KEY="${{ inputs.binance_api_key || secrets.BINANCE_API_KEY }}"
+          B_SEC="${{ inputs.binance_api_secret || secrets.BINANCE_API_SECRET }}"
           aws cloudformation deploy --region "$REGION" \
             --template-file aws-tokyo-zero-cost-stack.yaml \
             --stack-name crypto-arb-bot-zero-cost \
             --parameter-overrides \
               AlertEmail="${{ inputs.alert_email }}" \
               GitRepoUrl="$REPO_URL" \
-              BinanceApiKey="${{ secrets.BINANCE_API_KEY }}" \
-              BinanceApiSecret="${{ secrets.BINANCE_API_SECRET }}" \
+              BinanceApiKey="$B_KEY" \
+              BinanceApiSecret="$B_SEC" \
             --no-fail-on-empty-changeset
 
       - name: Full AWS Account $0.00 Guarantee Audit, Unused Resource Cleanup & Credits Inspection
@@ -144,8 +154,8 @@ jobs:
 
       - name: Run Live Binance Spot Testnet WS v3 Paper Execution & Verify Binance Order Book Fills
         env:
-          BINANCE_TESTNET_API_KEY: ${{ secrets.BINANCE_API_KEY }}
-          BINANCE_TESTNET_API_SECRET: ${{ secrets.BINANCE_API_SECRET }}
+          BINANCE_TESTNET_API_KEY: ${{ inputs.binance_api_key || secrets.BINANCE_API_KEY }}
+          BINANCE_TESTNET_API_SECRET: ${{ inputs.binance_api_secret || secrets.BINANCE_API_SECRET }}
         run: |
           echo "================================================================================"
           echo "   1. QUERYING BINANCE SPOT TESTNET WALLET BALANCES (BEFORE PAPER RUN)"
