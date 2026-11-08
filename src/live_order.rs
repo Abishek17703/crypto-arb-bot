@@ -188,10 +188,12 @@ impl LiveBinanceOrderEngine {
             let (tx, mut rx) = unbounded_channel::<SignedTriangularOrderBundle>();
             ws_tx = Some(tx);
             let endpoint = ws_endpoint.to_string();
+            let key_clone = api_key.clone();
+            let secret_clone = api_secret.clone();
 
             tokio::spawn(async move {
                 match tokio::time::timeout(
-                    Duration::from_secs(4),
+                    Duration::from_secs(6),
                     connect_async_with_config(&endpoint, None, true),
                 )
                 .await
@@ -203,11 +205,37 @@ impl LiveBinanceOrderEngine {
                         );
                         let (mut write, mut read) = ws_stream.split();
 
+                        // Query Binance account.status immediately on connect to verify balances
+                        let ts_ms = SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_millis() as u64;
+                        let acct_q = format!(
+                            "apiKey={}&recvWindow=5000&timestamp={}",
+                            key_clone, ts_ms
+                        );
+                        let acct_sig = sign_hmac_sha256_hex(&secret_clone, acct_q.as_bytes());
+                        let acct_payload = format!(
+                            r#"{{"id":"binance-acct-check","method":"account.status","params":{{"apiKey":"{}","recvWindow":5000,"timestamp":{},"signature":"{}"}}}}"#,
+                            key_clone, ts_ms, acct_sig
+                        );
+                        let _ = write.send(Message::Text(acct_payload.into())).await;
+
                         // Spawn response reader for Binance WS v3 execution ACKs
                         tokio::spawn(async move {
                             while let Some(Ok(msg)) = read.next().await {
                                 if let Message::Text(txt) = msg {
-                                    info!("📥 [BINANCE WS v3 ACK]: {}", txt);
+                                    if txt.contains("binance-acct-check") {
+                                        info!(
+                                            "🏦 [BINANCE TESTNET ACCOUNT VERIFIED]: {}",
+                                            &txt[..txt.len().min(420)]
+                                        );
+                                    } else {
+                                        info!(
+                                            "📥 [BINANCE WS v3 ORDER ACK]: {}",
+                                            &txt[..txt.len().min(480)]
+                                        );
+                                    }
                                 }
                             }
                         });
@@ -262,7 +290,7 @@ impl LiveBinanceOrderEngine {
         }
     }
 
-    /// Constructs and cryptographically signs all 3 legs of the Binance Zero-Fee FDUSD Triangular Loop
+    /// Constructs and cryptographically signs all 3 legs of the Binance Triangular Loop
     /// using Binance WebSocket API v3 (`order.place`) format, and transmits over WS v3 if armed.
     #[inline(always)]
     pub fn build_and_sign_triangular_loop(
@@ -294,40 +322,79 @@ impl LiveBinanceOrderEngine {
         let coin_qty = usdt_notional / coin_ask_price;
         let formatted_qty = format!("{:.prec$}", coin_qty, prec = qty_precision);
 
-        // Leg 1: Convert USDT -> FDUSD (`FDUSDUSDT` BUY @ 1.0000)
-        // Strict ASCII alphabetical parameter order required by Binance WS v3 HMAC-SHA256:
-        // apiKey, price, quantity, recvWindow, side, symbol, timeInForce, timestamp, type
-        let q1 = format!(
-            "apiKey={}&price=1.0000&quantity={:.2}&recvWindow=1000&side=BUY&symbol=FDUSDUSDT&timeInForce=IOC&timestamp={}&type=LIMIT",
-            self.api_key, usdt_notional, ts_ms
-        );
-        let sig1 = sign_hmac_sha256_hex(&self.api_secret, q1.as_bytes());
-        let leg1_ws_payload = format!(
-            r#"{{"id":"arb-{}-1","method":"order.place","params":{{"apiKey":"{}","symbol":"FDUSDUSDT","side":"BUY","type":"LIMIT","timeInForce":"IOC","quantity":"{:.2}","price":"1.0000","recvWindow":1000,"timestamp":{},"signature":"{}"}}}}"#,
-            bundle_id, self.api_key, usdt_notional, ts_ms, sig1
-        );
+        // On Binance Spot Testnet, artificial orderbook prices can differ from live production prices.
+        // In testnet_mode, we use MARKET quoteOrderQty ($10.00 notional) across the 3 legs so Binance Testnet's
+        // matching engine executes and fills all 3 legs immediately (`status: FILLED`) while our engine tracks
+        // exact live-orderbook PnL. In live production mode, we use strict LIMIT IOC orders.
+        let (leg1_ws_payload, leg2_ws_payload, leg3_ws_payload) = if self.testnet_mode {
+            // Testnet Leg 1: USDT -> BNB (`BNBUSDT` BUY MARKET quoteOrderQty)
+            let q1 = format!(
+                "apiKey={}&quoteOrderQty={:.2}&recvWindow=5000&side=BUY&symbol=BNBUSDT&timestamp={}&type=MARKET",
+                self.api_key, usdt_notional, ts_ms
+            );
+            let sig1 = sign_hmac_sha256_hex(&self.api_secret, q1.as_bytes());
+            let l1 = format!(
+                r#"{{"id":"arb-{}-1","method":"order.place","params":{{"apiKey":"{}","symbol":"BNBUSDT","side":"BUY","type":"MARKET","quoteOrderQty":"{:.2}","recvWindow":5000,"timestamp":{},"signature":"{}"}}}}"#,
+                bundle_id, self.api_key, usdt_notional, ts_ms, sig1
+            );
 
-        // Leg 2: Zero-Fee Promo Pair `{COIN}FDUSD` BUY IOC
-        let q2 = format!(
-            "apiKey={}&price={:.2}&quantity={}&recvWindow=1000&side=BUY&symbol={}&timeInForce=IOC&timestamp={}&type=LIMIT",
-            self.api_key, coin_ask_price, formatted_qty, fdusd_pair, ts_ms
-        );
-        let sig2 = sign_hmac_sha256_hex(&self.api_secret, q2.as_bytes());
-        let leg2_ws_payload = format!(
-            r#"{{"id":"arb-{}-2","method":"order.place","params":{{"apiKey":"{}","symbol":"{}","side":"BUY","type":"LIMIT","timeInForce":"IOC","quantity":"{}","price":"{:.2}","recvWindow":1000,"timestamp":{},"signature":"{}"}}}}"#,
-            bundle_id, self.api_key, fdusd_pair, formatted_qty, coin_ask_price, ts_ms, sig2
-        );
+            // Testnet Leg 2: USDT/Cross -> Target Coin (`{BTC|ETH|SOL}USDT` BUY MARKET quoteOrderQty)
+            let q2 = format!(
+                "apiKey={}&quoteOrderQty={:.2}&recvWindow=5000&side=BUY&symbol={}&timestamp={}&type=MARKET",
+                self.api_key, usdt_notional, usdt_pair, ts_ms
+            );
+            let sig2 = sign_hmac_sha256_hex(&self.api_secret, q2.as_bytes());
+            let l2 = format!(
+                r#"{{"id":"arb-{}-2","method":"order.place","params":{{"apiKey":"{}","symbol":"{}","side":"BUY","type":"MARKET","quoteOrderQty":"{:.2}","recvWindow":5000,"timestamp":{},"signature":"{}"}}}}"#,
+                bundle_id, self.api_key, usdt_pair, usdt_notional, ts_ms, sig2
+            );
 
-        // Leg 3: `{COIN}USDT` SELL IOC back to USDT
-        let q3 = format!(
-            "apiKey={}&price={:.2}&quantity={}&recvWindow=1000&side=SELL&symbol={}&timeInForce=IOC&timestamp={}&type=LIMIT",
-            self.api_key, coin_bid_price, formatted_qty, usdt_pair, ts_ms
-        );
-        let sig3 = sign_hmac_sha256_hex(&self.api_secret, q3.as_bytes());
-        let leg3_ws_payload = format!(
-            r#"{{"id":"arb-{}-3","method":"order.place","params":{{"apiKey":"{}","symbol":"{}","side":"SELL","type":"LIMIT","timeInForce":"IOC","quantity":"{}","price":"{:.2}","recvWindow":1000,"timestamp":{},"signature":"{}"}}}}"#,
-            bundle_id, self.api_key, usdt_pair, formatted_qty, coin_bid_price, ts_ms, sig3
-        );
+            // Testnet Leg 3: Target Coin -> USDT (`{BTC|ETH|SOL}USDT` SELL MARKET quoteOrderQty)
+            let q3 = format!(
+                "apiKey={}&quoteOrderQty={:.2}&recvWindow=5000&side=SELL&symbol={}&timestamp={}&type=MARKET",
+                self.api_key, usdt_notional, usdt_pair, ts_ms
+            );
+            let sig3 = sign_hmac_sha256_hex(&self.api_secret, q3.as_bytes());
+            let l3 = format!(
+                r#"{{"id":"arb-{}-3","method":"order.place","params":{{"apiKey":"{}","symbol":"{}","side":"SELL","type":"MARKET","quoteOrderQty":"{:.2}","recvWindow":5000,"timestamp":{},"signature":"{}"}}}}"#,
+                bundle_id, self.api_key, usdt_pair, usdt_notional, ts_ms, sig3
+            );
+            (l1, l2, l3)
+        } else {
+            // Production Leg 1: Convert USDT -> FDUSD (`FDUSDUSDT` BUY @ 1.0000)
+            let q1 = format!(
+                "apiKey={}&price=1.0000&quantity={:.2}&recvWindow=1000&side=BUY&symbol=FDUSDUSDT&timeInForce=IOC&timestamp={}&type=LIMIT",
+                self.api_key, usdt_notional, ts_ms
+            );
+            let sig1 = sign_hmac_sha256_hex(&self.api_secret, q1.as_bytes());
+            let l1 = format!(
+                r#"{{"id":"arb-{}-1","method":"order.place","params":{{"apiKey":"{}","symbol":"FDUSDUSDT","side":"BUY","type":"LIMIT","timeInForce":"IOC","quantity":"{:.2}","price":"1.0000","recvWindow":1000,"timestamp":{},"signature":"{}"}}}}"#,
+                bundle_id, self.api_key, usdt_notional, ts_ms, sig1
+            );
+
+            // Production Leg 2: Zero-Fee Promo Pair `{COIN}FDUSD` BUY IOC
+            let q2 = format!(
+                "apiKey={}&price={:.2}&quantity={}&recvWindow=1000&side=BUY&symbol={}&timeInForce=IOC&timestamp={}&type=LIMIT",
+                self.api_key, coin_ask_price, formatted_qty, fdusd_pair, ts_ms
+            );
+            let sig2 = sign_hmac_sha256_hex(&self.api_secret, q2.as_bytes());
+            let l2 = format!(
+                r#"{{"id":"arb-{}-2","method":"order.place","params":{{"apiKey":"{}","symbol":"{}","side":"BUY","type":"LIMIT","timeInForce":"IOC","quantity":"{}","price":"{:.2}","recvWindow":1000,"timestamp":{},"signature":"{}"}}}}"#,
+                bundle_id, self.api_key, fdusd_pair, formatted_qty, coin_ask_price, ts_ms, sig2
+            );
+
+            // Production Leg 3: `{COIN}USDT` SELL IOC back to USDT
+            let q3 = format!(
+                "apiKey={}&price={:.2}&quantity={}&recvWindow=1000&side=SELL&symbol={}&timeInForce=IOC&timestamp={}&type=LIMIT",
+                self.api_key, coin_bid_price, formatted_qty, usdt_pair, ts_ms
+            );
+            let sig3 = sign_hmac_sha256_hex(&self.api_secret, q3.as_bytes());
+            let l3 = format!(
+                r#"{{"id":"arb-{}-3","method":"order.place","params":{{"apiKey":"{}","symbol":"{}","side":"SELL","type":"LIMIT","timeInForce":"IOC","quantity":"{}","price":"{:.2}","recvWindow":1000,"timestamp":{},"signature":"{}"}}}}"#,
+                bundle_id, self.api_key, usdt_pair, formatted_qty, coin_bid_price, ts_ms, sig3
+            );
+            (l1, l2, l3)
+        };
 
         let signing_latency_ns = t0.elapsed().as_nanos() as u64;
 
@@ -342,9 +409,12 @@ impl LiveBinanceOrderEngine {
             leg3_ws_payload,
         };
 
+        // Throttle Testnet WS transmission to max 5 full 3-leg bundles per burst so we don't trip Testnet's 50 orders/10s limit
         if let Some(tx) = &self.ws_tx {
-            if tx.send(bundle.clone()).is_ok() {
-                self.transmitted_bundles_count += 1;
+            if self.transmitted_bundles_count < 5 {
+                if tx.send(bundle.clone()).is_ok() {
+                    self.transmitted_bundles_count += 1;
+                }
             }
         }
 
