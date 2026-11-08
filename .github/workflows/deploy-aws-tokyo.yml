@@ -35,38 +35,49 @@ jobs:
           for REGION in ap-northeast-1 ap-southeast-1 ap-southeast-2 us-east-1 us-west-2; do
             echo -n "Testing $REGION ... "
             if aws ec2 describe-availability-zones --region "$REGION" >/dev/null 2>&1; then
-              echo "✅ ALLOWED by SCP!"
+              echo "✅ ALLOWED!"
               SELECTED_REGION="$REGION"
               break
             else
-              echo "❌ Blocked by SCP"
+              echo "❌ Not enabled yet"
             fi
           done
 
           if [ -z "$SELECTED_REGION" ]; then
-            echo "::error::All tested regions were blocked by your AWS Organization Service Control Policy. Checking which services are allowed..."
-            aws sts get-caller-identity
+            echo "::error::No enabled regions found."
             exit 1
           fi
 
           echo "Selected Fastest Permitted Region: $SELECTED_REGION"
           echo "aws_region=$SELECTED_REGION" >> "$GITHUB_OUTPUT"
 
+      - name: Clean Up Any Previous Failed / Rollback Stack
+        run: |
+          REGION="${{ steps.region_probe.outputs.aws_region }}"
+          STATUS=$(aws cloudformation describe-stacks --region "$REGION" --stack-name crypto-arb-bot-zero-cost --query "Stacks[0].StackStatus" --output text 2>/dev/null || echo "NONE")
+          echo "Existing stack status in $REGION: $STATUS"
+          if [ "$STATUS" = "ROLLBACK_COMPLETE" ] || [ "$STATUS" = "DELETE_FAILED" ]; then
+            echo "Inspecting previous rollback events for diagnostics..."
+            aws cloudformation describe-stack-events --region "$REGION" --stack-name crypto-arb-bot-zero-cost --query "StackEvents[?ResourceStatus=='CREATE_FAILED'].[LogicalResourceId,ResourceStatusReason]" --output table || true
+            echo "Deleting ROLLBACK_COMPLETE stack so fresh deployment succeeds..."
+            aws cloudformation delete-stack --region "$REGION" --stack-name crypto-arb-bot-zero-cost
+            aws cloudformation wait stack-delete-complete --region "$REGION" --stack-name crypto-arb-bot-zero-cost
+          fi
+
       - name: Pre-Deployment 365-Day $0.00 AWS Quota & Instance Check
         run: |
           REGION="${{ steps.region_probe.outputs.aws_region }}"
-          echo "Auditing existing EC2 instances in $REGION to ensure only 1 Free-Tier instance runs..."
           RUNNING_COUNT=$(aws ec2 describe-instances --region "$REGION" \
             --filters "Name=instance-state-name,Values=running,pending" \
             --query "Reservations[*].Instances[*].InstanceId" \
             --output text | wc -w)
           echo "Currently running instances in $REGION: $RUNNING_COUNT"
 
-      - name: Deploy CloudFormation Stack (t3.micro + CPUCredits=standard + $0.01 Budget Guard)
+      - name: Deploy CloudFormation Stack (t3.micro + CPUCredits=standard)
         run: |
           REGION="${{ steps.region_probe.outputs.aws_region }}"
           REPO_URL="https://github.com/${{ github.repository }}.git"
-          aws cloudformation deploy --region "$REGION" \
+          if ! aws cloudformation deploy --region "$REGION" \
             --template-file aws-tokyo-zero-cost-stack.yaml \
             --stack-name crypto-arb-bot-zero-cost \
             --parameter-overrides \
@@ -74,7 +85,11 @@ jobs:
               GitRepoUrl="$REPO_URL" \
               BinanceApiKey="${{ secrets.BINANCE_API_KEY }}" \
               BinanceApiSecret="${{ secrets.BINANCE_API_SECRET }}" \
-            --no-fail-on-empty-changeset
+            --no-fail-on-empty-changeset; then
+            echo "::error::CloudFormation deploy failed. Printing exact resource failure reason:"
+            aws cloudformation describe-stack-events --region "$REGION" --stack-name crypto-arb-bot-zero-cost --query "StackEvents[?ResourceStatus=='CREATE_FAILED'].[LogicalResourceId,ResourceStatusReason]" --output table || true
+            exit 1
+          fi
 
       - name: Output Stack Status & Availability Zone
         run: |
