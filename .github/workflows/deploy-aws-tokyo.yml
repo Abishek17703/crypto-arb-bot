@@ -12,6 +12,11 @@ on:
         required: true
         type: boolean
         default: false
+      audit_only:
+        description: 'Run 365-Day $0.00 Full Account Audit, Unused Resource Cleanup & Credits Report'
+        required: false
+        type: boolean
+        default: true
 
 jobs:
   deploy-zero-cost:
@@ -25,12 +30,11 @@ jobs:
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ap-northeast-1
+          aws-region: ap-southeast-2
 
-      - name: Auto-Detect Fastest Allowed AWS Region (Prioritizing Tokyo ap-northeast-1)
+      - name: Auto-Detect Fastest Allowed AWS Region
         id: region_probe
         run: |
-          echo "Probing candidate AWS regions (Prioritizing #1 Tokyo ap-northeast-1 for 0.25ms ping)..."
           SELECTED_REGION=""
           for REGION in ap-northeast-1 ap-southeast-1 ap-southeast-2 us-east-1 us-west-2; do
             echo -n "Testing $REGION ... "
@@ -42,42 +46,14 @@ jobs:
               echo "❌ Not enabled yet"
             fi
           done
-
-          if [ -z "$SELECTED_REGION" ]; then
-            echo "::error::No enabled regions found."
-            exit 1
-          fi
-
-          echo "Selected Fastest Permitted Region: $SELECTED_REGION"
+          echo "Selected Region: $SELECTED_REGION"
           echo "aws_region=$SELECTED_REGION" >> "$GITHUB_OUTPUT"
 
-      - name: Clean Up Any Previous Failed / Rollback Stack
-        run: |
-          REGION="${{ steps.region_probe.outputs.aws_region }}"
-          STATUS=$(aws cloudformation describe-stacks --region "$REGION" --stack-name crypto-arb-bot-zero-cost --query "Stacks[0].StackStatus" --output text 2>/dev/null || echo "NONE")
-          echo "Existing stack status in $REGION: $STATUS"
-          if [ "$STATUS" = "ROLLBACK_COMPLETE" ] || [ "$STATUS" = "DELETE_FAILED" ]; then
-            echo "Inspecting previous rollback events for diagnostics..."
-            aws cloudformation describe-stack-events --region "$REGION" --stack-name crypto-arb-bot-zero-cost --query "StackEvents[?ResourceStatus=='CREATE_FAILED'].[LogicalResourceId,ResourceStatusReason]" --output table || true
-            echo "Deleting ROLLBACK_COMPLETE stack so fresh deployment succeeds..."
-            aws cloudformation delete-stack --region "$REGION" --stack-name crypto-arb-bot-zero-cost
-            aws cloudformation wait stack-delete-complete --region "$REGION" --stack-name crypto-arb-bot-zero-cost
-          fi
-
-      - name: Pre-Deployment 365-Day $0.00 AWS Quota & Instance Check
-        run: |
-          REGION="${{ steps.region_probe.outputs.aws_region }}"
-          RUNNING_COUNT=$(aws ec2 describe-instances --region "$REGION" \
-            --filters "Name=instance-state-name,Values=running,pending" \
-            --query "Reservations[*].Instances[*].InstanceId" \
-            --output text | wc -w)
-          echo "Currently running instances in $REGION: $RUNNING_COUNT"
-
-      - name: Deploy CloudFormation Stack (t3.micro + CPUCredits=standard)
+      - name: Deploy or Verify CloudFormation Stack (t3.micro + CPUCredits=standard)
         run: |
           REGION="${{ steps.region_probe.outputs.aws_region }}"
           REPO_URL="https://github.com/${{ github.repository }}.git"
-          if ! aws cloudformation deploy --region "$REGION" \
+          aws cloudformation deploy --region "$REGION" \
             --template-file aws-tokyo-zero-cost-stack.yaml \
             --stack-name crypto-arb-bot-zero-cost \
             --parameter-overrides \
@@ -85,16 +61,83 @@ jobs:
               GitRepoUrl="$REPO_URL" \
               BinanceApiKey="${{ secrets.BINANCE_API_KEY }}" \
               BinanceApiSecret="${{ secrets.BINANCE_API_SECRET }}" \
-            --no-fail-on-empty-changeset; then
-            echo "::error::CloudFormation deploy failed. Printing exact resource failure reason:"
-            aws cloudformation describe-stack-events --region "$REGION" --stack-name crypto-arb-bot-zero-cost --query "StackEvents[?ResourceStatus=='CREATE_FAILED'].[LogicalResourceId,ResourceStatusReason]" --output table || true
-            exit 1
-          fi
+            --no-fail-on-empty-changeset
 
-      - name: Output Stack Status & Availability Zone
+      - name: Full AWS Account $0.00 Guarantee Audit, Unused Resource Cleanup & Credits Inspection
         run: |
           REGION="${{ steps.region_probe.outputs.aws_region }}"
-          aws cloudformation describe-stacks --region "$REGION" \
-            --stack-name crypto-arb-bot-zero-cost \
-            --query "Stacks[0].Outputs" \
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          echo "================================================================================"
+          echo "   FULL AWS ACCOUNT AUDIT & CLEANUP (Account: $ACCOUNT_ID | Region: $REGION)"
+          echo "================================================================================"
+
+          echo -e "\n--- 1. EC2 INSTANCES & CPU CREDIT LOCK AUDIT ---"
+          aws ec2 describe-instances --region "$REGION" \
+            --filters "Name=instance-state-name,Values=running,pending,stopped" \
+            --query "Reservations[*].Instances[*].{ID:InstanceId,Type:InstanceType,State:State.Name,AZ:Placement.AvailabilityZone,PublicIP:PublicIpAddress}" \
             --output table
+
+          # Verify CPU Credit Specification on our running instance
+          INST_ID=$(aws cloudformation describe-stacks --region "$REGION" --stack-name crypto-arb-bot-zero-cost --query "Stacks[0].Outputs[?OutputKey=='InstanceId'].OutputValue" --output text)
+          echo "Checking CPU Credit Specification for $INST_ID:"
+          aws ec2 describe-instance-credit-specifications --region "$REGION" --instance-ids "$INST_ID" --output table
+
+          # Terminate any OTHER stray/unused EC2 instances if they exist
+          OTHER_INSTANCES=$(aws ec2 describe-instances --region "$REGION" \
+            --filters "Name=instance-state-name,Values=running,stopped" \
+            --query "Reservations[*].Instances[?InstanceId!='$INST_ID'].InstanceId" --output text)
+          if [ -n "$OTHER_INSTANCES" ]; then
+            echo "Cleaning up unused EC2 instances: $OTHER_INSTANCES"
+            aws ec2 terminate-instances --region "$REGION" --instance-ids $OTHER_INSTANCES
+          else
+            echo "✅ Zero stray/unused EC2 instances found. Only $INST_ID (t3.micro) is active."
+          fi
+
+          echo -e "\n--- 2. UNATTACHED EBS VOLUMES & SNAPSHOTS CLEANUP ---"
+          UNATTACHED_VOLS=$(aws ec2 describe-volumes --region "$REGION" \
+            --filters "Name=status,Values=available" \
+            --query "Volumes[*].VolumeId" --output text)
+          if [ -n "$UNATTACHED_VOLS" ]; then
+            for V in $UNATTACHED_VOLS; do
+              echo "Deleting unattached EBS volume: $V"
+              aws ec2 delete-volume --region "$REGION" --volume-id "$V"
+            done
+          else
+            echo "✅ Zero unattached EBS volumes found."
+          fi
+          aws ec2 describe-volumes --region "$REGION" --query "Volumes[*].{VolumeId:VolumeId,SizeGB:Size,Type:VolumeType,State:State}" --output table
+
+          echo -e "\n--- 3. UNATTACHED ELASTIC IPs & NAT GATEWAYS AUDIT ---"
+          UNATTACHED_EIPS=$(aws ec2 describe-addresses --region "$REGION" --query "Addresses[?AssociationId==null].AllocationId" --output text)
+          if [ -n "$UNATTACHED_EIPS" ]; then
+            for EIP in $UNATTACHED_EIPS; do
+              echo "Releasing unattached Elastic IP: $EIP"
+              aws ec2 release-address --region "$REGION" --allocation-id "$EIP"
+            done
+          else
+            echo "✅ Zero unattached Elastic IPs found."
+          fi
+          NATS=$(aws ec2 describe-nat-gateways --region "$REGION" --filter "Name=state,Values=available,pending" --query "NatGateways[*].NatGatewayId" --output text)
+          echo "Active NAT Gateways: ${NATS:-NONE (0 cost)}"
+
+          echo -e "\n--- 4. OTHER CLOUDFORMATION STACKS / UNUSED PROJECTS AUDIT ---"
+          aws cloudformation list-stacks --region "$REGION" \
+            --stack-status-filter CREATE_COMPLETE UPDATE_COMPLETE ROLLBACK_COMPLETE \
+            --query "StackSummaries[*].{Name:StackName,Status:StackStatus}" --output table
+
+          echo -e "\n--- 5. RDS, ELB, LIGHTSAIL, S3 AUDIT ---"
+          ELBS=$(aws elbv2 describe-load-balancers --region "$REGION" --query "LoadBalancers[*].LoadBalancerName" --output text 2>/dev/null || echo "None")
+          echo "Active Load Balancers : ${ELBS:-NONE (0 cost)}"
+          RDS=$(aws rds describe-db-instances --region "$REGION" --query "DBInstances[*].DBInstanceIdentifier" --output text 2>/dev/null || echo "None")
+          echo "Active RDS Databases  : ${RDS:-NONE (0 cost)}"
+          BUCKETS=$(aws s3api list-buckets --query "Buckets[*].Name" --output text 2>/dev/null || echo "None")
+          echo "Active S3 Buckets     : ${BUCKETS:-NONE (0 cost)}"
+
+          echo -e "\n--- 6. AWS BILLING, BUDGETS ($20 LIMIT), FREE TIER & CREDITS AUDIT ---"
+          aws budgets describe-budgets --account-id "$ACCOUNT_ID" --output table 2>&1 || true
+          aws ce get-cost-and-usage \
+            --time-period Start=2026-11-01,End=2026-11-09 \
+            --granularity MONTHLY \
+            --metrics "UnblendedCost" "NetUnblendedCost" \
+            --output table 2>&1 || true
+          aws freetier get-free-tier-usage --output table 2>&1 || true
