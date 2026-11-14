@@ -1,4 +1,4 @@
-name: Probe AWS Account and Tokyo Instance
+name: Inspect Live Tokyo Engine
 
 on:
   push:
@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  probe:
+  inspect:
     runs-on: ubuntu-latest
     steps:
       - name: Configure AWS Credentials
@@ -14,18 +14,42 @@ jobs:
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: us-east-1
+          aws-region: ap-northeast-1
 
-      - name: Check Caller Identity and Enabled Regions
+      - name: Inspect Running Bot & Sync Code Archive
         run: |
-          echo "=== CALLER IDENTITY ==="
-          aws sts get-caller-identity --output json
-          echo "=== BUCKETS ==="
-          aws s3api list-buckets --query "Buckets[*].Name" --output json || true
-          echo "=== CHECKING TOKYO (ap-northeast-1) & SYDNEY (ap-southeast-2) ==="
-          for R in ap-northeast-1 ap-southeast-1 ap-southeast-2; do
-            echo "--- Region: $R ---"
-            aws ec2 describe-instances --region "$R" \
-              --query "Reservations[*].Instances[*].{ID:InstanceId,Type:InstanceType,State:State.Name,AZ:Placement.AvailabilityZone,IP:PublicIpAddress,Name:Tags[?Key=='Name']|[0].Value}" \
-              --output json 2>&1 || true
-          done
+          INST_ID="i-046fed60c07b7a799"
+          SG_ID=$(aws ec2 describe-instances --instance-ids "$INST_ID" --query "Reservations[0].Instances[0].SecurityGroups[0].GroupId" --output text)
+          PUB_IP=$(aws ec2 describe-instances --instance-ids "$INST_ID" --query "Reservations[0].Instances[0].PublicIpAddress" --output text)
+          AZ=$(aws ec2 describe-instances --instance-ids "$INST_ID" --query "Reservations[0].Instances[0].Placement.AvailabilityZone" --output text)
+          RUNNER_IP=$(curl -s https://checkip.amazonaws.com | tr -d '[:space:]')
+
+          ssh-keygen -t ed25519 -f /tmp/ec2_key -N "" -q
+          trap 'aws ec2 revoke-security-group-ingress --group-id "$SG_ID" --protocol tcp --port 22 --cidr "$RUNNER_IP/32" >/dev/null 2>&1 || true' EXIT
+          aws ec2 authorize-security-group-ingress --group-id "$SG_ID" --protocol tcp --port 22 --cidr "$RUNNER_IP/32" >/dev/null 2>&1 || true
+
+          aws ec2-instance-connect send-ssh-public-key \
+            --instance-id "$INST_ID" \
+            --availability-zone "$AZ" \
+            --instance-os-user ec2-user \
+            --ssh-public-key file:///tmp/ec2_key.pub
+
+          ssh -i /tmp/ec2_key -o StrictHostKeyChecking=no -o ConnectTimeout=15 ec2-user@"$PUB_IP" << 'EOF'
+          echo "=== ACTIVE SERVICES & PROCESSES ==="
+          ps aux | grep -E "python|node|cargo|arb|tokyo" | grep -v grep || true
+          systemctl list-units --type=service --state=running | grep -E "arb|tokyo|bot|trade" || true
+          echo "=== FILES IN /opt AND /home/ec2-user ==="
+          sudo ls -la /opt /home/ec2-user /root 2>/dev/null || true
+          sudo find /opt /home/ec2-user /root -maxdepth 3 -not -path '*/.*' -not -path '*/target/*' -not -path '*/node_modules/*' 2>/dev/null | head -n 80
+          EOF
+
+          mkdir -p /tmp/tokyo_code
+          scp -i /tmp/ec2_key -o StrictHostKeyChecking=no -r ec2-user@"$PUB_IP":/home/ec2-user/*.py /tmp/tokyo_code/ 2>/dev/null || true
+          ssh -i /tmp/ec2_key -o StrictHostKeyChecking=no ec2-user@"$PUB_IP" "sudo tar --exclude='target' --exclude='.git' --exclude='*.env*' --exclude='*secret*' --exclude='*key*' -czf /tmp/bot_src.tar.gz /opt /home/ec2-user/*.py /etc/systemd/system/*arb* /etc/systemd/system/*tokyo* 2>/dev/null || true"
+          scp -i /tmp/ec2_key -o StrictHostKeyChecking=no ec2-user@"$PUB_IP":/tmp/bot_src.tar.gz /tmp/tokyo_code/ 2>/dev/null || true
+
+      - name: Upload Live Engine Code Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tokyo-live-src
+          path: /tmp/tokyo_code/
