@@ -1156,9 +1156,9 @@ def main():
             for sym_p, is_iso, f_key, b_key, max_tr, max_buy, t_size, lbl_p in (
                 ("BNBFDUSD",  False, "CM_FDUSD", "CM_BNB",    4,  0, 36.0, "CLOSE-ONLY • BNB/FDUSD"),
                 ("SOLFDUSD",  False, "CM_FDUSD", "CM_SOL",    4,  0, 34.0, "CLOSE-ONLY • SOL/FDUSD"),
+                ("USDCUSDT",  False, "CM_USDT",  "CM_USDC",  26, 14, 45.0, "TURBO • USDC 5x CM"),
                 ("USD1USDC",  False, "CM_USDC",  "CM_USD1",  32, 26, 48.0, "v5.4 TRI-MKR • USD1/USDC"),
                 ("FDUSDUSDC", False, "CM_USDC",  "CM_FDUSD", 10,  8, 45.0, "v5.4 TRI-MKR • FDUSD/USDC"),
-                ("USDCUSDT",  False, "CM_USDT",  "CM_USDC",  20, 14, 45.0, "TURBO • USDC 5x CM"),
                 ("USD1U",     False, "CM_U",     "CM_USD1",   6,  4, 42.0, "v5.4 TRI-MKR • USD1/U"),
                 ("UUSDT",     False, "CM_USDT",  "CM_U",      6,  4, 45.0, "0% MAKER • U/USDT"),
                 ("FDUSDUSDT", False, "CM_USDT",  "CM_FDUSD", 12,  4, 42.0, "10x YIELD • FDUSD 5x CM"),
@@ -1173,7 +1173,7 @@ def main():
                 is_crypto_u1 = sym_p in ("BTCU", "BNBU", "ETHU", "BNBFDUSD", "SOLFDUSD")
 
                 # Immediately post maker SELL for any free base inventory (staggered across Ask / Ask+1)
-                while free_map[b_key] * q_bbo["ask"] >= 5.6 and len(p_tr) < max_tr:
+                while sym_p not in ("USD1USDC", "FDUSDUSDC", "USD1U") and free_map[b_key] * q_bbo["ask"] >= 5.6 and len(p_tr) < max_tr:
                     max_base_s = free_map[b_key]
                     target_base_s = (t_size / q_bbo["ask"]) if is_crypto_u1 else t_size
                     rem_after_usd = (max_base_s - target_base_s) * q_bbo["ask"]
