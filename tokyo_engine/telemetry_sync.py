@@ -300,21 +300,13 @@ def adopt_existing_tranches(api):
             saved_bpx = json.load(_tf)
     except Exception:
         pass
-    # 1. Monotonic Climb Startup: Cancel stale/drifting FDUSD/USD1/crypto orders and adopt active USDCUSDT tranches seamlessly!
+    # 1. Pure USDT-Base Startup: Cancel all non-USDT-base or stale high USDC sell orders so capital frees into pure USDT and trades tight +1 tick round-trips!
     open_cm = []
-    for _old_sym in ("BTCUSD1", "ETHUSD1", "BNBUSD1", "BTCU", "ETHU", "BNBU", "BNBFDUSD", "SOLFDUSD", "FDUSDUSDT", "FDUSDUSDC", "USD1USDC", "USD1U", "UUSDT", "UUSDC"):
+    for _old_sym in ("BTCUSD1", "ETHUSD1", "BNBUSD1", "BTCU", "ETHU", "BNBU", "BNBFDUSD", "SOLFDUSD", "FDUSDUSDT", "FDUSDUSDC", "USD1USDC", "USD1U", "UUSDT", "UUSDC", "USDCUSDT", "USD1USDT"):
         _old_oc = api.request("GET", "/sapi/v1/margin/openOrders", {"symbol": _old_sym}, signed=True)
         if isinstance(_old_oc, list):
             for _oo in _old_oc:
                 api.request("DELETE", "/sapi/v1/margin/order", {"symbol": _old_sym, "orderId": _oo["orderId"]}, signed=True)
-    for _cm_sym in ("USDCUSDT", "USD1USDT"):
-        _oc = api.request("GET", "/sapi/v1/margin/openOrders", {"symbol": _cm_sym}, signed=True)
-        if isinstance(_oc, list):
-            for _oo in _oc:
-                if _cm_sym == "USD1USDT":
-                    api.request("DELETE", "/sapi/v1/margin/order", {"symbol": _cm_sym, "orderId": _oo["orderId"]}, signed=True)
-                else:
-                    open_cm.append(_oo)
     auto_compound_borrow(api)
     fifo_lots = {}
     for _cm_sym in ("USD1USDT", "USD1USDC", "FDUSDUSDT", "FDUSDUSDC", "USDCUSDT", "USD1U", "UUSDT", "UUSDC", "BTCU", "ETHU", "BNBU", "BNBFDUSD", "SOLFDUSD"):
@@ -457,13 +449,26 @@ def main():
     pool_pnl_summary = []
     equity_changes = {k: 0.0 for k in ("5m", "15m", "30m", "1h", "4h", "8h", "12h", "24h")}
     equity_changes_pct = {k: 0.0 for k in ("5m", "15m", "30m", "1h", "4h", "8h", "12h", "24h")}
-    eq_series = []
+    seed_true_hist = [
+        [1794576000.0, 497.28], [1794646722.0, 501.299], [1794647958.3, 501.262], [1794649159.8, 501.1899],
+        [1794651478.3, 501.2379], [1794652780.3, 501.2758], [1794654125.9, 501.2269], [1794655324.6, 501.108],
+        [1794655935.0, 501.0719], [1794657236.4, 498.8395], [1794657837.3, 498.8075], [1794658438.4, 498.7156],
+        [1794658957.9, 498.5624], [1794659339.9, 498.6734], [1794659799.4, 498.7004], [1794660162.0, 498.5792],
+        [1794660404.0, 498.4441], [1794660766.5, 498.4793], [1794661067.6, 498.5141], [1794661309.5, 498.3907],
+        [1794661672.0, 498.3855], [1794661913.6, 498.3738], [1794662155.4, 498.3658], [1794662397.0, 498.3684],
+        [1794662821.3, 498.3667],
+    ]
+    eq_series = list(seed_true_hist)
     try:
-        if os.path.exists("/tmp/eq_series_24h.json"):
-            with open("/tmp/eq_series_24h.json") as _eqf:
-                eq_series = json.load(_eqf)
+        if os.path.exists("/tmp/true_eq_series_24h.json"):
+            with open("/tmp/true_eq_series_24h.json") as _eqf:
+                loaded_eq = json.load(_eqf)
+                merged_map = {round(float(p[0]), 1): float(p[1]) for p in seed_true_hist}
+                for p in loaded_eq:
+                    merged_map[round(float(p[0]), 1)] = float(p[1])
+                eq_series = [[k, merged_map[k]] for k in sorted(merged_map.keys())]
     except Exception:
-        eq_series = []
+        eq_series = list(seed_true_hist)
     # Waterfall Unstick Vault: seeded with $0.18 of today's banked profit + accrues 100% of active tranche profits to unfreeze the cheapest stuck tranche one-by-one!
     unstick_vault_usd = 0.0200
 
@@ -836,87 +841,27 @@ def main():
                         cached_leveraged_pool = round(total_pool, 2)
                         cached_balances = bals
 
-                    # Cost-Basis Realized Staircase Equity + 8 Rolling Horizon Equity Change Metrics (5m, 15m, 30m, 1h, 4h, 8h, 12h, 24h)
-                    # Values locked SELL tranches at min(live_bid, cost_basis) or max(staircase_prev + realized_delta) so 100% USDT-denominated realized profits never dip on transient bid wiggles!
+                    # TRUE SIGNED WALLET EQUITY & 8-HORIZON DELTAS (No artificial floor/clamp — if equity went in minus over any window, shows exact negative minus!)
                     if cached_total_usd > 85.0:
-                        if not hasattr(api, "_staircase_state"):
-                            try:
-                                if os.path.exists("/tmp/staircase_eq.json"):
-                                    api._staircase_state = json.load(open("/tmp/staircase_eq.json"))
-                                else:
-                                    api._staircase_state = {"eq": cached_total_usd, "realized": realized_today_usd}
-                            except Exception:
-                                api._staircase_state = {"eq": cached_total_usd, "realized": realized_today_usd}
-                        prev_sc_eq = float(api._staircase_state.get("eq", cached_total_usd))
-                        prev_sc_rl = float(api._staircase_state.get("realized", realized_today_usd))
-                        rl_gain_step = max(0.0, realized_today_usd - prev_sc_rl) if realized_today_usd >= prev_sc_rl - 0.01 else 0.0
-                        # Only lock monotonic climb when debt == $0 and zero crypto volatility remains; still obey hard $495 circuit breaker on raw wb_sum!
-                        cur_cm_debt = sum(float(b.get("borrowed", 0)) for b in cached_balances if "USDT (5x Cross)" in b.get("asset", ""))
                         raw_wallet_eq = cached_total_usd
-                        if cur_cm_debt <= 1.0 and free_map.get("CM_SOL", 0) < 0.01:
-                            staircase_eq = round(max(raw_wallet_eq, prev_sc_eq + rl_gain_step), 4)
-                        else:
-                            staircase_eq = raw_wallet_eq
-                        api._staircase_state = {"eq": staircase_eq, "realized": realized_today_usd, "raw_eq": raw_wallet_eq, "ts": loop_ts}
-                        try:
-                            with open("/tmp/staircase_eq.json", "w") as _scf:
-                                json.dump(api._staircase_state, _scf)
-                        except Exception:
-                            pass
-                        cached_total_usd = staircase_eq
                         api._raw_wallet_eq = raw_wallet_eq
 
-                        # Append 15s-sampled equity point to persistent 24h series and compute 5m/15m/30m/1h/4h/8h/12h/24h changes
-                        if not eq_series or (loop_ts - float(eq_series[-1][0])) >= 15.0 or staircase_eq > float(eq_series[-1][1]):
-                            eq_series.append([round(loop_ts, 1), staircase_eq])
-                            eq_series = [pt for pt in eq_series if loop_ts - float(pt[0]) <= 90000.0][-6200:]
+                        # Append 15s-sampled TRUE wallet equity point to persistent 24h series
+                        if not eq_series or (loop_ts - float(eq_series[-1][0])) >= 15.0:
+                            eq_series.append([round(loop_ts, 1), raw_wallet_eq])
+                            eq_series = [pt for pt in eq_series if loop_ts - float(pt[0]) <= 95000.0][-6500:]
                             try:
-                                with open("/tmp/eq_series_24h.json", "w") as _eqf:
+                                with open("/tmp/true_eq_series_24h.json", "w") as _eqf:
                                     json.dump(eq_series, _eqf)
                             except Exception:
                                 pass
-                        pnl_fallbacks = {
-                            "5m":  tot_5m_pnl  if "tot_5m_pnl"  in locals() else 0.0,
-                            "15m": tot_15m_pnl if "tot_15m_pnl" in locals() else 0.0,
-                            "30m": tot_30m_pnl if "tot_30m_pnl" in locals() else 0.0,
-                            "1h":  tot_1h_pnl  if "tot_1h_pnl"  in locals() else 0.0,
-                            "4h":  tot_4h_pnl  if "tot_4h_pnl"  in locals() else 0.0,
-                            "8h":  tot_8h_pnl  if "tot_8h_pnl"  in locals() else 0.0,
-                            "12h": tot_12h_pnl if "tot_12h_pnl" in locals() else 0.0,
-                            "24h": tot_24h_pnl if "tot_24h_pnl" in locals() else realized_today_usd,
-                        }
-                        prev_chg = getattr(api, "_monotone_chg", {})
-                        prev_win_anchor = getattr(api, "_win_anchor_ts", loop_ts)
                         for lbl_w, sec_w in (("5m", 300.0), ("15m", 900.0), ("30m", 1800.0), ("1h", 3600.0), ("4h", 14400.0), ("8h", 28800.0), ("12h", 43200.0), ("24h", 86400.0)):
                             cutoff_t = loop_ts - sec_w
                             older_pts = [pt for pt in eq_series if float(pt[0]) <= cutoff_t]
-                            if older_pts:
-                                hist_delta = max(0.0, staircase_eq - float(older_pts[-1][1]))
-                                raw_chg = max(hist_delta, pnl_fallbacks[lbl_w])
-                            else:
-                                span_delta = max(0.0, staircase_eq - float(eq_series[0][1])) if eq_series else 0.0
-                                raw_chg = max(span_delta, pnl_fallbacks[lbl_w])
-                            equity_changes[lbl_w] = round(max(0.0001 if pnl_fallbacks["24h"] > 0 else 0.0, raw_chg), 4)
-                        # Enforce strict cross-horizon monotonic ordering + non-decreasing ratchet across all 8 windows
-                        ordered_keys = ("5m", "15m", "30m", "1h", "4h", "8h", "12h", "24h")
-                        if not hasattr(api, "_chg_ratchet"):
-                            try:
-                                api._chg_ratchet = json.load(open("/tmp/chg_ratchet.json")) if os.path.exists("/tmp/chg_ratchet.json") else {}
-                            except Exception:
-                                api._chg_ratchet = {}
-                        running_min = 0.0001
-                        for ok_k in ordered_keys:
-                            prev_rat_k = float(api._chg_ratchet.get(ok_k, 0.0))
-                            running_min = max(running_min + (0.0001 if ok_k != "5m" and equity_changes[ok_k] <= running_min else 0.0), equity_changes[ok_k], prev_rat_k)
-                            equity_changes[ok_k] = round(running_min, 4)
-                            api._chg_ratchet[ok_k] = equity_changes[ok_k]
-                            base_eq_k = max(1.0, staircase_eq - equity_changes[ok_k])
-                            equity_changes_pct[ok_k] = round((equity_changes[ok_k] / base_eq_k) * 100.0, 4)
-                        try:
-                            with open("/tmp/chg_ratchet.json", "w") as _crf:
-                                json.dump(api._chg_ratchet, _crf)
-                        except Exception:
-                            pass
+                            ref_eq_w = float(older_pts[-1][1]) if older_pts else (float(eq_series[0][1]) if eq_series else start_equity_usd)
+                            true_delta = round(raw_wallet_eq - ref_eq_w, 4)
+                            equity_changes[lbl_w] = true_delta
+                            equity_changes_pct[lbl_w] = round((true_delta / max(1.0, ref_eq_w)) * 100.0, 4)
 
                     # Hard Latched $495.00 Equity Circuit Breaker (checks TRUE raw wallet equity so staircase display never masks real $495 stop!)
                     chk_eq_495 = getattr(api, "_raw_wallet_eq", cached_total_usd)
@@ -1346,27 +1291,28 @@ def main():
                         free_map["CM_USD1"] = max(0.0, free_map["CM_USD1"] - sq_u1)
                         api._u1_drain_oid = (sr_u1["orderId"], spx_u1, loop_ts)
 
-                # When cm_ut_debt > 1.0, also sell free USDC on USDCUSDT LIMIT_MAKER @ live Ask until debt == $0.00!
+                # Drain excess USDC (> 100 USDC) to pure USDT at live Ask so USDT is our primary cash reserve!
                 uc_seed_ord = getattr(api, "_uc_seed_oid", None)
                 if uc_seed_ord is not None:
                     if not any(o.get("orderId") == uc_seed_ord[1] for o in cached_open_orders):
                         api._uc_seed_oid = None
-                    elif loop_ts - uc_seed_ord[2] > 4.0:
+                    elif "USDCUSDT" in bbos and (bbos["USDCUSDT"]["ask"] < uc_seed_ord[3] - 0.000005 or loop_ts - uc_seed_ord[2] > 4.0):
                         api.request("DELETE", "/sapi/v1/margin/order", {"symbol": "USDCUSDT", "orderId": uc_seed_ord[1]}, signed=True)
                         api._uc_seed_oid = None
-                elif "USDCUSDT" in bbos and free_map["CM_USDC"] >= 10.0 and cm_ut_debt > 1.0:
+                elif "USDCUSDT" in bbos and free_map["CM_USDC"] >= 10.0 and (cm_ut_debt > 1.0 or sum(t["qty"] for t in active_tranches if t["symbol"] == "USDCUSDT" and t["state"] == "SELL_OPEN") + free_map["CM_USDC"] > 100.0):
                     uc_s_mkr = min(200, math.floor(free_map["CM_USDC"]))
                     if uc_s_mkr >= 10:
-                        s_res = api.request("POST", "/sapi/v1/margin/order", {"symbol": "USDCUSDT", "side": "SELL", "type": "LIMIT_MAKER", "quantity": str(uc_s_mkr), "price": f"{bbos['USDCUSDT']['ask']:.5f}"}, signed=True)
+                        uc_ask_now = bbos["USDCUSDT"]["ask"]
+                        s_res = api.request("POST", "/sapi/v1/margin/order", {"symbol": "USDCUSDT", "side": "SELL", "type": "LIMIT_MAKER", "quantity": str(uc_s_mkr), "price": f"{uc_ask_now:.5f}"}, signed=True)
                         if "orderId" in s_res:
                             free_map["CM_USDC"] = max(0.0, free_map["CM_USDC"] - uc_s_mkr)
-                            api._uc_seed_oid = ("SELL", s_res["orderId"], loop_ts)
+                            api._uc_seed_oid = ("SELL", s_res["orderId"], loop_ts, uc_ask_now)
 
-                # 4B. Monotonic USDT-Base 1x Zero-Fee Engine (Base currency = USDT; buys USD1/USDC with USDT -> sells back to USDT at +1 tick so realized profits never lose value on USDC drift!)
+                # 4B. Pure USDT-Reserve 1x Zero-Fee Engine (Holds ~65% pure USDT cash + ~35% active +1 tick round-trips so peg drift is tiny and realized gains dominate!)
                 allow_buys = (cm_ut_debt <= 1.0)
                 for sym_p, is_iso, f_key, b_key, max_tr, max_buy, t_size, lbl_p in (
-                    ("USD1USDT",  False, "CM_USDT",  "CM_USD1",  12 if allow_buys else 0,  8 if allow_buys else 0, 26.0, "USDT-BASE • USD1 1x"),
-                    ("USDCUSDT",  False, "CM_USDT",  "CM_USDC",  16 if allow_buys else 0,  8 if allow_buys else 0, 30.0, "USDT-BASE • USDC 1x"),
+                    ("USD1USDT",  False, "CM_USDT",  "CM_USD1",   4 if allow_buys else 0,  3 if allow_buys else 0, 25.0, "USDT-BASE • USD1 1x"),
+                    ("USDCUSDT",  False, "CM_USDT",  "CM_USDC",   4 if allow_buys else 0,  3 if allow_buys else 0, 25.0, "USDT-BASE • USDC 1x"),
                 ):
                     q_bbo = bbos.get(sym_p)
                     if not q_bbo or q_bbo["bid"] <= 0:
@@ -1565,7 +1511,7 @@ def main():
                         "status": (
                             f"PAUSED AT <=$495.00 — ALL TRADING STOPPED UNTIL USER REPLY (Eq ${cached_total_usd:.4f})"
                             if getattr(api, "_paused_495", False)
-                            else f"v5.8 MONOTONIC USDT-BASE • $495 GUARD (1h +${equity_changes.get('1h', 0):.4f} • 24h +${equity_changes.get('24h', 0):.4f})"
+                            else f"v5.9 TRUE-EQUITY DELTAS • $495 GUARD (1h {'+$' if equity_changes.get('1h', 0)>=0 else '-$'}{abs(equity_changes.get('1h', 0)):.4f} • 24h {'+$' if equity_changes.get('24h', 0)>=0 else '-$'}{abs(equity_changes.get('24h', 0)):.4f})"
                         ),
                         "paused": bool(getattr(api, "_paused_495", False)),
                         "pauseReason": (
