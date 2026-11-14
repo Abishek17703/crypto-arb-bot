@@ -603,17 +603,38 @@ def main():
                 auto_compound_borrow(api)
                 rebalance_to_50_50(api, bbos)
 
-            # 3. Fast Bulk Open Orders Diff every 0.09s (<90ms Flip Speed) + Account Balance Sync every 4.0s
-            if loop_ts - last_acct_poll >= 0.09:
+            # 3. Single-Call Bulk Open Orders Diff every 0.10s (1-Call Zero-Drop Guard + <100ms Flip Speed)
+            if loop_ts - last_acct_poll >= 0.10:
                 do_full_acct = (loop_ts - getattr(api, "_last_full_acct", 0.0)) >= 4.0
                 last_acct_poll = loop_ts
 
-                combined_open = []
-                for _poll_sym in ("USD1USDT", "USD1USDC", "FDUSDUSDT", "USDCUSDT"):
-                    _o_res = api.request("GET", "/sapi/v1/margin/openOrders", {"symbol": _poll_sym}, signed=True)
-                    if isinstance(_o_res, list):
-                        combined_open.extend(_o_res)
-                cached_open_orders = combined_open
+                _all_cm = api.request("GET", "/sapi/v1/margin/openOrders", signed=True)
+                if not isinstance(_all_cm, list):
+                    time.sleep(0.05)
+                    continue
+                cached_open_orders = [o for o in _all_cm if o.get("symbol") in ("USD1USDT", "USD1USDC", "FDUSDUSDT", "USDCUSDT")]
+
+                # Orphan Adoption Self-Heal every 8.0s: adopt any live open order missing from active_tranches!
+                if loop_ts - getattr(api, "_last_orphan_heal", 0.0) >= 8.0:
+                    api._last_orphan_heal = loop_ts
+                    known_oids = {t.get("buy_oid") for t in active_tranches} | {t.get("sell_oid") for t in active_tranches}
+                    for o in cached_open_orders:
+                        oid_o = o.get("orderId")
+                        sym_o = o.get("symbol", "USD1USDT")
+                        if oid_o and oid_o not in known_oids and sym_o in PAIRS:
+                            spec_o = PAIRS[sym_o]
+                            px_o = float(o["price"])
+                            qty_o = math.floor(float(o["origQty"]) - float(o["executedQty"]))
+                            if qty_o >= 6:
+                                lbl_o = "10x YIELD • FDUSD 5x CM" if sym_o == "FDUSDUSDT" else ("TURBO • USDC 5x CM" if sym_o == "USDCUSDT" else "50% CORE • 5x CM")
+                                active_tranches.append({
+                                    "tid": f"{sym_o[:4]}{len(active_tranches)+1}", "symbol": sym_o, "iso": False, "lbl": lbl_o,
+                                    "qty": qty_o, "buy_px": round(px_o - spec_o["tick"], spec_o["dec"]) if o["side"] == "SELL" else px_o,
+                                    "sell_px": px_o if o["side"] == "SELL" else round(px_o + spec_o["tick"], spec_o["dec"]),
+                                    "buy_oid": "HOLD" if o["side"] == "SELL" else oid_o,
+                                    "sell_oid": oid_o if o["side"] == "SELL" else None,
+                                    "state": "SELL_OPEN" if o["side"] == "SELL" else "BUY_OPEN", "ts": float(o.get("time", loop_ts * 1000)) / 1000.0
+                                })
 
                 if do_full_acct:
                     api._last_full_acct = loop_ts
