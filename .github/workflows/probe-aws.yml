@@ -1,6 +1,8 @@
 name: Probe AWS Account and Tokyo Instance
 
 on:
+  push:
+    branches: [probe-aws-tokyo]
   workflow_dispatch:
 
 jobs:
