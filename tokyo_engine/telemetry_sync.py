@@ -1335,19 +1335,29 @@ def main():
                 soft_delev = (85.0 < cached_total_usd <= 496.80)
                 api._target_hedge_u1 = 0.0
                 api._target_hedge_uc = 0.0
-                # Immediately unwind any legacy USDC/USD1 base debt via 0%-fee maker BUY at Bid -> auto-REPAY so naked short overhang = 0!
+                # Immediately close any residual USDC/USD1 base debt with sideEffectType=AUTO_REPAY at top-of-book so naked short overhang hits 0.00 in 1 fill!
                 uc_unwind = getattr(api, "_uc_unwind_oid", None)
                 if uc_unwind is not None:
                     if not any(o.get("orderId") == uc_unwind[0] for o in cached_open_orders):
                         api._uc_unwind_oid = None
-                    elif "USDCUSDT" in bbos and (bbos["USDCUSDT"]["bid"] > uc_unwind[1] + 0.000005 or loop_ts - uc_unwind[2] > 3.5):
+                    elif "USDCUSDT" in bbos and (bbos["USDCUSDT"]["bid"] > uc_unwind[1] + 0.000005 or loop_ts - uc_unwind[2] > 2.5):
                         api.request("DELETE", "/sapi/v1/margin/order", {"symbol": "USDCUSDT", "orderId": uc_unwind[0]}, signed=True)
                         api._uc_unwind_oid = None
-                elif cm_uc_debt >= 6.0 and free_map["CM_USDC"] < cm_uc_debt - 1.0 and "USDCUSDT" in bbos and free_map["CM_USDT"] >= 10.0:
+                elif cm_uc_debt >= 6.0 and free_map["CM_USDC"] < cm_uc_debt - 1.0 and "USDCUSDT" in bbos:
                     need_uc = math.ceil(min(160.0, cm_uc_debt - free_map["CM_USDC"]))
+                    if free_map["CM_USDT"] < need_uc * 1.005:
+                        # Free up locked BUY orders on USDCUSDT immediately so AUTO_REPAY closes the short leg in 1 second!
+                        for tx_u in [t for t in list(active_tranches) if t["symbol"] == "USDCUSDT" and t["state"] == "BUY_OPEN"]:
+                            cr_u = api.request("DELETE", "/sapi/v1/margin/order", {"symbol": "USDCUSDT", "orderId": tx_u["buy_oid"]}, signed=True)
+                            if cr_u.get("status") == "CANCELED":
+                                free_map["CM_USDT"] += max(0.0, tx_u["qty"] - float(cr_u.get("executedQty", 0))) * tx_u["buy_px"]
+                                active_tranches.remove(tx_u)
                     if need_uc >= 6 and free_map["CM_USDT"] >= need_uc * 1.002:
-                        bpx_uw = bbos["USDCUSDT"]["bid"]
-                        br_uw = api.request("POST", "/sapi/v1/margin/order", {"symbol": "USDCUSDT", "side": "BUY", "type": "LIMIT_MAKER", "quantity": str(need_uc), "price": f"{bpx_uw:.5f}"}, signed=True)
+                        bpx_uw = round(bbos["USDCUSDT"]["ask"] - 0.00001, 5)
+                        br_uw = api.request("POST", "/sapi/v1/margin/order", {"symbol": "USDCUSDT", "side": "BUY", "type": "LIMIT_MAKER", "sideEffectType": "AUTO_REPAY", "quantity": str(need_uc), "price": f"{bpx_uw:.5f}"}, signed=True)
+                        if "orderId" not in br_uw and "immediately match" in str(br_uw.get("msg", "")):
+                            bpx_uw = bbos["USDCUSDT"]["bid"]
+                            br_uw = api.request("POST", "/sapi/v1/margin/order", {"symbol": "USDCUSDT", "side": "BUY", "type": "LIMIT_MAKER", "sideEffectType": "AUTO_REPAY", "quantity": str(need_uc), "price": f"{bpx_uw:.5f}"}, signed=True)
                         if "orderId" in br_uw:
                             free_map["CM_USDT"] = max(0.0, free_map["CM_USDT"] - need_uc * bpx_uw)
                             api._uc_unwind_oid = (br_uw["orderId"], bpx_uw, loop_ts)
@@ -1522,7 +1532,7 @@ def main():
                     p_selling_qty = sum(t["qty"] for t in p_tr if t["state"] == "SELL_OPEN")
                     near_ask_sells = sum(1 for t in p_tr if t["state"] == "SELL_OPEN" and abs(t["sell_px"] - q_bbo["ask"]) <= spec["tick"] * 1.5)
                     cg_p = cons_guards.get(sym_p, {})
-                    bid_wall_ok = (sym_p == "USD1USDC") or (q_bbo["bidQty"] >= q_bbo["askQty"] * 0.30 and not (cg_p.get("falling", False) and q_bbo["bidQty"] < q_bbo["askQty"] * 0.80))
+                    bid_wall_ok = (sym_p == "USD1USDC") or (q_bbo["bidQty"] >= q_bbo["askQty"] * 0.25 and not (cg_p.get("falling", False) and q_bbo["bidQty"] < q_bbo["askQty"] * 0.80)) and not (sym_p == "USDCUSDT" and cm_uc_debt >= 6.0)
                     min_res_f = 95.0 if f_key == "CM_USDT" else 0.0
                     can_buy_cap = (p_selling_qty <= max_sell_cap) or (near_ask_sells < 2 and len(p_buying) < 3 and p_selling_qty <= max_sell_cap + 88.0)
                     while (sym_p not in getattr(api, "_disabled_fee_keys", set())) and bid_wall_ok and can_buy_cap and len(p_buying) < max_buy and len(p_tr) < max_tr and free_map[f_key] >= (min_res_f + 6.5):
