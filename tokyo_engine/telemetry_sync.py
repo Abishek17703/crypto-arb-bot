@@ -180,7 +180,7 @@ class BinanceMarginSession:
 
 
 def auto_compound_borrow(api):
-    # 0. Auto-sweep any new Spot USDT/USDC deposit (>= $5) into 5x Cross Margin (55%) + 5x USD1USDT Isolated (45%) and borrow 5x immediately!
+    # 0. Auto-sweep any new Spot USDT/USDC deposit (>= $5) into Cross Margin (ZERO margin borrowing — 0% interest drain!)
     try:
         spot = api.request("GET", "/api/v3/account", signed=True)
         for b in spot.get("balances", []):
@@ -195,26 +195,18 @@ def auto_compound_borrow(api):
                     api.request("POST", "/sapi/v1/margin/transfer", {"asset": "USDT", "amount": f"{ut_free:.2f}", "type": "1"}, signed=True)
     except Exception:
         pass
-
-    # 1. Auto-compound 5x Isolated Margin pools
-    for sym, q_ast in (("USD1USDT", "USDT"),):
-        mb = api.request("GET", "/sapi/v1/margin/maxBorrowable", {"asset": q_ast, "isolatedSymbol": sym}, signed=True)
-        avail = float(mb.get("amount", 0))
-        if avail >= 1.5:
-            b_amt = round(avail * 0.96, 2)
-            if b_amt >= 1.5:
-                api.request("POST", "/sapi/v1/margin/borrow-repay", {
-                    "asset": q_ast, "isIsolated": "TRUE", "symbol": sym, "amount": str(b_amt), "type": "BORROW"
-                }, signed=True)
-    # 2. Auto-compound Cross Margin 5x USD1USDT pool
-    mb_cm = api.request("GET", "/sapi/v1/margin/maxBorrowable", {"asset": "USDT"}, signed=True)
-    avail_cm = float(mb_cm.get("amount", 0))
-    if avail_cm >= 1.5:
-        b_cm = round(avail_cm * 0.96, 2)
-        if b_cm >= 1.5:
-            api.request("POST", "/sapi/v1/margin/borrow-repay", {
-                "asset": "USDT", "isIsolated": "FALSE", "amount": str(b_cm), "type": "BORROW"
-            }, signed=True)
+    # Immediately repay any free USDT against Cross Margin debt so hourly borrow interest drops to $0.00!
+    try:
+        cm_acc = api.request("GET", "/sapi/v1/margin/account", signed=True)
+        for ua in cm_acc.get("userAssets", []):
+            if ua.get("asset") == "USDT":
+                fv_ut, bv_ut = float(ua.get("free", 0)), float(ua.get("borrowed", 0)) + float(ua.get("interest", 0))
+                if bv_ut > 0.05 and fv_ut >= 1.0:
+                    rep_amt = math.floor(min(fv_ut, bv_ut) * 100.0) / 100.0
+                    if rep_amt >= 1.0:
+                        api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "USDT", "isIsolated": "FALSE", "amount": f"{rep_amt:.2f}", "type": "REPAY"}, signed=True)
+    except Exception:
+        pass
 
 
 def compute_composite_regime(api, bbos, fills_1h, p_5m, p_15m):
@@ -270,14 +262,8 @@ def compute_composite_regime(api, bbos, fills_1h, p_5m, p_15m):
     return reg
 
 def rebalance_to_50_50(api, bbos):
-    try:
-        mb_ut = api.request("GET", "/sapi/v1/margin/maxBorrowable", {"asset": "USDT"}, signed=True)
-        av_ut = float(mb_ut.get("amount", 0))
-        if av_ut >= 15.0:
-            b_amt = round(av_ut * 0.96, 2)
-            api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "USDT", "isIsolated": "FALSE", "amount": str(b_amt), "type": "BORROW"}, signed=True)
-    except Exception:
-        pass
+    # Repay any free USDT debt automatically (0% interest drain)
+    auto_compound_borrow(api)
 
 
 def adopt_existing_tranches(api):
@@ -288,7 +274,7 @@ def adopt_existing_tranches(api):
             saved_bpx = json.load(_tf)
     except Exception:
         pass
-    # 1. Cross Margin Pure Stablecoin Pools (Cancel any open crypto BUY orders so zero new crypto exposure opens!)
+    # 1. Cross Margin Debt-Deleverage Startup: Cancel open BUY orders to free ~460 USDT & ~48 FDUSD immediately for debt repayment!
     open_cm = []
     for _old_sym in ("BTCUSD1", "ETHUSD1", "BNBUSD1", "BTCU", "ETHU", "BNBU", "BNBFDUSD", "SOLFDUSD"):
         _old_oc = api.request("GET", "/sapi/v1/margin/openOrders", {"symbol": _old_sym}, signed=True)
@@ -301,7 +287,12 @@ def adopt_existing_tranches(api):
     for _cm_sym in ("USD1USDT", "USD1USDC", "FDUSDUSDT", "FDUSDUSDC", "USDCUSDT", "USD1U", "UUSDT", "UUSDC"):
         _oc = api.request("GET", "/sapi/v1/margin/openOrders", {"symbol": _cm_sym}, signed=True)
         if isinstance(_oc, list):
-            open_cm.extend(_oc)
+            for _oo in _oc:
+                if _oo.get("side") == "BUY":
+                    api.request("DELETE", "/sapi/v1/margin/order", {"symbol": _cm_sym, "orderId": _oo["orderId"]}, signed=True)
+                else:
+                    open_cm.append(_oo)
+    auto_compound_borrow(api)
     fifo_lots = {}
     for _cm_sym in ("USD1USDT", "USD1USDC", "FDUSDUSDT", "FDUSDUSDC", "USDCUSDT", "USD1U", "UUSDT", "UUSDC", "BTCU", "ETHU", "BNBU", "BNBFDUSD", "SOLFDUSD"):
         fifo_lots[_cm_sym] = []
@@ -962,8 +953,8 @@ def main():
                             ref_ut_s = "USD1USDT" if sym == "USD1USDC" else "FDUSDUSDT"
                             ref_dec_s = PAIRS[ref_ut_s]["dec"]
                             ref_tick_s = PAIRS[ref_ut_s]["tick"]
-                            eff_bpx_ut = tr["buy_px"] if tr["buy_px"] >= 0.99885 else round(max(0.99912, (tr["sell_px"] * bbos.get("USDCUSDT", {}).get("bid", 1.00072)) - 0.00002), ref_dec_s)
-                            if ref_ut_s in bbos and (bbos[ref_ut_s]["ask"] >= eff_bpx_ut + ref_tick_s or (tr["sell_px"] * bbos.get("USDCUSDT", {}).get("bid", 1.0)) < eff_bpx_ut + 0.000005):
+                            eff_bpx_ut = tr["buy_px"] if tr["buy_px"] >= 0.99800 else round(tr["sell_px"] * bbos.get("USDCUSDT", {}).get("bid", 1.00071) - 0.00001, ref_dec_s)
+                            if ref_ut_s in bbos and bbos[ref_ut_s]["ask"] >= eff_bpx_ut + ref_tick_s and bbos[ref_ut_s]["ask"] > (tr["sell_px"] * bbos.get("USDCUSDT", {}).get("bid", 1.0)) + 0.00001:
                                 cr = api.request("DELETE", "/sapi/v1/margin/order", {"symbol": sym, "orderId": tr["sell_oid"]}, signed=True)
                                 if cr.get("status") == "CANCELED":
                                     ns_px = round(max(eff_bpx_ut + ref_tick_s, bbos[ref_ut_s]["ask"]), ref_dec_s)
@@ -1125,7 +1116,33 @@ def main():
 
             active_tranches = still_tranches
 
-            # 4B-0. Pure 100%-Stablecoin Zero-Fee USDC <-> USDT Bridge (Zero Crypto Directional Risk!)
+            # 4B-0. Debt-First Deleverage + Unfreeze Falsely-Locked 0.99913 USD1 Sells!
+            cm_ut_debt = sum(float(b.get("borrowed", 0)) for b in cached_balances if "USDT (5x Cross)" in b.get("asset", ""))
+            if cm_ut_debt > 1.0 and free_map["CM_USDT"] >= 5.0 and (loop_ts - getattr(api, "_last_repay_tick", 0.0)) >= 2.0:
+                api._last_repay_tick = loop_ts
+                rep_q = math.floor(min(free_map["CM_USDT"], cm_ut_debt) * 100.0) / 100.0
+                if rep_q >= 5.0:
+                    rr = api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "USDT", "isIsolated": "FALSE", "amount": f"{rep_q:.2f}", "type": "REPAY"}, signed=True)
+                    if "tranId" in rr:
+                        free_map["CM_USDT"] = max(0.0, free_map["CM_USDT"] - rep_q)
+                        cm_ut_debt = max(0.0, cm_ut_debt - rep_q)
+
+            # Fix tranches bought at ~0.99870 that were mistakenly stamped 0.99913 by the v5.4 bug (keep at most 12 pre-dip lots at 0.99913, restore the newer 13 lots to 0.99876!)
+            high_u1 = [t for t in active_tranches if t["symbol"] == "USD1USDT" and t["state"] == "SELL_OPEN" and abs(t.get("sell_px", 0) - 0.99913) < 0.000015]
+            if len(high_u1) > 12 and "USD1USDT" in bbos:
+                for fix_t in high_u1[12:16]:
+                    cr_fx = api.request("DELETE", "/sapi/v1/margin/order", {"symbol": "USD1USDT", "orderId": fix_t["sell_oid"]}, signed=True)
+                    if cr_fx.get("status") == "CANCELED":
+                        rq_fx = math.floor(fix_t["qty"] - float(cr_fx.get("executedQty", 0)))
+                        ns_fx = round(max(0.99874, bbos["USD1USDT"]["ask"]), 5)
+                        sr_fx = api.request("POST", "/sapi/v1/margin/order", {"symbol": "USD1USDT", "side": "SELL", "type": "LIMIT_MAKER", "quantity": str(rq_fx), "price": f"{ns_fx:.5f}"}, signed=True)
+                        if "orderId" in sr_fx:
+                            fix_t["buy_px"] = round(ns_fx - 0.00001, 5)
+                            fix_t["sell_px"] = ns_fx
+                            fix_t["sell_oid"] = sr_fx["orderId"]
+                            fix_t["ts"] = loop_ts
+
+            # When cm_ut_debt > 1.0, sell free USDC on USDCUSDT LIMIT_MAKER so proceeds repay the $1,990 USDT loan down to $0!
             uc_seed_ord = getattr(api, "_uc_seed_oid", None)
             if uc_seed_ord is not None:
                 if not any(o.get("orderId") == uc_seed_ord[1] for o in cached_open_orders):
@@ -1133,36 +1150,23 @@ def main():
                 elif loop_ts - uc_seed_ord[2] > 6.0:
                     api.request("DELETE", "/sapi/v1/margin/order", {"symbol": "USDCUSDT", "orderId": uc_seed_ord[1]}, signed=True)
                     api._uc_seed_oid = None
-            elif "USDCUSDT" in bbos and "USD1USDC" in bbos and "USD1USDT" in bbos:
-                u1c_edge = (bbos["USD1USDT"]["bid"] / bbos["USDCUSDT"]["ask"]) - bbos["USD1USDC"]["bid"]
-                fdc_edge = ((bbos["FDUSDUSDT"]["bid"] / bbos["USDCUSDT"]["ask"]) - bbos["FDUSDUSDC"]["bid"]) if ("FDUSDUSDC" in bbos and "FDUSDUSDT" in bbos) else 0.0
-                uc_locked = sum(t["qty"] * t["buy_px"] for t in active_tranches if t["symbol"] in ("USD1USDC", "FDUSDUSDC") and t["state"] == "BUY_OPEN")
-                if max(u1c_edge, fdc_edge) >= 0.000018 and (free_map["CM_USDC"] + uc_locked) < 1100.0 and free_map["CM_USDT"] >= 50.0:
-                    uc_q_mkr = min(150, math.floor(free_map["CM_USDT"] * 0.85 / bbos["USDCUSDT"]["bid"]))
-                    if uc_q_mkr >= 45:
-                        c_res = api.request("POST", "/sapi/v1/margin/order", {"symbol": "USDCUSDT", "side": "BUY", "type": "LIMIT_MAKER", "quantity": str(uc_q_mkr), "price": f"{bbos['USDCUSDT']['bid']:.5f}"}, signed=True)
-                        if "orderId" in c_res:
-                            free_map["CM_USDT"] = max(0.0, free_map["CM_USDT"] - uc_q_mkr * bbos["USDCUSDT"]["bid"])
-                            api._uc_seed_oid = ("BUY", c_res["orderId"], loop_ts)
-                elif max(u1c_edge, fdc_edge) < 0.000010 and free_map["CM_USDC"] >= 50.0:
-                    uc_s_mkr = min(150, math.floor(free_map["CM_USDC"] * 0.85))
-                    if uc_s_mkr >= 45:
-                        s_res = api.request("POST", "/sapi/v1/margin/order", {"symbol": "USDCUSDT", "side": "SELL", "type": "LIMIT_MAKER", "quantity": str(uc_s_mkr), "price": f"{bbos['USDCUSDT']['ask']:.5f}"}, signed=True)
-                        if "orderId" in s_res:
-                            free_map["CM_USDC"] = max(0.0, free_map["CM_USDC"] - uc_s_mkr)
-                            api._uc_seed_oid = ("SELL", s_res["orderId"], loop_ts)
+            elif "USDCUSDT" in bbos and free_map["CM_USDC"] >= 46.0 and cm_ut_debt > 1.0:
+                uc_s_mkr = min(200, math.floor(free_map["CM_USDC"]))
+                if uc_s_mkr >= 45:
+                    s_res = api.request("POST", "/sapi/v1/margin/order", {"symbol": "USDCUSDT", "side": "SELL", "type": "LIMIT_MAKER", "quantity": str(uc_s_mkr), "price": f"{bbos['USDCUSDT']['ask']:.5f}"}, signed=True)
+                    if "orderId" in s_res:
+                        free_map["CM_USDC"] = max(0.0, free_map["CM_USDC"] - uc_s_mkr)
+                        api._uc_seed_oid = ("SELL", s_res["orderId"], loop_ts)
 
-            # 4B. Deploy 100% Stablecoin-Only Zero-Fee Pools (Close Out Remaining BNB/SOL at Profit Only, Zero New Crypto Buys!)
+            # 4B. Debt-Free 1x Unleveraged Stablecoin Engine (While cm_ut_debt > $10, close sells -> repay debt; once $0 debt, compound $499 Spot/Margin 1x with ZERO interest & ZERO peg amplification!)
+            allow_buys = (cm_ut_debt <= 10.0)
             for sym_p, is_iso, f_key, b_key, max_tr, max_buy, t_size, lbl_p in (
                 ("BNBFDUSD",  False, "CM_FDUSD", "CM_BNB",    4,  0, 36.0, "CLOSE-ONLY • BNB/FDUSD"),
                 ("SOLFDUSD",  False, "CM_FDUSD", "CM_SOL",    4,  0, 34.0, "CLOSE-ONLY • SOL/FDUSD"),
-                ("USDCUSDT",  False, "CM_USDT",  "CM_USDC",  26, 14, 45.0, "TURBO • USDC 5x CM"),
-                ("USD1USDC",  False, "CM_USDC",  "CM_USD1",  32, 26, 48.0, "v5.4 TRI-MKR • USD1/USDC"),
-                ("FDUSDUSDC", False, "CM_USDC",  "CM_FDUSD", 10,  8, 45.0, "v5.4 TRI-MKR • FDUSD/USDC"),
-                ("USD1U",     False, "CM_U",     "CM_USD1",   6,  4, 42.0, "v5.4 TRI-MKR • USD1/U"),
-                ("UUSDT",     False, "CM_USDT",  "CM_U",      6,  4, 45.0, "0% MAKER • U/USDT"),
-                ("FDUSDUSDT", False, "CM_USDT",  "CM_FDUSD", 12,  4, 42.0, "10x YIELD • FDUSD 5x CM"),
-                ("USD1USDT",  False, "CM_USDT",  "CM_USD1",  44, 34, 45.0, "50% CORE • USD1 5x CM"),
+                ("USDCUSDT",  False, "CM_USDT",  "CM_USDC",  28,  8 if allow_buys else 0, 45.0, "ZERO-DEBT • USDC 1x"),
+                ("USD1USDC",  False, "CM_USDC",  "CM_USD1",  12,  6 if allow_buys else 0, 45.0, "ZERO-DEBT • USD1/USDC"),
+                ("FDUSDUSDT", False, "CM_USDT",  "CM_FDUSD",  6,  0, 48.5, "CLOSE-ONLY • FDUSD"),
+                ("USD1USDT",  False, "CM_USDT",  "CM_USD1",  36,  4 if allow_buys else 0, 45.0, "ZERO-DEBT • USD1 1x"),
             ):
                 q_bbo = bbos.get(sym_p)
                 if not q_bbo or q_bbo["bid"] <= 0:
@@ -1355,7 +1359,7 @@ def main():
                         "vaultUsd": round(unstick_vault_usd, 4),
                     },
                     "hftTest": {
-                        "status": f"v5.4 STABLE-100% ({sum(1 for t in active_tranches if t['symbol'] in ('USD1USDC','FDUSDUSDC','USD1U'))} TRI-MKR • {sum(1 for t in active_tranches if t['symbol']=='USDCUSDT')} USDC • {sum(1 for t in active_tranches if t['symbol']=='USD1USDT')} USD1)",
+                        "status": f"v5.5 ZERO-DEBT SHIELD (Debt ${cm_ut_debt:.0f} • {sum(1 for t in active_tranches if t['symbol']=='USDCUSDT')} USDC • {sum(1 for t in active_tranches if t['symbol']=='USD1USDT')} USD1)",
                         "paused": False,
                         "pauseReason": "",
                         "grossWinsU": round(booster_metrics["btcuPnl"] + booster_metrics["ethuPnl"] + booster_metrics["euriPnl"], 4),
