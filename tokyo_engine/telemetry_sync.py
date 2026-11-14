@@ -1012,7 +1012,7 @@ def main():
                         if o_live is not None:
                             # Order is still resting in openOrders — Micro-Sniper Ladder (2x top tick ONLY when BidWall >= 2.5x AskWall, strict 1x$12 elsewhere!)
                             top_buy_cnt = sum(1 for tx in active_tranches if tx["symbol"] == sym and abs(tx["buy_px"] - q_bbo["bid"]) < spec["tick"] * 0.3); top_sell_next = sum(1 for tx in active_tranches if tx["symbol"] == sym and abs((tx["sell_px"] if tx["state"] == "SELL_OPEN" else (tx["buy_px"] + spec["tick"])) - (q_bbo["bid"] + spec["tick"])) < spec["tick"] * 0.3)
-                            top_cap_m = 2 if (sym in ("USD1USDT", "USDCUSDT") and q_bbo["bidQty"] >= q_bbo["askQty"] * 2.5) else 1
+                            top_cap_m = 2 if (sym in ("USD1USDT", "USDCUSDT") and q_bbo["bidQty"] >= q_bbo["askQty"] * 2.5) else (1 if (sym in ("USD1USDT", "USDCUSDT") and q_bbo["bidQty"] >= q_bbo["askQty"] * 0.85) or (sym == "UUSDT" and q_bbo["bidQty"] >= q_bbo["askQty"] * 1.50) else 0)
                             sub_cap_m = 1
                             b1_px = round(q_bbo["bid"] - spec["tick"], spec["dec"])
                             b2_px = round(q_bbo["bid"] - spec["tick"] * 2, spec["dec"])
