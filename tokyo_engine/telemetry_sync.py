@@ -204,9 +204,9 @@ def auto_compound_borrow(api, force_repay_all=False):
                 if force_repay_all and bv_ut > 0.001 and fv_ut >= 0.05:
                     rep_amt = min(fv_ut, bv_ut)
                     api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "USDT", "isIsolated": "FALSE", "amount": f"{rep_amt:.6f}", "type": "REPAY"}, signed=True)
-                elif (not force_repay_all) and bv_ut > 1.0 and fv_ut > 460.0:
-                    # Never pay interest on >$460 idle sitting cash — repay excess idle cash automatically!
-                    rep_amt = min(fv_ut - 380.0, bv_ut)
+                elif (not force_repay_all) and bv_ut > 1.0 and fv_ut > 580.0:
+                    # Wide hysteresis (> $580 free cash) prevents unnecessary borrow/repay churn while still trimming large idle cash!
+                    rep_amt = min(fv_ut - 440.0, bv_ut)
                     if rep_amt >= 20.0:
                         api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "USDT", "isIsolated": "FALSE", "amount": f"{rep_amt:.2f}", "type": "REPAY"}, signed=True)
             elif ua.get("asset") == "USD1":
@@ -848,9 +848,17 @@ def main():
                     wb_r = api.request("GET", "/sapi/v1/asset/wallet/balance", {"quoteAsset": "USDT"}, signed=True)
                     wb_sum = sum(float(w.get("balance", 0)) for w in wb_r if w.get("activate")) if isinstance(wb_r, list) else 0.0
                     exact_acct_eq = round(total_net + spot_net, 4)
-                    # Guard against Binance /sapi/v1/asset/wallet/balance 1-tick $120 lag during BORROW/REPAY settlements!
+                    prev_valid_eq = getattr(api, "_last_valid_eq", 498.48)
+                    # Guard against Binance 1-tick $120 async settlement lag across wallet/balance & margin/account right after BORROW/REPAY!
                     if exact_acct_eq > 85.0 and wb_sum > 85.0 and abs(wb_sum - exact_acct_eq) > 15.0:
-                        wb_sum = exact_acct_eq
+                        wb_sum = max(wb_sum, exact_acct_eq) if abs(max(wb_sum, exact_acct_eq) - prev_valid_eq) < 10.0 else exact_acct_eq
+                    if wb_sum > 85.0 and prev_valid_eq > 450.0 and (prev_valid_eq - wb_sum) > 25.0 and getattr(api, "_lag_drop_ticks", 0) < 3:
+                        api._lag_drop_ticks = getattr(api, "_lag_drop_ticks", 0) + 1
+                        wb_sum = prev_valid_eq
+                    else:
+                        api._lag_drop_ticks = 0
+                        if wb_sum > 450.0:
+                            api._last_valid_eq = wb_sum
                     if wb_sum > 85.0:
                         cached_total_usd = round(wb_sum, 4)
                         cached_leveraged_pool = round(total_pool, 2)
@@ -1293,10 +1301,10 @@ def main():
                     if "tranId" in rr:
                         free_map["CM_USDT"] = max(0.0, free_map["CM_USDT"] - rep_q)
                         cm_ut_debt = max(0.0, cm_ut_debt - rep_q)
-                elif (not soft_delev) and cached_total_usd > 497.20 and cm_ut_debt < 960.0 and free_map["CM_USDT"] < 240.0 and (loop_ts - getattr(api, "_last_borrow_tick", 0.0)) >= 6.0:
-                    # Step 2 On-Demand Borrow: ONLY borrow $120 chunks when free USDT drops below $240 so we NEVER pay interest on idle $650 reserve!
+                elif (not soft_delev) and cached_total_usd > 497.20 and cm_ut_debt < 960.0 and free_map["CM_USDT"] < 230.0 and (loop_ts - getattr(api, "_last_borrow_tick", 0.0)) >= 10.0:
+                    # Step 2 On-Demand Borrow: Borrow $240 chunks when free USDT drops below $230 (hysteresis gap vs $580 trim prevents borrow/repay churn!)
                     api._last_borrow_tick = loop_ts
-                    bor_q = min(120.0, 960.0 - cm_ut_debt)
+                    bor_q = min(240.0, 960.0 - cm_ut_debt)
                     if bor_q >= 25.0:
                         br_r = api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "USDT", "isIsolated": "FALSE", "amount": f"{bor_q:.2f}", "type": "BORROW"}, signed=True)
                         if "tranId" in br_r:
