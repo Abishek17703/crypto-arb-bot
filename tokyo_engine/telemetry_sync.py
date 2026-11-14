@@ -204,10 +204,10 @@ def auto_compound_borrow(api, force_repay_all=False):
                 if force_repay_all and bv_ut > 0.001 and fv_ut >= 0.05:
                     rep_amt = min(fv_ut, bv_ut)
                     api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "USDT", "isIsolated": "FALSE", "amount": f"{rep_amt:.6f}", "type": "REPAY"}, signed=True)
-                elif (not force_repay_all) and bv_ut > 1.0 and fv_ut > 340.0:
-                    # Zero-Waste Interest Trim: Immediately repay any idle free USDT > $340 down to $220 reserve so borrowed capital is 100% actively earning!
-                    rep_amt = min(fv_ut - 220.0, bv_ut)
-                    if rep_amt >= 20.0:
+                elif (not force_repay_all) and bv_ut > 0.05 and fv_ut > 130.0:
+                    # Zero-Debt Interest Shield: Immediately repay any idle free USDT > $130 down to $105 reserve so margin interest = $0.0000/hr!
+                    rep_amt = min(fv_ut - 105.0, bv_ut)
+                    if rep_amt >= 1.0:
                         api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "USDT", "isIsolated": "FALSE", "amount": f"{rep_amt:.2f}", "type": "REPAY"}, signed=True)
             elif ua.get("asset") == "USD1":
                 fv_u1, lv_u1, bv_u1 = float(ua.get("free", 0)), float(ua.get("locked", 0)), float(ua.get("borrowed", 0)) + float(ua.get("interest", 0))
@@ -1370,17 +1370,18 @@ def main():
                     if "tranId" in rr_u1:
                         free_map["CM_USD1"] = max(0.0, free_map["CM_USD1"] - rep_u1)
                         cm_u1_debt = max(0.0, cm_u1_debt - rep_u1)
-                if soft_delev and cm_ut_debt > 0.01 and free_map["CM_USDT"] >= 0.50 and (loop_ts - getattr(api, "_last_repay_tick", 0.0)) >= 1.5:
+                if cm_ut_debt > 0.01 and (soft_delev or free_map["CM_USDT"] > 135.0) and free_map["CM_USDT"] >= 0.50 and (loop_ts - getattr(api, "_last_repay_tick", 0.0)) >= 2.0:
                     api._last_repay_tick = loop_ts
-                    rep_q = min(free_map["CM_USDT"], cm_ut_debt)
-                    rr = api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "USDT", "isIsolated": "FALSE", "amount": f"{rep_q:.6f}", "type": "REPAY"}, signed=True)
-                    if "tranId" in rr:
-                        free_map["CM_USDT"] = max(0.0, free_map["CM_USDT"] - rep_q)
-                        cm_ut_debt = max(0.0, cm_ut_debt - rep_q)
-                elif (not soft_delev) and cached_total_usd > 497.20 and cm_ut_debt < 450.0 and free_map["CM_USDT"] < 140.0 and (loop_ts - getattr(api, "_last_borrow_tick", 0.0)) >= 5.0:
-                    # Precision Micro-Loan (max $450 USDT -> ~$950 nimble working pool; costs <$0.002/hr interest = 200x covered by rapid 1-tick flips!)
+                    rep_q = min(free_map["CM_USDT"], cm_ut_debt) if soft_delev else min(max(0.0, free_map["CM_USDT"] - 105.0), cm_ut_debt)
+                    if rep_q >= 0.50:
+                        rr = api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "USDT", "isIsolated": "FALSE", "amount": f"{rep_q:.6f}", "type": "REPAY"}, signed=True)
+                        if "tranId" in rr:
+                            free_map["CM_USDT"] = max(0.0, free_map["CM_USDT"] - rep_q)
+                            cm_ut_debt = max(0.0, cm_ut_debt - rep_q)
+                elif (not soft_delev) and cached_total_usd > 497.20 and cm_ut_debt < 120.0 and free_map["CM_USDT"] < 75.0 and (loop_ts - getattr(api, "_last_borrow_tick", 0.0)) >= 6.0:
+                    # On-Demand Burst Micro-Loan ONLY if 100% of own $498 cash is simultaneously filled (max $120 temporary bridge, auto-repaid immediately upon flip!)
                     api._last_borrow_tick = loop_ts
-                    bor_q = min(140.0, 450.0 - cm_ut_debt)
+                    bor_q = min(80.0, 120.0 - cm_ut_debt)
                     if bor_q >= 25.0:
                         br_r = api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "USDT", "isIsolated": "FALSE", "amount": f"{bor_q:.2f}", "type": "BORROW"}, signed=True)
                         if "tranId" in br_r:
