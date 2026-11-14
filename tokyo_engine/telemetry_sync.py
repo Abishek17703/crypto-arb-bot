@@ -356,7 +356,7 @@ def adopt_existing_tranches(api):
         _core_oc = api.request("GET", "/sapi/v1/margin/openOrders", {"symbol": _core_sym}, signed=True)
         if isinstance(_core_oc, list):
             for _oo in _core_oc:
-                if _oo.get("side") == "BUY":
+                if _oo.get("side") == "BUY" or float(_oo.get("origQty", 0)) > 60.0:
                     api.request("DELETE", "/sapi/v1/margin/order", {"symbol": _core_sym, "orderId": _oo["orderId"]}, signed=True)
                 else:
                     open_cm.append(_oo)
@@ -1335,24 +1335,19 @@ def main():
                 soft_delev = (85.0 < cached_total_usd <= 496.80)
                 api._target_hedge_u1 = 0.0
                 api._target_hedge_uc = 0.0
-                # Immediately close any residual USDC/USD1 base debt with sideEffectType=AUTO_REPAY at top-of-book so naked short overhang hits 0.00 in 1 fill!
+                # Close any residual USDC/USD1 base debt cleanly (throttled >=5.0s so cached_balances syncs cm_uc_debt = 0!)
                 uc_unwind = getattr(api, "_uc_unwind_oid", None)
                 if uc_unwind is not None:
                     if not any(o.get("orderId") == uc_unwind[0] for o in cached_open_orders):
                         api._uc_unwind_oid = None
-                    elif "USDCUSDT" in bbos and (bbos["USDCUSDT"]["bid"] > uc_unwind[1] + 0.000005 or loop_ts - uc_unwind[2] > 2.5):
+                        cm_uc_debt = 0.0
+                    elif "USDCUSDT" in bbos and (bbos["USDCUSDT"]["bid"] > uc_unwind[1] + 0.000005 or loop_ts - uc_unwind[2] > 3.5):
                         api.request("DELETE", "/sapi/v1/margin/order", {"symbol": "USDCUSDT", "orderId": uc_unwind[0]}, signed=True)
                         api._uc_unwind_oid = None
-                elif cm_uc_debt >= 6.0 and free_map["CM_USDC"] < cm_uc_debt - 1.0 and "USDCUSDT" in bbos:
+                elif cm_uc_debt >= 6.0 and free_map["CM_USDC"] < cm_uc_debt - 1.0 and "USDCUSDT" in bbos and (loop_ts - getattr(api, "_last_uw_post", 0.0)) >= 5.5:
                     need_uc = math.ceil(min(160.0, cm_uc_debt - free_map["CM_USDC"]))
-                    if free_map["CM_USDT"] < need_uc * 1.005:
-                        # Free up locked BUY orders on USDCUSDT immediately so AUTO_REPAY closes the short leg in 1 second!
-                        for tx_u in [t for t in list(active_tranches) if t["symbol"] == "USDCUSDT" and t["state"] == "BUY_OPEN"]:
-                            cr_u = api.request("DELETE", "/sapi/v1/margin/order", {"symbol": "USDCUSDT", "orderId": tx_u["buy_oid"]}, signed=True)
-                            if cr_u.get("status") == "CANCELED":
-                                free_map["CM_USDT"] += max(0.0, tx_u["qty"] - float(cr_u.get("executedQty", 0))) * tx_u["buy_px"]
-                                active_tranches.remove(tx_u)
                     if need_uc >= 6 and free_map["CM_USDT"] >= need_uc * 1.002:
+                        api._last_uw_post = loop_ts
                         bpx_uw = round(bbos["USDCUSDT"]["ask"] - 0.00001, 5)
                         br_uw = api.request("POST", "/sapi/v1/margin/order", {"symbol": "USDCUSDT", "side": "BUY", "type": "LIMIT_MAKER", "sideEffectType": "AUTO_REPAY", "quantity": str(need_uc), "price": f"{bpx_uw:.5f}"}, signed=True)
                         if "orderId" not in br_uw and "immediately match" in str(br_uw.get("msg", "")):
