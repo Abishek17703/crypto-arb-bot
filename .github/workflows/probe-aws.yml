@@ -1,0 +1,29 @@
+name: Probe AWS Account and Tokyo Instance
+
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Check Caller Identity and Enabled Regions
+        run: |
+          echo "=== CALLER IDENTITY ==="
+          aws sts get-caller-identity --output json
+          echo "=== BUCKETS ==="
+          aws s3api list-buckets --query "Buckets[*].Name" --output json || true
+          echo "=== CHECKING TOKYO (ap-northeast-1) & SYDNEY (ap-southeast-2) ==="
+          for R in ap-northeast-1 ap-southeast-1 ap-southeast-2; do
+            echo "--- Region: $R ---"
+            aws ec2 describe-instances --region "$R" \
+              --query "Reservations[*].Instances[*].{ID:InstanceId,Type:InstanceType,State:State.Name,AZ:Placement.AvailabilityZone,IP:PublicIpAddress,Name:Tags[?Key=='Name']|[0].Value}" \
+              --output json 2>&1 || true
+          done
