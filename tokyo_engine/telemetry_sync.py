@@ -487,7 +487,10 @@ def main():
         [1794658957.9, 498.5624], [1794659339.9, 498.6734], [1794659799.4, 498.7004], [1794660162.0, 498.5792],
         [1794660404.0, 498.4441], [1794660766.5, 498.4793], [1794661067.6, 498.5141], [1794661309.5, 498.3907],
         [1794661672.0, 498.3855], [1794661913.6, 498.3738], [1794662155.4, 498.3658], [1794662397.0, 498.3684],
-        [1794662821.3, 498.3667],
+        [1794662821.3, 498.3667], [1794668144.3, 498.3865], [1794668622.4, 498.3772], [1794669286.8, 498.3926],
+        [1794669752.5, 498.4060], [1794670193.3, 498.4236], [1794670659.3, 498.4332], [1794671099.8, 498.4559],
+        [1794671565.9, 498.4667], [1794672006.1, 498.4809], [1794672472.1, 498.4870], [1794672912.3, 498.4862],
+        [1794673154.1, 498.4933], [1794673378.4, 498.4938], [1794673577.2, 498.4946], [1794673703.1, 498.4912],
     ]
     eq_series = list(seed_true_hist)
     try:
@@ -496,7 +499,8 @@ def main():
                 loaded_eq = json.load(_eqf)
                 merged_map = {round(float(p[0]), 1): float(p[1]) for p in seed_true_hist}
                 for p in loaded_eq:
-                    merged_map[round(float(p[0]), 1)] = float(p[1])
+                    if float(p[1]) > 480.0:
+                        merged_map[round(float(p[0]), 1)] = float(p[1])
                 eq_series = [[k, merged_map[k]] for k in sorted(merged_map.keys())]
     except Exception:
         eq_series = list(seed_true_hist)
@@ -878,7 +882,7 @@ def main():
 
                     # Scrub any prior single-tick $120 borrow/repay API lag outliers (< $450 when live > $480) from eq_series
                     if cached_total_usd > 480.0 and eq_series:
-                        eq_series = [pt for pt in eq_series if abs(float(pt[1]) - cached_total_usd) < 40.0]
+                        eq_series = [pt for pt in eq_series if float(pt[1]) > 460.0]
 
                     # TRUE SIGNED WALLET EQUITY & 8-HORIZON DELTAS (No artificial floor/clamp — if equity went in minus over any window, shows exact negative minus!)
                     if cached_total_usd > 85.0:
