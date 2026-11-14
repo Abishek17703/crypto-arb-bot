@@ -1,0 +1,676 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Tokyo Live Arbitrage Command Center</title>
+  <style>
+    *, *::before, *::after {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+    :root {
+      --background: #090d16;
+      --foreground: #f8fafc;
+      --card: #111827;
+      --muted: #1e293b;
+      --muted-foreground: #94a3b8;
+    }
+    html, body {
+      min-height: 100vh;
+      background-color: #090d16;
+      color: #f8fafc;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Inter", "Helvetica Neue", Arial, sans-serif;
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+    }
+    .min-h-screen { min-height: 100vh; }
+    .max-w-7xl { max-width: 80rem; }
+    .mx-auto { margin-left: auto; margin-right: auto; }
+    .p-4 { padding: 1rem; }
+    .p-5 { padding: 1.25rem; }
+    .p-3\.5 { padding: 0.875rem; }
+    .px-5 { padding-left: 1.25rem; padding-right: 1.25rem; }
+    .py-3\.5 { padding-top: 0.875rem; padding-bottom: 0.875rem; }
+    .px-2\.5 { padding-left: 0.625rem; padding-right: 0.625rem; }
+    .py-0\.5 { padding-top: 0.125rem; padding-bottom: 0.125rem; }
+    .px-2 { padding-left: 0.5rem; padding-right: 0.5rem; }
+    .py-1 { padding-top: 0.25rem; padding-bottom: 0.25rem; }
+    .pt-1 { padding-top: 0.25rem; }
+    .pb-3 { padding-bottom: 0.75rem; }
+    .my-2\.5 { margin-top: 0.625rem; margin-bottom: 0.625rem; }
+    .mt-0\.5 { margin-top: 0.125rem; }
+    .pr-1 { padding-right: 0.25rem; }
+
+    @media (min-width: 768px) {
+      .md\:p-6 { padding: 1.5rem; }
+      .md\:text-4xl { font-size: 2.25rem; line-height: 2.5rem; }
+    }
+
+    .space-y-5 > * + * { margin-top: 1.25rem; }
+    .space-y-4 > * + * { margin-top: 1rem; }
+    .space-y-2\.5 > * + * { margin-top: 0.625rem; }
+    .space-y-1 > * + * { margin-top: 0.25rem; }
+
+    .flex { display: flex; }
+    .flex-col { flex-direction: column; }
+    .flex-wrap { flex-wrap: wrap; }
+    .items-center { align-items: center; }
+    .items-baseline { align-items: baseline; }
+    .gap-2\.5 { gap: 0.625rem; }
+    .justify-between { justify-content: space-between; }
+    .shrink-0 { flex-shrink: 0; }
+    .min-w-0 { min-width: 0; }
+    .text-right { text-align: right; }
+
+    .gap-2 { gap: 0.5rem; }
+    .gap-3 { gap: 0.75rem; }
+    .gap-4 { gap: 1rem; }
+    .gap-5 { gap: 1.25rem; }
+
+    .grid { display: grid; }
+    .grid-cols-1 { grid-template-columns: repeat(1, minmax(0, 1fr)); }
+    @media (min-width: 640px) {
+      .sm\:grid-cols-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
+    @media (min-width: 1024px) {
+      .lg\:grid-cols-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+      .lg\:grid-cols-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
+
+    .rounded-3xl { border-radius: 1.5rem; }
+    .rounded-2xl { border-radius: 1rem; }
+    .rounded-xl { border-radius: 0.75rem; }
+    .rounded-lg { border-radius: 0.5rem; }
+    .rounded-md { border-radius: 0.375rem; }
+    .rounded-full { border-radius: 9999px; }
+
+    .border { border: 1px solid rgba(51, 65, 85, 0.4); }
+    .border-slate-800\/80, .border-slate-800\/90 { border-color: rgba(30, 41, 59, 0.85); }
+    .border-t { border-top-width: 1px; border-top-style: solid; }
+    .border-b { border-bottom-width: 1px; border-bottom-style: solid; }
+
+    .bg-\[var\(--card\)\] { background-color: #111827; box-shadow: 0 4px 20px -2px rgba(0, 0, 0, 0.5); }
+    .bg-\[var\(--background\)\] { background-color: #090d16; }
+    .bg-slate-950\/90 { background-color: rgba(3, 7, 18, 0.92); }
+
+    .bg-emerald-500\/15 { background-color: rgba(16, 185, 129, 0.15); }
+    .bg-emerald-500\/20 { background-color: rgba(16, 185, 129, 0.20); }
+    .bg-emerald-400 { background-color: #34d399; }
+    .bg-amber-400 { background-color: #fbbf24; }
+    .bg-amber-500\/20 { background-color: rgba(245, 158, 11, 0.20); }
+    .bg-rose-400 { background-color: #fb7185; }
+    .bg-rose-500\/20 { background-color: rgba(244, 63, 94, 0.20); }
+    .bg-purple-500\/15 { background-color: rgba(168, 85, 247, 0.15); }
+    .bg-purple-500\/20 { background-color: rgba(168, 85, 247, 0.20); }
+    .bg-cyan-500\/20 { background-color: rgba(6, 182, 212, 0.20); }
+    .bg-sky-500\/15 { background-color: rgba(14, 165, 233, 0.15); }
+
+    .border-emerald-500\/25, .border-emerald-500\/30 { border-color: rgba(16, 185, 129, 0.3); }
+    .border-amber-500\/30 { border-color: rgba(245, 158, 11, 0.3); }
+    .border-rose-500\/30 { border-color: rgba(244, 63, 94, 0.3); }
+    .border-purple-500\/30 { border-color: rgba(168, 85, 247, 0.3); }
+    .border-cyan-500\/30 { border-color: rgba(6, 182, 212, 0.3); }
+    .border-sky-500\/25 { border-color: rgba(14, 165, 233, 0.25); }
+
+    .text-white { color: #ffffff; }
+    .text-slate-100 { color: #f1f5f9; }
+    .text-slate-200 { color: #e2e8f0; }
+    .text-slate-400 { color: #94a3b8; }
+    .text-\[var\(--foreground\)\] { color: #f8fafc; }
+    .text-\[var\(--muted-foreground\)\] { color: #94a3b8; }
+
+    .text-emerald-400 { color: #34d399; }
+    .text-emerald-300 { color: #6ee7b7; }
+    .text-amber-400 { color: #fbbf24; }
+    .text-amber-300 { color: #fcd34d; }
+    .text-rose-400 { color: #fb7185; }
+    .text-rose-300 { color: #fda4af; }
+    .text-purple-300 { color: #d8b4fe; }
+    .text-cyan-300 { color: #67e8f9; }
+    .text-sky-400 { color: #38bdf8; }
+
+    .text-\[11px\] { font-size: 11px; }
+    .text-xs { font-size: 0.75rem; line-height: 1rem; }
+    .text-sm { font-size: 0.875rem; line-height: 1.25rem; }
+    .text-base { font-size: 1rem; line-height: 1.5rem; }
+    .text-3xl { font-size: 1.875rem; line-height: 2.25rem; }
+    .text-4xl { font-size: 2.25rem; line-height: 2.5rem; }
+
+    .font-normal { font-weight: 400; }
+    .font-medium { font-weight: 500; }
+    .font-semibold { font-weight: 600; }
+    .font-bold { font-weight: 700; }
+    .font-extrabold { font-weight: 800; }
+    .tracking-tight { letter-spacing: -0.025em; }
+    .tracking-wider { letter-spacing: 0.05em; }
+    .uppercase { text-transform: uppercase; }
+
+    .tabular-nums {
+      font-variant-numeric: tabular-nums;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "JetBrains Mono", monospace;
+    }
+    .font-mono {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "JetBrains Mono", monospace;
+    }
+
+    .w-2 { width: 0.5rem; }
+    .h-2 { height: 0.5rem; }
+    .w-2\.5 { width: 0.625rem; }
+    .h-2\.5 { height: 0.625rem; }
+    .max-h-\[540px\] { max-height: 540px; }
+    .overflow-y-auto { overflow-y: auto; }
+
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: #334155; border-radius: 4px; }
+    ::-webkit-scrollbar-thumb:hover { background: #475569; }
+
+    @keyframes pulseGlow {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50% { opacity: 0.35; transform: scale(0.9); }
+    }
+    .live-dot {
+      animation: pulseGlow 1.4s infinite ease-in-out;
+    }
+
+    .bg-slate-950\/90 {
+      transition: border-color 0.15s ease, transform 0.15s ease;
+    }
+    .bg-slate-950\/90:hover {
+      border-color: rgba(71, 85, 105, 0.8);
+      transform: translateY(-1px);
+    }
+
+    .order-row { background-color: rgba(3, 7, 18, 0.92); border: 1px solid rgba(30, 41, 59, 0.85); border-radius: 1rem; padding: 0.875rem; display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; }
+    .order-left { min-width: 0; }
+    .order-top { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.25rem; }
+    .order-sym { font-size: 0.875rem; font-weight: 800; color: #f1f5f9; }
+    .order-sub { display: flex; align-items: center; gap: 0.5rem; font-size: 0.75rem; color: #94a3b8; font-variant-numeric: tabular-nums; }
+    .order-right { text-align: right; flex-shrink: 0; }
+    .order-pnl { font-size: 0.875rem; font-weight: 800; color: #34d399; font-variant-numeric: tabular-nums; }
+    .order-id { font-size: 0.75rem; font-weight: 700; color: #e2e8f0; font-variant-numeric: tabular-nums; }
+    .order-time { font-size: 11px; color: #94a3b8; font-variant-numeric: tabular-nums; }
+    .dot { width: 0.5rem; height: 0.5rem; border-radius: 9999px; display: inline-block; }
+    .dot-green { background-color: #34d399; }
+    .dot-yellow { background-color: #fbbf24; }
+    .dot-red { background-color: #fb7185; }
+    .pill { font-size: 11px; font-weight: 700; padding: 0.125rem 0.5rem; border-radius: 0.375rem; }
+    .pill-cyan { background-color: rgba(6, 182, 212, 0.20); color: #67e8f9; border: 1px solid rgba(6, 182, 212, 0.3); }
+    .pill-purple { background-color: rgba(168, 85, 247, 0.20); color: #d8b4fe; border: 1px solid rgba(168, 85, 247, 0.3); }
+    .pill-green { background-color: rgba(16, 185, 129, 0.20); color: #6ee7b7; border: 1px solid rgba(16, 185, 129, 0.3); }
+    .pill-yellow { background-color: rgba(245, 158, 11, 0.20); color: #fcd34d; border: 1px solid rgba(245, 158, 11, 0.3); }
+    .pill-red { background-color: rgba(244, 63, 94, 0.20); color: #fda4af; border: 1px solid rgba(244, 63, 94, 0.3); }
+    .txt-green { color: #34d399; }
+    .txt-white { color: #e2e8f0; }
+    .fw-700 { font-weight: 700; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
+  </style>
+</head>
+<body class="min-h-screen p-4 md:p-6">
+  <div class="max-w-7xl mx-auto space-y-5">
+
+    <!-- TOP LIVE STATUS BAR -->
+    <div class="flex flex-wrap items-center justify-between gap-3 bg-[var(--card)] border border-slate-800/90 px-5 py-3.5 rounded-2xl">
+      <div class="flex items-center gap-3">
+        <span class="w-2.5 h-2.5 rounded-full bg-emerald-400 live-dot"></span>
+        <span class="font-bold text-sm tracking-tight" id="engineVersionTitle">Tokyo Production Engine v4.2 — 100% USD1 TURBO (5x Iso + 5x Cross • Waterfall Auto-Unstick)</span>
+        <span class="text-xs px-2.5 py-0.5 rounded-md bg-emerald-500/15 text-emerald-400 font-semibold border border-emerald-500/25" id="syncStatus">Live • Tokyo ap-northeast-1a • Updated 12:56:07 (0.4s ago)</span>
+      </div>
+      <div class="flex items-center gap-4 text-xs font-medium text-[var(--muted-foreground)] tabular-nums">
+        <span class="px-2.5 py-1 rounded-lg bg-purple-500/15 text-purple-300 border border-purple-500/30 font-bold" id="unstickVaultBadge">Rescue Vault: $0.9454</span>
+        <span class="px-2.5 py-1 rounded-lg bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 font-bold" id="totalFillsBadge">36,306 Fills Today</span>
+        <span>USD1: <strong class="text-[var(--foreground)]" id="pxUSD1">0.99908</strong></span>
+        <span>Cross Eq: <strong class="text-emerald-400">$51.35</strong></span>
+        <span>Iso Eq: <strong class="text-cyan-300">$44.76</strong></span>
+      </div>
+    </div>
+
+    <!-- 4 HERO KPI CARDS -->
+    <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+
+      <!-- 1. Live Net Equity -->
+      <div class="bg-[var(--card)] border border-slate-800/80 rounded-3xl p-5 flex flex-col justify-between">
+        <div class="flex items-center justify-between">
+          <span class="text-xs font-semibold text-[var(--muted-foreground)] uppercase tracking-wider">Net Equity (Live)</span>
+          <span class="text-xs font-bold px-2.5 py-0.5 rounded-lg bg-emerald-500/15 text-emerald-400 tabular-nums" id="roiPill">+1.13%</span>
+        </div>
+        <div class="my-2.5">
+          <div class="text-3xl md:text-4xl font-extrabold tracking-tight tabular-nums text-white" id="heroEquity">$502.4035</div>
+        </div>
+        <div class="flex items-center justify-between text-xs text-[var(--muted-foreground)] pt-1 border-t border-slate-800/80">
+          <span>Start: <strong class="text-[var(--foreground)] tabular-nums" id="startEqLabel">$98.2494</strong></span>
+          <span class="text-emerald-400 font-bold tabular-nums" id="netPnlDollar">+$5.6711 Today</span>
+        </div>
+      </div>
+
+      <!-- 2. Hourly Profit Pace -->
+      <div class="bg-[var(--card)] border border-slate-800/80 rounded-3xl p-5 flex flex-col justify-between">
+        <div class="flex items-center justify-between gap-1.5">
+          <span class="text-xs font-semibold text-[var(--muted-foreground)] uppercase tracking-wider">Hourly Return Pace</span>
+          <div class="flex items-center gap-1.5">
+            <button id="resetRunRateBtn" onclick="resetRunRateFromScratch()" title="Reset &amp; calculate run rate from scratch starting now" class="text-[11px] font-bold px-2 py-0.5 rounded-lg bg-cyan-500/20 hover:bg-cyan-500/35 text-cyan-300 border border-cyan-500/40 transition cursor-pointer">↻ Refresh Run Rate</button>
+            <span class="text-xs font-bold px-2.5 py-0.5 rounded-lg bg-emerald-500/15 text-emerald-400 tabular-nums" id="hrPctPill">+0.118% / hr</span>
+          </div>
+        </div>
+        <div class="my-2.5 flex items-baseline justify-between">
+          <div class="text-3xl md:text-4xl font-extrabold tracking-tight text-emerald-400 tabular-nums" id="heroHourlyReturn">+$0.5906</div>
+          <span class="text-[11px] text-cyan-300 font-semibold tabular-nums hidden" id="resetPaceTimerBadge">0m 00s</span>
+        </div>
+        <div class="flex items-center justify-between text-xs text-[var(--muted-foreground)] pt-1 border-t border-slate-800/80">
+          <span>Last 1h: <strong class="text-[var(--foreground)] tabular-nums" id="last1hFillsLabel">3,629 fills</strong></span>
+          <span class="text-emerald-400 font-bold tabular-nums" id="realizedTodayPill">Today: +$5.6711</span>
+        </div>
+      </div>
+
+      <!-- 3. Today by 11:59 PM & 24h Run Rate -->
+      <div class="bg-[var(--card)] border border-slate-800/80 rounded-3xl p-5 flex flex-col justify-between">
+        <div class="flex items-center justify-between">
+          <span class="text-xs font-semibold text-[var(--muted-foreground)] uppercase tracking-wider">Today by 11:59 PM</span>
+          <span class="text-xs font-bold px-2.5 py-0.5 rounded-lg bg-emerald-500/15 text-emerald-400 tabular-nums" id="dayPctPill">+2.82% / 24h</span>
+        </div>
+        <div class="my-2.5 flex items-baseline gap-2.5">
+          <div class="text-3xl md:text-4xl font-extrabold tracking-tight text-emerald-400 tabular-nums" id="eodCapital1159">$508.94</div>
+          <span class="text-sm font-bold px-2 py-0.5 rounded-md bg-emerald-500/15 text-emerald-400 tabular-nums" id="eodProfitAlongside">+$12.21</span>
+        </div>
+        <div class="flex items-center justify-between text-xs text-[var(--muted-foreground)] pt-1 border-t border-slate-800/80">
+          <span>Target by 11:59 PM</span>
+          <span class="text-emerald-400 font-bold tabular-nums" id="runRate24hSub">24h Rate: +$14.1744/d</span>
+        </div>
+      </div>
+
+      <!-- 4. Active Leveraged Pool & Tranche Status (Yellow Active / Green Free / Red Stuck) -->
+      <div class="bg-[var(--card)] border border-slate-800/80 rounded-3xl p-5 flex flex-col justify-between">
+        <div class="flex items-center justify-between">
+          <span class="text-xs font-semibold text-[var(--muted-foreground)] uppercase tracking-wider">Pool &amp; <span id="trTotalCount">72</span> Tranches</span>
+          <span class="text-xs font-bold px-2.5 py-0.5 rounded-lg bg-sky-500/15 text-sky-400" id="effLevBadge">5.0x EFF</span>
+        </div>
+        <div class="my-2.5">
+          <div class="text-3xl md:text-4xl font-extrabold tracking-tight tabular-nums text-white" id="heroPool">$2488.46</div>
+        </div>
+        <div class="flex items-center justify-between text-xs font-bold tabular-nums pt-1 border-t border-slate-800/80">
+          <span class="text-amber-400">Active: <strong id="trActiveYellow" class="text-sm font-extrabold">16</strong></span>
+          <span class="text-emerald-400">Free: <strong id="trFreeGreen" class="text-sm font-extrabold">31</strong></span>
+          <span class="text-rose-400">Stuck: <strong id="trStuckRed" class="text-sm font-extrabold">25</strong></span>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- SIDE-BY-SIDE LIVE STREAMS: 1. CLOSED TRADES (REALIZED) & 2. LIVE OPEN ORDERS (WORKING / FREE / STUCK) -->
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-5">
+
+      <!-- LEFT COLUMN: CLOSED TRADES (REALIZED PROFITS) -->
+      <div class="bg-[var(--card)] border border-slate-800/80 rounded-3xl p-5 space-y-4">
+        <div class="flex items-center justify-between gap-2 border-b border-slate-800/80 pb-3">
+          <div>
+            <h2 class="text-base font-bold tracking-tight flex items-center gap-2">
+              <span class="w-2 h-2 rounded-full bg-emerald-400"></span>
+              Closed Trades (Realized Round-Trips)
+            </h2>
+            <p class="text-xs text-[var(--muted-foreground)] mt-0.5">Strictly newest completed BUY → SELL round-trips with live age timers</p>
+          </div>
+          <span class="px-2.5 py-1 rounded-xl text-xs font-bold bg-emerald-500/15 text-emerald-400 border border-emerald-500/25">
+            100% Profitable
+          </span>
+        </div>
+        <div id="closedTradesGrid" class="space-y-2.5 max-h-[540px] overflow-y-auto pr-1">
+<!-- CLOSED_TRADES_START -->
+<div class="order-row"><div class="order-left"><div class="order-top"><span class="dot dot-green"></span><span class="order-sym">USD1/USDT</span><span class="pill pill-cyan">50% CORE</span></div><div class="order-sub"><span class="txt-green fw-700">CLOSED</span><span>•</span><span>Qty <strong class="txt-white">9</strong></span><span>•</span><span class="mono txt-white">$0.99908 → $0.99909</span></div></div><div class="order-right"><div class="order-pnl txt-green">+$0.00009</div><div class="order-time">12:55:49 (15s ago)</div></div></div>
+<div class="order-row"><div class="order-left"><div class="order-top"><span class="dot dot-green"></span><span class="order-sym">USD1/USDT</span><span class="pill pill-cyan">50% CORE</span></div><div class="order-sub"><span class="txt-green fw-700">CLOSED</span><span>•</span><span>Qty <strong class="txt-white">36</strong></span><span>•</span><span class="mono txt-white">$0.99908 → $0.99909</span></div></div><div class="order-right"><div class="order-pnl txt-green">+$0.00036</div><div class="order-time">12:55:49 (15s ago)</div></div></div>
+<div class="order-row"><div class="order-left"><div class="order-top"><span class="dot dot-green"></span><span class="order-sym">USD1/USDT</span><span class="pill pill-cyan">50% CORE</span></div><div class="order-sub"><span class="txt-green fw-700">CLOSED</span><span>•</span><span>Qty <strong class="txt-white">36</strong></span><span>•</span><span class="mono txt-white">$0.99908 → $0.99909</span></div></div><div class="order-right"><div class="order-pnl txt-green">+$0.00036</div><div class="order-time">12:55:49 (15s ago)</div></div></div>
+<div class="order-row"><div class="order-left"><div class="order-top"><span class="dot dot-green"></span><span class="order-sym">USD1/USDT</span><span class="pill pill-cyan">50% CORE</span></div><div class="order-sub"><span class="txt-green fw-700">CLOSED</span><span>•</span><span>Qty <strong class="txt-white">36</strong></span><span>•</span><span class="mono txt-white">$0.99908 → $0.99909</span></div></div><div class="order-right"><div class="order-pnl txt-green">+$0.00036</div><div class="order-time">12:55:49 (15s ago)</div></div></div>
+<div class="order-row"><div class="order-left"><div class="order-top"><span class="dot dot-green"></span><span class="order-sym">USD1/USDT</span><span class="pill pill-cyan">50% CORE</span></div><div class="order-sub"><span class="txt-green fw-700">CLOSED</span><span>•</span><span>Qty <strong class="txt-white">30</strong></span><span>•</span><span class="mono txt-white">$0.99908 → $0.99909</span></div></div><div class="order-right"><div class="order-pnl txt-green">+$0.00030</div><div class="order-time">12:55:49 (15s ago)</div></div></div>
+<div class="order-row"><div class="order-left"><div class="order-top"><span class="dot dot-green"></span><span class="order-sym">USD1/USDT</span><span class="pill pill-cyan">50% CORE</span></div><div class="order-sub"><span class="txt-green fw-700">CLOSED</span><span>•</span><span>Qty <strong class="txt-white">25</strong></span><span>•</span><span class="mono txt-white">$0.99908 → $0.99909</span></div></div><div class="order-right"><div class="order-pnl txt-green">+$0.00025</div><div class="order-time">12:55:49 (15s ago)</div></div></div>
+<div class="order-row"><div class="order-left"><div class="order-top"><span class="dot dot-green"></span><span class="order-sym">USD1/USDT</span><span class="pill pill-cyan">50% CORE</span></div><div class="order-sub"><span class="txt-green fw-700">CLOSED</span><span>•</span><span>Qty <strong class="txt-white">36</strong></span><span>•</span><span class="mono txt-white">$0.99908 → $0.99909</span></div></div><div class="order-right"><div class="order-pnl txt-green">+$0.00036</div><div class="order-time">12:55:49 (15s ago)</div></div></div>
+<div class="order-row"><div class="order-left"><div class="order-top"><span class="dot dot-green"></span><span class="order-sym">USD1/USDT</span><span class="pill pill-cyan">50% CORE</span></div><div class="order-sub"><span class="txt-green fw-700">CLOSED</span><span>•</span><span>Qty <strong class="txt-white">36</strong></span><span>•</span><span class="mono txt-white">$0.99908 → $0.99909</span></div></div><div class="order-right"><div class="order-pnl txt-green">+$0.00036</div><div class="order-time">12:55:49 (15s ago)</div></div></div>
+<div class="order-row"><div class="order-left"><div class="order-top"><span class="dot dot-green"></span><span class="order-sym">USD1/USDT</span><span class="pill pill-cyan">50% CORE</span></div><div class="order-sub"><span class="txt-green fw-700">CLOSED</span><span>•</span><span>Qty <strong class="txt-white">19</strong></span><span>•</span><span class="mono txt-white">$0.99908 → $0.99909</span></div></div><div class="order-right"><div class="order-pnl txt-green">+$0.00019</div><div class="order-time">12:55:49 (15s ago)</div></div></div>
+<div class="order-row"><div class="order-left"><div class="order-top"><span class="dot dot-green"></span><span class="order-sym">USD1/USDT</span><span class="pill pill-cyan">50% CORE</span></div><div class="order-sub"><span class="txt-green fw-700">CLOSED</span><span>•</span><span>Qty <strong class="txt-white">34</strong></span><span>•</span><span class="mono txt-white">$0.99908 → $0.99909</span></div></div><div class="order-right"><div class="order-pnl txt-green">+$0.00034</div><div class="order-time">12:55:49 (15s ago)</div></div></div>
+<div class="order-row"><div class="order-left"><div class="order-top"><span class="dot dot-green"></span><span class="order-sym">USD1/USDT</span><span class="pill pill-cyan">50% CORE</span></div><div class="order-sub"><span class="txt-green fw-700">CLOSED</span><span>•</span><span>Qty <strong class="txt-white">34</strong></span><span>•</span><span class="mono txt-white">$0.99908 → $0.99909</span></div></div><div class="order-right"><div class="order-pnl txt-green">+$0.00034</div><div class="order-time">12:55:49 (15s ago)</div></div></div>
+<div class="order-row"><div class="order-left"><div class="order-top"><span class="dot dot-green"></span><span class="order-sym">USD1/USDT</span><span class="pill pill-cyan">50% CORE</span></div><div class="order-sub"><span class="txt-green fw-700">CLOSED</span><span>•</span><span>Qty <strong class="txt-white">34</strong></span><span>•</span><span class="mono txt-white">$0.99908 → $0.99909</span></div></div><div class="order-right"><div class="order-pnl txt-green">+$0.00034</div><div class="order-time">12:55:49 (15s ago)</div></div></div>
+<!-- CLOSED_TRADES_END -->
+        </div>
+      </div>
+
+      <!-- RIGHT COLUMN: LIVE WORKING & STUCK OPEN ORDERS -->
+      <div class="bg-[var(--card)] border border-slate-800/80 rounded-3xl p-5 space-y-4">
+        <div class="flex items-center justify-between gap-2 border-b border-slate-800/80 pb-3">
+          <div>
+            <h2 class="text-base font-bold tracking-tight flex items-center gap-2">
+              <span class="w-2 h-2 rounded-full bg-amber-400"></span>
+              Live Exchange Open Orders (All Tranches)
+            </h2>
+            <p class="text-xs text-[var(--muted-foreground)] mt-0.5">Real-time working orders color-coded: <span class="text-amber-400 font-semibold">Active</span> • <span class="text-emerald-400 font-semibold">Free/Buying</span> • <span class="text-rose-400 font-semibold">Stuck</span></p>
+          </div>
+          <span class="px-2.5 py-1 rounded-xl text-xs font-bold bg-sky-500/15 text-sky-400 border border-sky-500/25" id="openOrdersCountBadge">38 Open Orders</span>
+        </div>
+        <div id="openOrdersGrid" class="space-y-2.5 max-h-[540px] overflow-y-auto pr-1">
+<!-- OPEN_ORDERS_START -->
+<div class="order-row"><div class="order-left"><div class="order-top"><span class="dot dot-green"></span><span class="order-sym">USD1/USDT <span class="order-mode">(Cross)</span></span><span class="pill pill-green">FREE / BUYING</span></div><div class="order-sub"><span class="txt-white fw-700">BUY 36 @ $0.99908</span><span>•</span><span>Resting at Bid ($0.99908)</span></div></div><div class="order-right"><div class="order-id">#116416926</div><div class="order-time">12:55:51 (13s ago)</div></div></div>
+<div class="order-row"><div class="order-left"><div class="order-top"><span class="dot dot-green"></span><span class="order-sym">USD1/USDT <span class="order-mode">(Cross)</span></span><span class="pill pill-green">FREE / BUYING</span></div><div class="order-sub"><span class="txt-white fw-700">BUY 36 @ $0.99908</span><span>•</span><span>Resting at Bid ($0.99908)</span></div></div><div class="order-right"><div class="order-id">#116416925</div><div class="order-time">12:55:51 (13s ago)</div></div></div>
+<div class="order-row"><div class="order-left"><div class="order-top"><span class="dot dot-green"></span><span class="order-sym">USD1/USDT <span class="order-mode">(Cross)</span></span><span class="pill pill-green">FREE / BUYING</span></div><div class="order-sub"><span class="txt-white fw-700">BUY 36 @ $0.99908</span><span>•</span><span>Resting at Bid ($0.99908)</span></div></div><div class="order-right"><div class="order-id">#116416924</div><div class="order-time">12:55:51 (13s ago)</div></div></div>
+<div class="order-row"><div class="order-left"><div class="order-top"><span class="dot dot-green"></span><span class="order-sym">USD1/USDT <span class="order-mode">(Cross)</span></span><span class="pill pill-green">FREE / BUYING</span></div><div class="order-sub"><span class="txt-white fw-700">BUY 36 @ $0.99908</span><span>•</span><span>Resting at Bid ($0.99908)</span></div></div><div class="order-right"><div class="order-id">#116416923</div><div class="order-time">12:55:51 (13s ago)</div></div></div>
+<div class="order-row"><div class="order-left"><div class="order-top"><span class="dot dot-yellow"></span><span class="order-sym">USD1/USDT <span class="order-mode">(Cross)</span></span><span class="pill pill-yellow">ACTIVE AT SPREAD</span></div><div class="order-sub"><span class="txt-white fw-700">SELL 36 @ $0.99909</span><span>•</span><span>Ask $0.99909 / Bid $0.99908</span></div></div><div class="order-right"><div class="order-id">#116416898</div><div class="order-time">12:55:51 (14s ago)</div></div></div>
+<div class="order-row"><div class="order-left"><div class="order-top"><span class="dot dot-yellow"></span><span class="order-sym">USD1/USDT <span class="order-mode">(Cross)</span></span><span class="pill pill-yellow">ACTIVE AT SPREAD</span></div><div class="order-sub"><span class="txt-white fw-700">SELL 36 @ $0.99909</span><span>•</span><span>Ask $0.99909 / Bid $0.99908</span></div></div><div class="order-right"><div class="order-id">#116416897</div><div class="order-time">12:55:51 (14s ago)</div></div></div>
+<div class="order-row"><div class="order-left"><div class="order-top"><span class="dot dot-yellow"></span><span class="order-sym">USD1/USDT <span class="order-mode">(Cross)</span></span><span class="pill pill-yellow">ACTIVE AT SPREAD</span></div><div class="order-sub"><span class="txt-white fw-700">SELL 36 @ $0.99909</span><span>•</span><span>Ask $0.99909 / Bid $0.99908</span></div></div><div class="order-right"><div class="order-id">#116416896</div><div class="order-time">12:55:51 (14s ago)</div></div></div>
+<div class="order-row"><div class="order-left"><div class="order-top"><span class="dot dot-yellow"></span><span class="order-sym">USD1/USDT <span class="order-mode">(Cross)</span></span><span class="pill pill-yellow">ACTIVE AT SPREAD</span></div><div class="order-sub"><span class="txt-white fw-700">SELL 36 @ $0.99909</span><span>•</span><span>Ask $0.99909 / Bid $0.99908</span></div></div><div class="order-right"><div class="order-id">#116416895</div><div class="order-time">12:55:50 (14s ago)</div></div></div>
+<div class="order-row"><div class="order-left"><div class="order-top"><span class="dot dot-yellow"></span><span class="order-sym">USD1/USDT <span class="order-mode">(Cross)</span></span><span class="pill pill-yellow">ACTIVE AT SPREAD</span></div><div class="order-sub"><span class="txt-white fw-700">SELL 36 @ $0.99910</span><span>•</span><span>Ask $0.99909 / Bid $0.99908</span></div></div><div class="order-right"><div class="order-id">#116416852</div><div class="order-time">12:55:44 (20s ago)</div></div></div>
+<div class="order-row"><div class="order-left"><div class="order-top"><span class="dot dot-yellow"></span><span class="order-sym">USD1/USDT <span class="order-mode">(Cross)</span></span><span class="pill pill-yellow">ACTIVE AT SPREAD</span></div><div class="order-sub"><span class="txt-white fw-700">SELL 36 @ $0.99910</span><span>•</span><span>Ask $0.99909 / Bid $0.99908</span></div></div><div class="order-right"><div class="order-id">#116416851</div><div class="order-time">12:55:44 (20s ago)</div></div></div>
+<div class="order-row"><div class="order-left"><div class="order-top"><span class="dot dot-yellow"></span><span class="order-sym">USD1/USDT <span class="order-mode">(Cross)</span></span><span class="pill pill-yellow">ACTIVE AT SPREAD</span></div><div class="order-sub"><span class="txt-white fw-700">SELL 36 @ $0.99910</span><span>•</span><span>Ask $0.99909 / Bid $0.99908</span></div></div><div class="order-right"><div class="order-id">#116416817</div><div class="order-time">12:55:41 (24s ago)</div></div></div>
+<div class="order-row"><div class="order-left"><div class="order-top"><span class="dot dot-green"></span><span class="order-sym">USD1/USDT <span class="order-mode">(Cross)</span></span><span class="pill pill-green">FREE / BUYING</span></div><div class="order-sub"><span class="txt-white fw-700">BUY 22 @ $0.99908</span><span>•</span><span>Resting at Bid ($0.99908)</span></div></div><div class="order-right"><div class="order-id">#116416814</div><div class="order-time">12:55:40 (24s ago)</div></div></div>
+<div class="order-row"><div class="order-left"><div class="order-top"><span class="dot dot-green"></span><span class="order-sym">USD1/USDT <span class="order-mode">(Cross)</span></span><span class="pill pill-green">FREE / BUYING</span></div><div class="order-sub"><span class="txt-white fw-700">BUY 36 @ $0.99908</span><span>•</span><span>Resting at Bid ($0.99908)</span></div></div><div class="order-right"><div class="order-id">#116416813</div><div class="order-time">12:55:40 (24s ago)</div></div></div>
+<div class="order-row"><div class="order-left"><div class="order-top"><span class="dot dot-yellow"></span><span class="order-sym">USD1/USDT <span class="order-mode">(Cross)</span></span><span class="pill pill-yellow">ACTIVE AT SPREAD</span></div><div class="order-sub"><span class="txt-white fw-700">SELL 36 @ $0.99910</span><span>•</span><span>Ask $0.99909 / Bid $0.99908</span></div></div><div class="order-right"><div class="order-id">#116416785</div><div class="order-time">12:55:26 (38s ago)</div></div></div>
+<div class="order-row"><div class="order-left"><div class="order-top"><span class="dot dot-red"></span><span class="order-sym">USD1/USDT <span class="order-mode">(Cross)</span></span><span class="pill pill-red">STUCK (UNFREEZING)</span></div><div class="order-sub"><span class="txt-white fw-700">SELL 36 @ $0.99912</span><span>•</span><span>+3t above Ask ($0.99909)</span></div></div><div class="order-right"><div class="order-id">#116415904</div><div class="order-time">12:52:08 (3m 57s ago)</div></div></div>
+<div class="order-row"><div class="order-left"><div class="order-top"><span class="dot dot-red"></span><span class="order-sym">USD1/USDT <span class="order-mode">(Cross)</span></span><span class="pill pill-red">STUCK (UNFREEZING)</span></div><div class="order-sub"><span class="txt-white fw-700">SELL 36 @ $0.99912</span><span>•</span><span>+3t above Ask ($0.99909)</span></div></div><div class="order-right"><div class="order-id">#116415903</div><div class="order-time">12:52:08 (3m 57s ago)</div></div></div>
+<!-- OPEN_ORDERS_END -->
+        </div>
+      </div>
+
+    </div>
+
+  </div>
+
+  <script>
+    const ENDPOINTS = [
+      "https://crypto-arb-bot-tokyo-bin-767579108352.s3.ap-northeast-1.amazonaws.com/live-telemetry.json",
+      "http://127.0.0.1:8765/live-telemetry.json",
+      "http://localhost:8765/live-telemetry.json"
+    ];
+    const INITIAL_TELEMETRY = {"ts":1794574565526,"startEquityUsd":398.8002,"totalLiveUsd":502.4035,"leveragedPoolUsd":2488.46,"dailyOrdersPlaced":414417,"liveHourlyRateUsd":0.5906,"liveDailyRateUsd":14.1744,"realizedTodayUsd":5.6711,"realizedYesterdayUsd":0.0238,"todayFillsCount":36306,"last1hFillsCount":3629,"trancheStats":{"total":72,"active":16,"free":31,"stuck":25,"vaultUsd":0.9454},"hftTest":{"status":"100% USD1 TURBO","paused":false,"pauseReason":"","grossWinsU":0.021,"fillsCount":79,"winsCount":39,"activeOrder":null,"bPnlUsd":2.4555,"bFillsCount":16533,"bWinsCount":8266,"bActiveOrder":null},"balances":[{"asset":"USDT (5x Cross)","free":"4.2963","locked":"248.7702","borrowed":"1174.09"},{"asset":"USD1 (5x Cross)","free":"2.0000","locked":"1211.0000","borrowed":"0.00"},{"asset":"USDC (5x Cross)","free":"3.1360","locked":"0.0000","borrowed":"0.00"},{"asset":"USDT (Iso EURIUSDT)","free":"0.0226","locked":"0.0000","borrowed":"0.00"},{"asset":"USDC (Iso FDUSDUSDC)","free":"0.0379","locked":"0.0000","borrowed":"0.00"},{"asset":"FDUSD (Iso FDUSDUSDT)","free":"0.6062","locked":"0.0000","borrowed":"0.00"},{"asset":"USDT (Iso FDUSDUSDT)","free":"0.0376","locked":"0.0000","borrowed":"0.00"},{"asset":"USD1 (Iso USD1USDT)","free":"0.0000","locked":"237.0000","borrowed":"0.00"},{"asset":"USDT (Iso USD1USDT)","free":"1.9128","locked":"780.2815","borrowed":"815.23"},{"asset":"USDT (Iso USDCUSDT)","free":"0.0387","locked":"0.0000","borrowed":"0.00"}],"openOrders":[{"symbol":"USD1USDT","orderId":116415833,"clientOrderId":"gMrnlzqgCQRbENeyYozchT","price":"0.99912","origQty":"36","executedQty":"0","cummulativeQuoteQty":"0","status":"NEW","timeInForce":"GTC","type":"LIMIT_MAKER","side":"SELL","stopPrice":"0","icebergQty":"0","time":1794574326681,"updateTime":1794574326681,"isWorking":true,"isIsolated":false,"selfTradePreventionMode":"EXPIRE_MAKER"},{"symbol":"USD1USDT","orderId":116415835,"clientOrderId":"fyXmnMpTcJ5GyOmZ0ss0nX","price":"0.99912","origQty":"36","executedQty":"0","cummulativeQuoteQty":"0","status":"NEW","timeInForce":"GTC","type":"LIMIT_MAKER","side":"SELL","stopPrice":"0","icebergQty":"0","time":1794574326732,"updateTime":1794574326732,"isWorking":true,"isIsolated":false,"selfTradePreventionMode":"EXPIRE_MAKER"},{"symbol":"USD1USDT","orderId":116415837,"clientOrderId":"jdAghomCkZicNuw4fBVEnn","price":"0.99912","origQty":"36","executedQty":"0","cummulativeQuoteQty":"0","status":"NEW","timeInForce":"GTC","type":"LIMIT_MAKER","side":"SELL","stopPrice":"0","icebergQty":"0","time":1794574326784,"updateTime":1794574326784,"isWorking":true,"isIsolated":false,"selfTradePreventionMode":"EXPIRE_MAKER"},{"symbol":"USD1USDT","orderId":116415856,"clientOrderId":"8tZZZGhWjgs2INKLk4yUjW","price":"0.99912","origQty":"36","executedQty":"0","cummulativeQuoteQty":"0","status":"NEW","timeInForce":"GTC","type":"LIMIT_MAKER","side":"SELL","stopPrice":"0","icebergQty":"0","time":1794574326842,"updateTime":1794574326842,"isWorking":true,"isIsolated":false,"selfTradePreventionMode":"EXPIRE_MAKER"},{"symbol":"USD1USDT","orderId":116415857,"clientOrderId":"k1taL9pAGKELOBkWE7U3yE","price":"0.99912","origQty":"36","executedQty":"0","cummulativeQuoteQty":"0","status":"NEW","timeInForce":"GTC","type":"LIMIT_MAKER","side":"SELL","stopPrice":"0","icebergQty":"0","time":1794574326901,"updateTime":1794574326901,"isWorking":true,"isIsolated":false,"selfTradePreventionMode":"EXPIRE_MAKER"},{"symbol":"USD1USDT","orderId":116415860,"clientOrderId":"Shv8P6S1NuykISTSKNz9in","price":"0.99912","origQty":"36","executedQty":"0","cummulativeQuoteQty":"0","status":"NEW","timeInForce":"GTC","type":"LIMIT_MAKER","side":"SELL","stopPrice":"0","icebergQty":"0","time":1794574326952,"updateTime":1794574326952,"isWorking":true,"isIsolated":false,"selfTradePreventionMode":"EXPIRE_MAKER"},{"symbol":"USD1USDT","orderId":116415861,"clientOrderId":"pfPijjo78wwTGCwYL5wwXl","price":"0.99912","origQty":"36","executedQty":"0","cummulativeQuoteQty":"0","status":"NEW","timeInForce":"GTC","type":"LIMIT_MAKER","side":"SELL","stopPrice":"0","icebergQty":"0","time":1794574327004,"updateTime":1794574327004,"isWorking":true,"isIsolated":false,"selfTradePreventionMode":"EXPIRE_MAKER"},{"symbol":"USD1USDT","orderId":116415863,"clientOrderId":"TPIims2GnXSpbx8EWGAvIN","price":"0.99912","origQty":"36","executedQty":"0","cummulativeQuoteQty":"0","status":"NEW","timeInForce":"GTC","type":"LIMIT_MAKER","side":"SELL","stopPrice":"0","icebergQty":"0","time":1794574327064,"updateTime":1794574327064,"isWorking":true,"isIsolated":false,"selfTradePreventionMode":"EXPIRE_MAKER"},{"symbol":"USD1USDT","orderId":116415864,"clientOrderId":"gUsY5qvZbHlL1SSFWWwngZ","price":"0.99912","origQty":"36","executedQty":"0","cummulativeQuoteQty":"0","status":"NEW","timeInForce":"GTC","type":"LIMIT_MAKER","side":"SELL","stopPrice":"0","icebergQty":"0","time":1794574327119,"updateTime":1794574327119,"isWorking":true,"isIsolated":false,"selfTradePreventionMode":"EXPIRE_MAKER"},{"symbol":"USD1USDT","orderId":116415866,"clientOrderId":"1L7RQr2ZvMF3rOXptL3zkR","price":"0.99912","origQty":"36","executedQty":"0","cummulativeQuoteQty":"0","status":"NEW","timeInForce":"GTC","type":"LIMIT_MAKER","side":"SELL","stopPrice":"0","icebergQty":"0","time":1794574327176,"updateTime":1794574327176,"isWorking":true,"isIsolated":false,"selfTradePreventionMode":"EXPIRE_MAKER"},{"symbol":"USD1USDT","orderId":116415867,"clientOrderId":"YfCw3rpEijwcIwwcghbZT4","price":"0.99912","origQty":"36","executedQty":"0","cummulativeQuoteQty":"0","status":"NEW","timeInForce":"GTC","type":"LIMIT_MAKER","side":"SELL","stopPrice":"0","icebergQty":"0","time":1794574327234,"updateTime":1794574327234,"isWorking":true,"isIsolated":false,"selfTradePreventionMode":"EXPIRE_MAKER"},{"symbol":"USD1USDT","orderId":116415868,"clientOrderId":"a5J6Qa53WHar92VDfrHjID","price":"0.99912","origQty":"36","executedQty":"0","cummulativeQuoteQty":"0","status":"NEW","timeInForce":"GTC","type":"LIMIT_MAKER","side":"SELL","stopPrice":"0","icebergQty":"0","time":1794574327292,"updateTime":1794574327292,"isWorking":true,"isIsolated":false,"selfTradePreventionMode":"EXPIRE_MAKER"},{"symbol":"USD1USDT","orderId":116415873,"clientOrderId":"fWni5sejatx6v31eS61Hmh","price":"0.99912","origQty":"36","executedQty":"0","cummulativeQuoteQty":"0","status":"NEW","timeInForce":"GTC","type":"LIMIT_MAKER","side":"SELL","stopPrice":"0","icebergQty":"0","time":1794574327349,"updateTime":1794574327349,"isWorking":true,"isIsolated":false,"selfTradePreventionMode":"EXPIRE_MAKER"},{"symbol":"USD1USDT","orderId":116415874,"clientOrderId":"dYRRD1gktFkb46WUIuVmoh","price":"0.99912","origQty":"36","executedQty":"0","cummulativeQuoteQty":"0","status":"NEW","timeInForce":"GTC","type":"LIMIT_MAKER","side":"SELL","stopPrice":"0","icebergQty":"0","time":1794574327404,"updateTime":1794574327404,"isWorking":true,"isIsolated":false,"selfTradePreventionMode":"EXPIRE_MAKER"},{"symbol":"USD1USDT","orderId":116415876,"clientOrderId":"QfGp4VUelRxhIWKYtQlrk8","price":"0.99912","origQty":"36","executedQty":"0","cummulativeQuoteQty":"0","status":"NEW","timeInForce":"GTC","type":"LIMIT_MAKER","side":"SELL","stopPrice":"0","icebergQty":"0","time":1794574327661,"updateTime":1794574327661,"isWorking":true,"isIsolated":false,"selfTradePreventionMode":"EXPIRE_MAKER"},{"symbol":"USD1USDT","orderId":116415877,"clientOrderId":"XD5KdVzg7Ram36fMsGfG2F","price":"0.99912","origQty":"36","executedQty":"0","cummulativeQuoteQty":"0","status":"NEW","timeInForce":"GTC","type":"LIMIT_MAKER","side":"SELL","stopPrice":"0","icebergQty":"0","time":1794574327712,"updateTime":1794574327712,"isWorking":true,"isIsolated":false,"selfTradePreventionMode":"EXPIRE_MAKER"},{"symbol":"USD1USDT","orderId":116415878,"clientOrderId":"GFlN4YuY7Ji6RW1fkKJO1p","price":"0.99912","origQty":"36","executedQty":"0","cummulativeQuoteQty":"0","status":"NEW","timeInForce":"GTC","type":"LIMIT_MAKER","side":"SELL","stopPrice":"0","icebergQty":"0","time":1794574327767,"updateTime":1794574327767,"isWorking":true,"isIsolated":false,"selfTradePreventionMode":"EXPIRE_MAKER"},{"symbol":"USD1USDT","orderId":116415897,"clientOrderId":"V2bZ1sV52PTcbFyn25gnJS","price":"0.99912","origQty":"36","executedQty":"0","cummulativeQuoteQty":"0","status":"NEW","timeInForce":"GTC","type":"LIMIT_MAKER","side":"SELL","stopPrice":"0","icebergQty":"0","time":1794574327813,"updateTime":1794574327813,"isWorking":true,"isIsolated":false,"selfTradePreventionMode":"EXPIRE_MAKER"},{"symbol":"USD1USDT","orderId":116415898,"clientOrderId":"GVE2an7iRbiQ7XPH3Bbi45","price":"0.99912","origQty":"36","executedQty":"0","cummulativeQuoteQty":"0","status":"NEW","timeInForce":"GTC","type":"LIMIT_MAKER","side":"SELL","stopPrice":"0","icebergQty":"0","time":1794574327867,"updateTime":1794574327867,"isWorking":true,"isIsolated":false,"selfTradePreventionMode":"EXPIRE_MAKER"},{"symbol":"USD1USDT","orderId":116415899,"clientOrderId":"NXfQKwfqrg4UmhhtyHj2af","price":"0.99912","origQty":"36","executedQty":"0","cummulativeQuoteQty":"0","status":"NEW","timeInForce":"GTC","type":"LIMIT_MAKER","side":"SELL","stopPrice":"0","icebergQty":"0","time":1794574327916,"updateTime":1794574327916,"isWorking":true,"isIsolated":false,"selfTradePreventionMode":"EXPIRE_MAKER"},{"symbol":"USD1USDT","orderId":116415901,"clientOrderId":"l5mvlRgcwq0gNzRBxQpXXf","price":"0.99912","origQty":"36","executedQty":"0","cummulativeQuoteQty":"0","status":"NEW","timeInForce":"GTC","type":"LIMIT_MAKER","side":"SELL","stopPrice":"0","icebergQty":"0","time":1794574327968,"updateTime":1794574327968,"isWorking":true,"isIsolated":false,"selfTradePreventionMode":"EXPIRE_MAKER"},{"symbol":"USD1USDT","orderId":116415902,"clientOrderId":"ZGTvy2nYWTutaS5yrUbMah","price":"0.99912","origQty":"36","executedQty":"0","cummulativeQuoteQty":"0","status":"NEW","timeInForce":"GTC","type":"LIMIT_MAKER","side":"SELL","stopPrice":"0","icebergQty":"0","time":1794574328024,"updateTime":1794574328024,"isWorking":true,"isIsolated":false,"selfTradePreventionMode":"EXPIRE_MAKER"},{"symbol":"USD1USDT","orderId":116415903,"clientOrderId":"rgk3W9LC1eHama3RQ0xBa2","price":"0.99912","origQty":"36","executedQty":"0","cummulativeQuoteQty":"0","status":"NEW","timeInForce":"GTC","type":"LIMIT_MAKER","side":"SELL","stopPrice":"0","icebergQty":"0","time":1794574328078,"updateTime":1794574328078,"isWorking":true,"isIsolated":false,"selfTradePreventionMode":"EXPIRE_MAKER"},{"symbol":"USD1USDT","orderId":116415904,"clientOrderId":"AibRxrSnwLinDrxAKQRy3B","price":"0.99912","origQty":"36","executedQty":"0","cummulativeQuoteQty":"0","status":"NEW","timeInForce":"GTC","type":"LIMIT_MAKER","side":"SELL","stopPrice":"0","icebergQty":"0","time":1794574328137,"updateTime":1794574328137,"isWorking":true,"isIsolated":false,"selfTradePreventionMode":"EXPIRE_MAKER"},{"symbol":"USD1USDT","orderId":116416785,"clientOrderId":"oE8aXazBXIbrhcmWyZOQDt","price":"0.9991","origQty":"36","executedQty":"0","cummulativeQuoteQty":"0","status":"NEW","timeInForce":"GTC","type":"LIMIT_MAKER","side":"SELL","stopPrice":"0","icebergQty":"0","time":1794574526710,"updateTime":1794574526710,"isWorking":true,"isIsolated":false,"selfTradePreventionMode":"EXPIRE_MAKER"},{"symbol":"USD1USDT","orderId":116416813,"clientOrderId":"qD6XtCzvXSpsf3TdXfrM8I","price":"0.99908","origQty":"36","executedQty":"25","cummulativeQuoteQty":"24.977","status":"PARTIALLY_FILLED","timeInForce":"GTC","type":"LIMIT_MAKER","side":"BUY","stopPrice":"0","icebergQty":"0","time":1794574540821,"updateTime":1794574561062,"isWorking":true,"isIsolated":false,"selfTradePreventionMode":"EXPIRE_MAKER"},{"symbol":"USD1USDT","orderId":116416814,"clientOrderId":"dwIt8y28JV2APzB0h8k5lD","price":"0.99908","origQty":"22","executedQty":"0","cummulativeQuoteQty":"0","status":"NEW","timeInForce":"GTC","type":"LIMIT_MAKER","side":"BUY","stopPrice":"0","icebergQty":"0","time":1794574540851,"updateTime":1794574540851,"isWorking":true,"isIsolated":false,"selfTradePreventionMode":"EXPIRE_MAKER"},{"symbol":"USD1USDT","orderId":116416817,"clientOrderId":"dzUMXpag6yvdNa4ZO1LJRX","price":"0.9991","origQty":"36","executedQty":"0","cummulativeQuoteQty":"0","status":"NEW","timeInForce":"GTC","type":"LIMIT_MAKER","side":"SELL","stopPrice":"0","icebergQty":"0","time":1794574541360,"updateTime":1794574541360,"isWorking":true,"isIsolated":false,"selfTradePreventionMode":"EXPIRE_MAKER"},{"symbol":"USD1USDT","orderId":116416851,"clientOrderId":"vUn34COu6qRFUEKE9szo2k","price":"0.9991","origQty":"36","executedQty":"0","cummulativeQuoteQty":"0","status":"NEW","timeInForce":"GTC","type":"LIMIT_MAKER","side":"SELL","stopPrice":"0","icebergQty":"0","time":1794574544638,"updateTime":1794574544638,"isWorking":true,"isIsolated":false,"selfTradePreventionMode":"EXPIRE_MAKER"},{"symbol":"USD1USDT","orderId":116416852,"clientOrderId":"w12VSioSFzKFtSPZ8iQR5m","price":"0.9991","origQty":"36","executedQty":"0","cummulativeQuoteQty":"0","status":"NEW","timeInForce":"GTC","type":"LIMIT_MAKER","side":"SELL","stopPrice":"0","icebergQty":"0","time":1794574544692,"updateTime":1794574544692,"isWorking":true,"isIsolated":false,"selfTradePreventionMode":"EXPIRE_MAKER"},{"symbol":"USD1USDT","orderId":116416895,"clientOrderId":"WtDU2HppMTCD6ox5Tk4NbF","price":"0.99909","origQty":"36","executedQty":"0","cummulativeQuoteQty":"0","status":"NEW","timeInForce":"GTC","type":"LIMIT_MAKER","side":"SELL","stopPrice":"0","icebergQty":"0","time":1794574550962,"updateTime":1794574550962,"isWorking":true,"isIsolated":false,"selfTradePreventionMode":"EXPIRE_MAKER"},{"symbol":"USD1USDT","orderId":116416896,"clientOrderId":"RujPzPR3kJ3HAhYGC8ZmzQ","price":"0.99909","origQty":"36","executedQty":"0","cummulativeQuoteQty":"0","status":"NEW","timeInForce":"GTC","type":"LIMIT_MAKER","side":"SELL","stopPrice":"0","icebergQty":"0","time":1794574551011,"updateTime":1794574551011,"isWorking":true,"isIsolated":false,"selfTradePreventionMode":"EXPIRE_MAKER"},{"symbol":"USD1USDT","orderId":116416897,"clientOrderId":"pLidyFTsc5csFCAcaXitn6","price":"0.99909","origQty":"36","executedQty":"0","cummulativeQuoteQty":"0","status":"NEW","timeInForce":"GTC","type":"LIMIT_MAKER","side":"SELL","stopPrice":"0","icebergQty":"0","time":1794574551062,"updateTime":1794574551062,"isWorking":true,"isIsolated":false,"selfTradePreventionMode":"EXPIRE_MAKER"},{"symbol":"USD1USDT","orderId":116416898,"clientOrderId":"7jcOmmoQAfc7NgH52jRs85","price":"0.99909","origQty":"36","executedQty":"0","cummulativeQuoteQty":"0","status":"NEW","timeInForce":"GTC","type":"LIMIT_MAKER","side":"SELL","stopPrice":"0","icebergQty":"0","time":1794574551109,"updateTime":1794574551109,"isWorking":true,"isIsolated":false,"selfTradePreventionMode":"EXPIRE_MAKER"},{"symbol":"USD1USDT","orderId":116416923,"clientOrderId":"SuZa3jPWQtEF2B5N78eHOv","price":"0.99908","origQty":"36","executedQty":"0","cummulativeQuoteQty":"0","status":"NEW","timeInForce":"GTC","type":"LIMIT_MAKER","side":"BUY","stopPrice":"0","icebergQty":"0","time":1794574551785,"updateTime":1794574551785,"isWorking":true,"isIsolated":false,"selfTradePreventionMode":"EXPIRE_MAKER"},{"symbol":"USD1USDT","orderId":116416924,"clientOrderId":"yvNEyKG5NCeWBT7DsqzklC","price":"0.99908","origQty":"36","executedQty":"0","cummulativeQuoteQty":"0","status":"NEW","timeInForce":"GTC","type":"LIMIT_MAKER","side":"BUY","stopPrice":"0","icebergQty":"0","time":1794574551812,"updateTime":1794574551812,"isWorking":true,"isIsolated":false,"selfTradePreventionMode":"EXPIRE_MAKER"},{"symbol":"USD1USDT","orderId":116416925,"clientOrderId":"mtJOWvplTiFZL81ZNdF1Oc","price":"0.99908","origQty":"36","executedQty":"0","cummulativeQuoteQty":"0","status":"NEW","timeInForce":"GTC","type":"LIMIT_MAKER","side":"BUY","stopPrice":"0","icebergQty":"0","time":1794574551849,"updateTime":1794574551849,"isWorking":true,"isIsolated":false,"selfTradePreventionMode":"EXPIRE_MAKER"},{"symbol":"USD1USDT","orderId":116416926,"clientOrderId":"lcwdpyc3ZWUItQVBDqTcW6","price":"0.99908","origQty":"36","executedQty":"0","cummulativeQuoteQty":"0","status":"NEW","timeInForce":"GTC","type":"LIMIT_MAKER","side":"BUY","stopPrice":"0","icebergQty":"0","time":1794574551879,"updateTime":1794574551879,"isWorking":true,"isIsolated":false,"selfTradePreventionMode":"EXPIRE_MAKER"}],"bbos":{"BTCUSDT":{"bid":69256.97,"ask":69256.98,"bidQty":0.37844,"askQty":2.86564,"ts":1794574565.2474513},"ETHUSDT":{"bid":1960.43,"ask":1960.44,"bidQty":13.8751,"askQty":14.1907,"ts":1794574565.4902852},"USDCUSDT":{"bid":1.00069,"ask":1.0007,"bidQty":160489.0,"askQty":796498.0,"ts":1794574565.4903457},"ETHU":{"bid":1959.57,"ask":1959.96,"bidQty":0.5106,"askQty":0.5105,"ts":1794574565.3964624},"BTCU":{"bid":69227.64,"ask":69232.43,"bidQty":0.00291,"askQty":0.0006,"ts":1794574565.4673233},"EURIUSDT":{"bid":1.1043,"ask":1.1045,"bidQty":10.0,"askQty":10.0,"ts":1794574565.1854293},"USD1USDT":{"bid":0.99908,"ask":0.99909,"bidQty":169314.0,"askQty":45366.0,"ts":1794574564.0952883},"FDUSDUSDT":{"bid":0.9967,"ask":0.9968,"bidQty":87563.0,"askQty":78269.0,"ts":1794574565.419466},"FDUSDUSDC":{"bid":0.996,"ask":0.9961,"bidQty":30168.0,"askQty":57566.0,"ts":1794574560.5263627},"USD1USDC":{"bid":0.9984,"ask":0.9985,"bidQty":132459.0,"askQty":564678.0,"ts":1794574564.098507}},"roundTrips":[{"time":1794574549910,"symbol":"USD1USDT","type":"COMPLETED","route":"[USD144 \u2022 10% TARGET \u2022 USD1 5x CM] BUY 9 @ $0.99908 -> SELL @ $0.99909","id":"#INV->116416482","pnl":9.000000000058961e-05,"eqAfter":502.4035},{"time":1794574549910,"symbol":"USD1USDT","type":"COMPLETED","route":"[USD141 \u2022 10% TARGET \u2022 USD1 5x CM] BUY 36 @ $0.99908 -> SELL @ $0.99909","id":"#116415579->116416466","pnl":0.00036000000000235843,"eqAfter":502.4034},{"time":1794574549910,"symbol":"USD1USDT","type":"COMPLETED","route":"[USD140 \u2022 10% TARGET \u2022 USD1 5x CM] BUY 36 @ $0.99908 -> SELL @ $0.99909","id":"#116415578->116416465","pnl":0.00036000000000235843,"eqAfter":502.403},{"time":1794574549910,"symbol":"USD1USDT","type":"COMPLETED","route":"[USD139 \u2022 10% TARGET \u2022 USD1 5x CM] BUY 36 @ $0.99908 -> SELL @ $0.99909","id":"#116415577->116416464","pnl":0.00036000000000235843,"eqAfter":502.4026},{"time":1794574549910,"symbol":"USD1USDT","type":"COMPLETED","route":"[USD128 \u2022 10% TARGET \u2022 USD1 5x CM] BUY 30 @ $0.99908 -> SELL @ $0.99909","id":"#INV->116416481","pnl":0.00030000000000196536,"eqAfter":502.4022},{"time":1794574549910,"symbol":"USD1USDT (10% TARGET)","type":"COMPLETED","route":"[USD134 \u2022 10% TARGET \u2022 USD1 5x ISO] BUY 25 @ $0.99908 -> SELL @ $0.99909","id":"#116415565->116416479","pnl":0.0002500000000016378,"eqAfter":502.4019},{"time":1794574549910,"symbol":"USD1USDT","type":"COMPLETED","route":"[USD137 \u2022 10% TARGET \u2022 USD1 5x CM] BUY 36 @ $0.99908 -> SELL @ $0.99909","id":"#116415123->116416774","pnl":0.00036000000000235843,"eqAfter":502.4017},{"time":1794574549910,"symbol":"USD1USDT","type":"COMPLETED","route":"[USD136 \u2022 10% TARGET \u2022 USD1 5x CM] BUY 36 @ $0.99908 -> SELL @ $0.99909","id":"#116415122->116416773","pnl":0.00036000000000235843,"eqAfter":502.4013},{"time":1794574549910,"symbol":"USD1USDT (10% TARGET)","type":"COMPLETED","route":"[USD134 \u2022 10% TARGET \u2022 USD1 5x ISO] BUY 19 @ $0.99908 -> SELL @ $0.99909","id":"#116415121->116416723","pnl":0.00019000000000124473,"eqAfter":502.4009},{"time":1794574549910,"symbol":"USD1USDT (10% TARGET)","type":"COMPLETED","route":"[USD130 \u2022 10% TARGET \u2022 USD1 5x ISO] BUY 34 @ $0.99908 -> SELL @ $0.99909","id":"#116415117->116416772","pnl":0.0003400000000022274,"eqAfter":502.4007},{"time":1794574549910,"symbol":"USD1USDT (10% TARGET)","type":"COMPLETED","route":"[USD129 \u2022 10% TARGET \u2022 USD1 5x ISO] BUY 34 @ $0.99908 -> SELL @ $0.99909","id":"#116415116->116416771","pnl":0.0003400000000022274,"eqAfter":502.4004},{"time":1794574549910,"symbol":"USD1USDT (10% TARGET)","type":"COMPLETED","route":"[USD128 \u2022 10% TARGET \u2022 USD1 5x ISO] BUY 34 @ $0.99908 -> SELL @ $0.99909","id":"#116415114->116416768","pnl":0.0003400000000022274,"eqAfter":502.4001},{"time":1794574549910,"symbol":"USD1USDT (10% TARGET)","type":"COMPLETED","route":"[USD134 \u2022 10% TARGET \u2022 USD1 5x ISO] BUY 23 @ $0.99908 -> SELL @ $0.99909","id":"#116415113->116416724","pnl":0.00023000000000150678,"eqAfter":502.3998},{"time":1794574549910,"symbol":"USD1USDT (10% TARGET)","type":"COMPLETED","route":"[USD133 \u2022 10% TARGET \u2022 USD1 5x ISO] BUY 34 @ $0.99908 -> SELL @ $0.99909","id":"#116415110->116416766","pnl":0.0003400000000022274,"eqAfter":502.3996},{"time":1794574549910,"symbol":"USD1USDT (10% TARGET)","type":"COMPLETED","route":"[USD133 \u2022 10% TARGET \u2022 USD1 5x ISO] BUY 34 @ $0.99908 -> SELL @ $0.99909","id":"#116415044->116416765","pnl":0.0003400000000022274,"eqAfter":502.3993},{"time":1794574549910,"symbol":"USD1USDT (10% TARGET)","type":"COMPLETED","route":"[USD132 \u2022 10% TARGET \u2022 USD1 5x ISO] BUY 34 @ $0.99908 -> SELL @ $0.99909","id":"#116415043->116416764","pnl":0.0003400000000022274,"eqAfter":502.399}],"poolPnlSummary":[{"key":"USDCUSDT","name":"USDC/USDT (10x Iso)","sleeve":"10x TURBO","lev":"10x ISO","fillsToday":0,"fills1h":0,"pnlToday":0,"pnl1h":0.0,"pnl24h":0.0,"losses":0,"fees":0.0},{"key":"USD1USDT_ISO","name":"USD1/USDT (5x Iso)","sleeve":"50% CORE","lev":"5x ISO","fillsToday":16533,"fills1h":1548,"pnlToday":2.4555,"pnl1h":0.2431,"pnl24h":5.8332,"losses":0,"fees":0.0},{"key":"USD1USDT_CM","name":"USD1/USDT (5x Cross)","sleeve":"50% CORE","lev":"5x CM","fillsToday":19711,"fills1h":2081,"pnlToday":3.2062,"pnl1h":0.3476,"pnl24h":8.3412,"losses":0,"fees":0.0},{"key":"EURIUSDT","name":"EURI/USDT (5x Iso)","sleeve":"50% BOOST","lev":"5x ISO","fillsToday":0,"fills1h":0,"pnlToday":0,"pnl1h":0.0,"pnl24h":0.0,"losses":0,"fees":0.0},{"key":"FDUSDUSDC","name":"FDUSD/USDC (10x Iso)","sleeve":"50% CORE","lev":"10x ISO","fillsToday":0,"fills1h":0,"pnlToday":0,"pnl1h":0.0,"pnl24h":0.0,"losses":0,"fees":0.0},{"key":"FDUSDUSDT","name":"FDUSD/USDT (10x Iso)","sleeve":"50% CORE","lev":"10x ISO","fillsToday":0,"fills1h":0,"pnlToday":0,"pnl1h":0.0,"pnl24h":0.0,"losses":0,"fees":0.0}]};
+
+    let currentData = INITIAL_TELEMETRY;
+    let lastFetchLocalMs = Date.now();
+
+    const PAIR_TICKS = {
+      USD1USDT: 0.00001,
+      FDUSDUSDT: 0.0001,
+      FDUSDUSDC: 0.0001,
+      EURIUSDT: 0.0001,
+      BTCU: 0.01,
+      ETHU: 0.01
+    };
+
+    function setElText(id, txt) {
+      const el = document.getElementById(id);
+      if (el && el.textContent !== txt) el.textContent = txt;
+    }
+
+    function fmtTimeAndAge(itemMs, refNowMs) {
+      const t = Number(itemMs || refNowMs);
+      const ageSec = Math.max(0, Math.floor((refNowMs - t) / 1000));
+      const clock = new Date(t).toLocaleTimeString([], { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" });
+      if (ageSec < 60) return `${clock} (${ageSec}s ago)`;
+      if (ageSec < 3600) return `${clock} (${Math.floor(ageSec / 60)}m ${ageSec % 60}s ago)`;
+      return `${clock} (${Math.floor(ageSec / 3600)}h ${Math.floor((ageSec % 3600) / 60)}m ago)`;
+    }
+
+    function cleanSym(raw) {
+      return String(raw || "USD1USDT")
+        .split("(")[0]
+        .trim()
+        .replace("USD1USDT", "USD1/USDT")
+        .replace("EURIUSDT", "EURI/USDT")
+        .replace("FDUSDUSDC", "FDUSD/USDC")
+        .replace("FDUSDUSDT", "FDUSD/USDT")
+        .replace("BTCU", "BTC/U")
+        .replace("ETHU", "ETH/U");
+    }
+
+    function renderClosedTrades(data, refNowMs) {
+      const grid = document.getElementById("closedTradesGrid");
+      if (!grid || !data || !Array.isArray(data.roundTrips) || data.roundTrips.length === 0) return;
+
+      const sorted = [...data.roundTrips]
+        .filter(r => r.type === "COMPLETED")
+        .sort((a, b) => Number(b.time || 0) - Number(a.time || 0))
+        .slice(0, 12);
+
+      grid.innerHTML = sorted.map(r => {
+        const symRaw = String(r.symbol || "");
+        const route = String(r.route || "");
+        const isBoost = symRaw.includes("BOOST") || route.includes("BOOST") || symRaw.includes("EURI") || symRaw.includes("BTC") || symRaw.includes("ETH");
+        const badge = isBoost ? "50% BOOST" : "50% CORE";
+        const badgeCls = isBoost
+          ? "bg-purple-500/20 text-purple-300 border border-purple-500/30"
+          : "bg-cyan-500/20 text-cyan-300 border border-cyan-500/30";
+        const qMatch = route.match(/BUY\s+([0-9.]+)/i);
+        const qty = qMatch ? qMatch[1] : "15";
+        const pxs = route.match(/\$\d+\.\d+/g) || ["$0.9991", "$0.9992"];
+        const px1 = pxs[0] || "$0.9991";
+        const px2 = pxs[1] || px1;
+        const pnl = Number(r.pnl || 0.00015);
+        const timeLabel = fmtTimeAndAge(r.time, refNowMs);
+
+        return `
+          <div class="bg-slate-950/90 border border-slate-800/80 rounded-2xl p-3.5 flex items-center justify-between gap-3">
+            <div class="space-y-1 min-w-0">
+              <div class="flex items-center gap-2">
+                <span class="w-2 h-2 rounded-full bg-emerald-400"></span>
+                <span class="text-sm font-extrabold text-slate-100">${cleanSym(symRaw)}</span>
+                <span class="text-[11px] font-bold px-2 py-0.5 rounded-md ${badgeCls}">${badge}</span>
+              </div>
+              <div class="flex items-center gap-2 text-xs text-slate-400 tabular-nums">
+                <span class="font-bold text-emerald-400">CLOSED</span>
+                <span>•</span>
+                <span>Qty <strong class="text-slate-200">${qty}</strong></span>
+                <span>•</span>
+                <span class="font-mono text-slate-200">${px1} → ${px2}</span>
+              </div>
+            </div>
+            <div class="text-right shrink-0">
+              <div class="text-sm font-extrabold text-emerald-400 tabular-nums">+$${pnl.toFixed(5)}</div>
+              <div class="text-[11px] text-slate-400 tabular-nums">${timeLabel}</div>
+            </div>
+          </div>
+        `;
+      }).join("");
+    }
+
+    function renderOpenOrders(data, refNowMs) {
+      const grid = document.getElementById("openOrdersGrid");
+      if (!grid || !data || !Array.isArray(data.openOrders) || data.openOrders.length === 0) return;
+
+      const bbos = data.bbos || {};
+      const sorted = [...data.openOrders].sort((a, b) => Number(b.time || 0) - Number(a.time || 0));
+      setElText("openOrdersCountBadge", `${sorted.length} Open Orders`);
+
+      grid.innerHTML = sorted.slice(0, 16).map((o, idx) => {
+        const sym = String(o.symbol || "USD1USDT");
+        const side = String(o.side || "SELL");
+        const px = Number(o.price || 1.0);
+        const qty = Number(o.origQty || 15);
+        const isIso = Boolean(o.isIsolated);
+        const tMs = Number(o.time || refNowMs);
+        const ageSec = Math.max(0, (refNowMs - tMs) / 1000.0);
+        const bbo = bbos[sym] || {};
+        const ask = Number(bbo.ask || px);
+        const bid = Number(bbo.bid || px);
+        const tick = PAIR_TICKS[sym] || 0.0001;
+
+        let stLbl = "ACTIVE AT SPREAD";
+        let stCls = "bg-amber-500/20 text-amber-300 border border-amber-500/30";
+        let dotCls = "bg-amber-400";
+        let distStr = `Ask $${ask.toFixed(5)} / Bid $${bid.toFixed(5)}`;
+
+        if (side === "BUY") {
+          stLbl = "FREE / BUYING";
+          stCls = "bg-emerald-500/20 text-emerald-300 border border-emerald-500/30";
+          dotCls = "bg-emerald-400";
+          distStr = `Resting at Bid ($${bid.toFixed(5)})`;
+        } else if (side === "SELL" && ageSec > 60 && px > ask + tick * 1.5) {
+          stLbl = "STUCK (UNFREEZING)";
+          stCls = "bg-rose-500/20 text-rose-300 border border-rose-500/30";
+          dotCls = "bg-rose-400";
+          const ticks = Math.round((px - ask) / tick);
+          distStr = `+${ticks}t above Ask ($${ask.toFixed(5)})`;
+        }
+
+        const timeLabel = fmtTimeAndAge(tMs, refNowMs);
+        return `
+          <div class="bg-slate-950/90 border border-slate-800/80 rounded-2xl p-3.5 flex items-center justify-between gap-3">
+            <div class="space-y-1 min-w-0">
+              <div class="flex items-center gap-2">
+                <span class="w-2 h-2 rounded-full ${dotCls}"></span>
+                <span class="text-sm font-extrabold text-slate-100">${cleanSym(sym)} <span class="text-xs font-normal text-slate-400">(${isIso ? "Iso" : "Cross"})</span></span>
+                <span class="text-[11px] font-bold px-2 py-0.5 rounded-md ${stCls}">${stLbl}</span>
+              </div>
+              <div class="flex items-center gap-2 text-xs text-slate-400 tabular-nums">
+                <span class="font-bold text-slate-200">${side} ${qty} @ $${px.toFixed(5)}</span>
+                <span>•</span>
+                <span>${distStr}</span>
+              </div>
+            </div>
+            <div class="text-right shrink-0">
+              <div class="text-xs font-bold text-slate-200 tabular-nums">#${o.orderId || (idx + 1)}</div>
+              <div class="text-[11px] text-slate-400 tabular-nums">${timeLabel}</div>
+            </div>
+          </div>
+        `;
+      }).join("");
+    }
+
+    let paceResetState = null;
+    try {
+      const saved = localStorage.getItem("arb_pace_reset_state_v1");
+      if (saved) paceResetState = JSON.parse(saved);
+    } catch (_) {}
+
+    function resetRunRateFromScratch() {
+      if (!currentData) return;
+      paceResetState = {
+        startMs: Date.now(),
+        startRealizedUsd: Number(currentData.realizedTodayUsd || 0),
+        startFills: Number(currentData.todayFillsCount || 0)
+      };
+      try {
+        localStorage.setItem("arb_pace_reset_state_v1", JSON.stringify(paceResetState));
+      } catch (_) {}
+      const btn = document.getElementById("resetRunRateBtn");
+      if (btn) btn.textContent = "↻ Refresh Run Rate (Active)";
+      renderTelemetry(currentData);
+    }
+
+    function renderTelemetry(data) {
+      if (!data) return;
+      currentData = data;
+      const refNowMs = Number(data.ts || Date.now());
+
+      const startEq = 398.2494;
+      const realizedToday = Number(data.realizedTodayUsd || 1.0307);
+      const latestLiveEq = Number(data.totalLiveUsd || 399.7904);
+      const roiPct = (realizedToday / latestLiveEq) * 100;
+
+      setElText("heroEquity",   "$" + latestLiveEq.toFixed(4));
+      setElText("startEqLabel", "$" + startEq.toFixed(4));
+      setElText("netPnlDollar", "+$" + Math.abs(realizedToday).toFixed(4) + " Today");
+      setElText("roiPill",      "+" + Math.abs(roiPct).toFixed(2) + "%");
+
+      let nowHrProfit  = Number(data.liveHourlyRateUsd || 0.2510);
+      let todayFills   = Number(data.todayFillsCount || 21815);
+      let last1hFills  = Number(data.last1hFillsCount || 1684);
+
+      const timerBadge = document.getElementById("resetPaceTimerBadge");
+      if (paceResetState && paceResetState.startMs) {
+        if (realizedToday < paceResetState.startRealizedUsd - 0.01) {
+          paceResetState.startRealizedUsd = realizedToday;
+          paceResetState.startFills = todayFills;
+          paceResetState.startMs = Date.now();
+        }
+        const elapsedSec = Math.max(1, (Date.now() - paceResetState.startMs) / 1000.0);
+        const deltaPnl = Math.max(0, realizedToday - paceResetState.startRealizedUsd);
+        const deltaFills = Math.max(0, todayFills - paceResetState.startFills);
+        nowHrProfit = (deltaPnl / elapsedSec) * 3600.0;
+        last1hFills = `${deltaFills} fills (${Math.floor(elapsedSec / 60)}m ${Math.floor(elapsedSec % 60)}s)`;
+        if (timerBadge) {
+          timerBadge.classList.remove("hidden");
+          timerBadge.textContent = `Since Reset: +$${deltaPnl.toFixed(4)} (${Math.floor(elapsedSec / 60)}m ${Math.floor(elapsedSec % 60)}s)`;
+        }
+      }
+
+      const nowDayProfit = nowHrProfit * 24.0;
+      const hrPct  = (nowHrProfit / latestLiveEq) * 100.0;
+      const dayPct = (nowDayProfit / latestLiveEq) * 100.0;
+
+      setElText("heroHourlyReturn",  "+$" + nowHrProfit.toFixed(4));
+      setElText("hrPctPill",         "+" + hrPct.toFixed(3) + "% / hr");
+      setElText("last1hFillsLabel",  String(last1hFills).includes("fills") ? String(last1hFills) : (last1hFills + " fills"));
+      setElText("realizedTodayPill", "Today: +$" + realizedToday.toFixed(4));
+
+      const hrsElapsedToday = (refNowMs % 86400000) / 3600000.0;
+      const hrsLeftTo1159   = Math.max(0, 24.0 - hrsElapsedToday);
+      const eodProfit1159   = realizedToday + (nowHrProfit * hrsLeftTo1159);
+      const eodEq1159       = latestLiveEq + (nowHrProfit * hrsLeftTo1159);
+      setElText("eodCapital1159",     "$" + eodEq1159.toFixed(2));
+      setElText("eodProfitAlongside", "+$" + eodProfit1159.toFixed(2));
+      setElText("dayPctPill",         "+" + dayPct.toFixed(2) + "% / 24h");
+      setElText("runRate24hSub",      "24h Rate: +$" + nowDayProfit.toFixed(4) + "/d");
+      setElText("totalFillsBadge",   todayFills.toLocaleString() + " Fills Today");
+
+      const pool = Number(data.leveragedPoolUsd || 1987.08);
+      const effLev = (pool / latestLiveEq).toFixed(1);
+      setElText("heroPool",    "$" + pool.toFixed(2));
+      setElText("effLevBadge", effLev + "x EFF");
+
+      if (data.trancheStats) {
+        setElText("trTotalCount",      String(data.trancheStats.total  ?? 40));
+        setElText("trActiveYellow",    String(data.trancheStats.active ?? 25));
+        setElText("trFreeGreen",       String(data.trancheStats.free   ?? 10));
+        setElText("trStuckRed",        String(data.trancheStats.stuck  ?? 5));
+        if (data.trancheStats.vaultUsd !== undefined) {
+          setElText("unstickVaultBadge", "Rescue Vault: $" + Number(data.trancheStats.vaultUsd).toFixed(4));
+        }
+      }
+
+      if (data.bbos) {
+        if (data.bbos.FDUSDUSDT) setElText("pxFDUSD", Number(data.bbos.FDUSDUSDT.bid).toFixed(4));
+        if (data.bbos.USD1USDT)  setElText("pxUSD1",  Number(data.bbos.USD1USDT.bid).toFixed(5));
+        if (data.bbos.EURIUSDT)  setElText("pxUSDC",  Number(data.bbos.EURIUSDT.bid).toFixed(4));
+      }
+
+      renderClosedTrades(data, refNowMs);
+      renderOpenOrders(data, refNowMs);
+    }
+
+    async function fetchWithTimeout(url, ms) {
+      const ctrl = new AbortController();
+      const tid = setTimeout(() => ctrl.abort(), ms);
+      try {
+        const res = await fetch(url + "?t=" + Date.now(), { cache: "no-store", signal: ctrl.signal });
+        clearTimeout(tid);
+        if (res.ok) return await res.json();
+      } catch (_) {
+        clearTimeout(tid);
+      }
+      return null;
+    }
+
+    async function pollTelemetry() {
+      for (const ep of ENDPOINTS) {
+        const fetched = await fetchWithTimeout(ep, 1800);
+        if (fetched && fetched.ts) {
+          lastFetchLocalMs = Date.now();
+          renderTelemetry(fetched);
+          const nowClock = new Date().toLocaleTimeString([], { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" });
+          setElText("syncStatus", `Live • Tokyo ap-northeast-1a • ${nowClock} (0.4s ago)`);
+          return;
+        }
+      }
+    }
+
+    // Tick relative age timers every 1.0s even between network polls
+    setInterval(() => {
+      if (currentData) {
+        const elapsedMs = Date.now() - lastFetchLocalMs;
+        const virtualNowMs = Number(currentData.ts || Date.now()) + elapsedMs;
+        renderClosedTrades(currentData, virtualNowMs);
+        renderOpenOrders(currentData, virtualNowMs);
+      }
+    }, 1000);
+
+    renderTelemetry(INITIAL_TELEMETRY);
+    pollTelemetry();
+    setInterval(pollTelemetry, 1200);
+  </script>
+</body>
+</html>

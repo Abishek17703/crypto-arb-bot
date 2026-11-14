@@ -1,14 +1,17 @@
-name: Audit Tokyo Margin Details
+name: Deploy Live Tokyo Engine v4.3
 
 on:
   push:
-    branches: [probe-aws-tokyo]
+    branches: [main, probe-aws-tokyo]
   workflow_dispatch:
 
 jobs:
-  audit:
+  deploy-tokyo-engine:
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -16,7 +19,7 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ap-northeast-1
 
-      - name: Run Binance Margin & Borrow Audit on Tokyo EC2
+      - name: Deploy Upgraded telemetry_sync.py to Tokyo EC2 (i-046fed60c07b7a799)
         run: |
           INST_ID="i-046fed60c07b7a799"
           SG_ID=$(aws ec2 describe-instances --instance-ids "$INST_ID" --query "Reservations[0].Instances[0].SecurityGroups[0].GroupId" --output text)
@@ -34,39 +37,15 @@ jobs:
             --instance-os-user ec2-user \
             --ssh-public-key file:///tmp/ec2_key.pub
 
-          ssh -i /tmp/ec2_key -o StrictHostKeyChecking=no -o ConnectTimeout=15 ec2-user@"$PUB_IP" "python3 -" << 'PYEOF'
-          import time, hmac, hashlib, urllib.parse, urllib.request, json
+          scp -i /tmp/ec2_key -o StrictHostKeyChecking=no tokyo_engine/telemetry_sync.py ec2-user@"$PUB_IP":/tmp/telemetry_sync_new.py
 
-          API_KEY = "I4IImhi629VlyPD28pnIkveLZsAwH5yf0COTtmJQuYiGFICACdCS03HEXz2OCti4"
-          API_SEC = b"ng4mncCOkk5DvRJxPARevMGoDACQBEpzWBqh5XJ8TlEYCxR0TWpSp8vKVitg3U4D"
-
-          def b_get(path, params=None, signed=False):
-              if params is None: params = {}
-              if signed:
-                  params["timestamp"] = int(time.time() * 1000)
-                  params["recvWindow"] = 5000
-              qs = urllib.parse.urlencode(params)
-              if signed:
-                  qs += "&signature=" + hmac.new(API_SEC, qs.encode(), hashlib.sha256).hexdigest()
-              url = f"https://api.binance.com{path}?{qs}" if qs else f"https://api.binance.com{path}"
-              req = urllib.request.Request(url, headers={"X-MBX-APIKEY": API_KEY})
-              try:
-                  return json.loads(urllib.request.urlopen(req, timeout=8).read().decode())
-              except Exception as e:
-                  return {"_err": getattr(e, "code", str(e)), "msg": e.read().decode() if hasattr(e, "read") else str(e)}
-
-          print("WALLET:", b_get("/sapi/v1/asset/wallet/balance", {"quoteAsset": "USDT"}, True))
-          cm = b_get("/sapi/v1/margin/account", {}, True)
-          print("CM LEVEL:", cm.get("marginLevel"), "COLLAT_LEVEL:", cm.get("collateralMarginLevel"), "TOTAL_ASSET_BTC:", cm.get("totalAssetOfBtc"), "TOTAL_LIAB_BTC:", cm.get("totalLiabilityOfBtc"), "TOTAL_NET_BTC:", cm.get("totalNetAssetOfBtc"))
-          for a in cm.get("userAssets", []):
-              if float(a["free"]) + float(a["locked"]) + float(a["borrowed"]) + float(a["interest"]) > 0.0001:
-                  print("  CM:", a)
-          for ast in ["USDT", "USD1", "USDC", "FDUSD"]:
-              print(f"MAX_BORROW_{ast}:", b_get("/sapi/v1/margin/maxBorrowable", {"asset": ast}, True))
-          print("INTEREST_RATES:", b_get("/sapi/v1/margin/next-hourly-interest-rate", {"assets": "USDT,USD1,USDC,FDUSD,EURI", "isIsolated": "FALSE"}, True))
-          for sym in ["USD1USDT", "USDCUSDT", "FDUSDUSDT", "FDUSDUSDC", "USD1USDC", "EURIUSDT", "BTCU", "ETHU"]:
-              print(f"FEE_{sym}:", b_get("/sapi/v1/asset/tradeFee", {"symbol": sym}, True))
-          with open("/tmp/tranches_state.json") as f:
-              ts = json.load(f)
-              print("TRANCHES_STATE_LEN:", len(ts), "SAMPLE:", list(ts.items())[:10])
-          PYEOF
+          ssh -i /tmp/ec2_key -o StrictHostKeyChecking=no -o ConnectTimeout=15 ec2-user@"$PUB_IP" << 'EOF'
+          set -e
+          sudo cp /opt/crypto-arb-bot/telemetry_sync.py /opt/crypto-arb-bot/telemetry_sync.bak.$(date +%s)
+          sudo mv /tmp/telemetry_sync_new.py /opt/crypto-arb-bot/telemetry_sync.py
+          sudo chmod +x /opt/crypto-arb-bot/telemetry_sync.py
+          sudo python3 -m py_compile /opt/crypto-arb-bot/telemetry_sync.py
+          sudo systemctl restart tokyo-telemetry.service
+          sleep 4
+          sudo systemctl status tokyo-telemetry.service --no-pager -n 12
+          EOF
