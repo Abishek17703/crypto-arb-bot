@@ -843,6 +843,10 @@ def main():
                             spot_net += float(ia_x["baseAsset"]["netAsset"]) + float(ia_x["quoteAsset"]["netAsset"])
                     wb_r = api.request("GET", "/sapi/v1/asset/wallet/balance", {"quoteAsset": "USDT"}, signed=True)
                     wb_sum = sum(float(w.get("balance", 0)) for w in wb_r if w.get("activate")) if isinstance(wb_r, list) else 0.0
+                    exact_acct_eq = round(total_net + spot_net, 4)
+                    # Guard against Binance /sapi/v1/asset/wallet/balance 1-tick $120 lag during BORROW/REPAY settlements!
+                    if exact_acct_eq > 85.0 and wb_sum > 85.0 and abs(wb_sum - exact_acct_eq) > 15.0:
+                        wb_sum = exact_acct_eq
                     if wb_sum > 85.0:
                         cached_total_usd = round(wb_sum, 4)
                         cached_leveraged_pool = round(total_pool, 2)
@@ -871,6 +875,10 @@ def main():
                         cached_total_usd = round(total_net + spot_net, 4)
                         cached_leveraged_pool = round(total_pool, 2)
                         cached_balances = bals
+
+                    # Scrub any prior single-tick $120 borrow/repay API lag outliers (< $450 when live > $480) from eq_series
+                    if cached_total_usd > 480.0 and eq_series:
+                        eq_series = [pt for pt in eq_series if abs(float(pt[1]) - cached_total_usd) < 40.0]
 
                     # TRUE SIGNED WALLET EQUITY & 8-HORIZON DELTAS (No artificial floor/clamp — if equity went in minus over any window, shows exact negative minus!)
                     if cached_total_usd > 85.0:
