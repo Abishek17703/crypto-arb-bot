@@ -503,7 +503,7 @@ def main():
                 loaded_eq = json.load(_eqf)
                 merged_map = {round(float(p[0]), 1): float(p[1]) for p in seed_true_hist}
                 for p in loaded_eq:
-                    if float(p[1]) > 480.0:
+                    if 460.0 < float(p[1]) < 545.0:
                         merged_map[round(float(p[0]), 1)] = float(p[1])
                 eq_series = [[k, merged_map[k]] for k in sorted(merged_map.keys())]
     except Exception:
@@ -853,15 +853,15 @@ def main():
                     wb_sum = sum(float(w.get("balance", 0)) for w in wb_r if w.get("activate")) if isinstance(wb_r, list) else 0.0
                     exact_acct_eq = round(total_net + spot_net, 4)
                     prev_valid_eq = getattr(api, "_last_valid_eq", 498.48)
-                    # Guard against Binance 1-tick $120 async settlement lag across wallet/balance & margin/account right after BORROW/REPAY!
+                    # Guard against Binance 1-tick async settlement lag (BOTH downward BORROW lag & upward REPAY lag!) across wallet/balance & margin/account!
                     if exact_acct_eq > 85.0 and wb_sum > 85.0 and abs(wb_sum - exact_acct_eq) > 15.0:
-                        wb_sum = max(wb_sum, exact_acct_eq) if abs(max(wb_sum, exact_acct_eq) - prev_valid_eq) < 10.0 else exact_acct_eq
-                    if wb_sum > 85.0 and prev_valid_eq > 450.0 and (prev_valid_eq - wb_sum) > 25.0 and getattr(api, "_lag_drop_ticks", 0) < 3:
+                        wb_sum = exact_acct_eq if abs(exact_acct_eq - prev_valid_eq) < abs(wb_sum - prev_valid_eq) else wb_sum
+                    if wb_sum > 85.0 and prev_valid_eq > 450.0 and abs(prev_valid_eq - wb_sum) > 25.0 and getattr(api, "_lag_drop_ticks", 0) < 4:
                         api._lag_drop_ticks = getattr(api, "_lag_drop_ticks", 0) + 1
                         wb_sum = prev_valid_eq
                     else:
                         api._lag_drop_ticks = 0
-                        if wb_sum > 450.0:
+                        if 450.0 < wb_sum < 560.0:
                             api._last_valid_eq = wb_sum
                     if wb_sum > 85.0:
                         cached_total_usd = round(wb_sum, 4)
@@ -892,9 +892,9 @@ def main():
                         cached_leveraged_pool = round(total_pool, 2)
                         cached_balances = bals
 
-                    # Scrub any prior single-tick $120 borrow/repay API lag outliers (< $450 when live > $480) from eq_series
-                    if cached_total_usd > 480.0 and eq_series:
-                        eq_series = [pt for pt in eq_series if float(pt[1]) > 460.0]
+                    # Scrub any prior single-tick borrow/repay API lag outliers (< $460 or > $550 when live ~ $498) from eq_series
+                    if 480.0 < cached_total_usd < 540.0 and eq_series:
+                        eq_series = [pt for pt in eq_series if 460.0 < float(pt[1]) < 545.0]
 
                     # TRUE SIGNED WALLET EQUITY & 8-HORIZON DELTAS (No artificial floor/clamp — if equity went in minus over any window, shows exact negative minus!)
                     if cached_total_usd > 85.0:
