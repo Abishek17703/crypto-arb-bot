@@ -179,8 +179,8 @@ class BinanceMarginSession:
                     return {"_error": 500, "msg": str(e)}
 
 
-def auto_compound_borrow(api):
-    # 0. Auto-sweep any new Spot USDT/USDC deposit (>= $5) into Cross Margin (ZERO margin borrowing — 0% interest drain!)
+def auto_compound_borrow(api, force_repay_all=False):
+    # 0. Auto-sweep any new Spot USDT/USDC deposit (>= $5) into Cross Margin
     try:
         spot = api.request("GET", "/api/v3/account", signed=True)
         for b in spot.get("balances", []):
@@ -195,15 +195,20 @@ def auto_compound_borrow(api):
                     api.request("POST", "/sapi/v1/margin/transfer", {"asset": "USDT", "amount": f"{ut_free:.2f}", "type": "1"}, signed=True)
     except Exception:
         pass
-    # Immediately repay any free USDT against Cross Margin debt so hourly borrow interest drops to $0.00!
+    # Smart Debt Control: Repay excess idle free USDT (> $450) when not halted, or 100% when force_repay_all=True!
     try:
         cm_acc = api.request("GET", "/sapi/v1/margin/account", signed=True)
         for ua in cm_acc.get("userAssets", []):
             if ua.get("asset") == "USDT":
                 fv_ut, bv_ut = float(ua.get("free", 0)), float(ua.get("borrowed", 0)) + float(ua.get("interest", 0))
-                if bv_ut > 0.001 and fv_ut >= 0.05:
+                if force_repay_all and bv_ut > 0.001 and fv_ut >= 0.05:
                     rep_amt = min(fv_ut, bv_ut)
                     api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "USDT", "isIsolated": "FALSE", "amount": f"{rep_amt:.6f}", "type": "REPAY"}, signed=True)
+                elif (not force_repay_all) and bv_ut > 1.0 and fv_ut > 460.0:
+                    # Never pay interest on >$460 idle sitting cash — repay excess idle cash automatically!
+                    rep_amt = min(fv_ut - 380.0, bv_ut)
+                    if rep_amt >= 20.0:
+                        api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "USDT", "isIsolated": "FALSE", "amount": f"{rep_amt:.2f}", "type": "REPAY"}, signed=True)
             elif ua.get("asset") == "USD1":
                 fv_u1, bv_u1 = float(ua.get("free", 0)), float(ua.get("borrowed", 0)) + float(ua.get("interest", 0))
                 if bv_u1 > 0.0001 and fv_u1 >= bv_u1:
@@ -270,7 +275,7 @@ def compute_conservative_guard(api, bbos):
     if now_t - prev_g.get("ts", 0.0) < 12.0 and prev_g.get("pairs"):
         return prev_g["pairs"]
     out = dict(prev_g.get("pairs", {}))
-    for sym_g, tick_g in (("USD1USDT", 0.00001), ("USDCUSDT", 0.00001)):
+    for sym_g, tick_g, dec_g in (("USD1USDT", 0.00001, 5), ("USDCUSDT", 0.00001, 5), ("FDUSDUSDT", 0.00010, 4)):
         try:
             kl = api.request("GET", "/api/v3/klines", {"symbol": sym_g, "interval": "1m", "limit": 16})
             if isinstance(kl, list) and len(kl) >= 6:
@@ -280,10 +285,10 @@ def compute_conservative_guard(api, bbos):
                 mid_15m = sum((float(k[2]) + float(k[3]) + float(k[4])) / 3.0 for k in closed_kl) / max(1, len(closed_kl))
                 c_last3 = [float(k[4]) for k in closed_kl[-3:]]
                 falling = (len(c_last3) == 3 and (c_last3[-1] < c_last3[0] - tick_g * 2.5))
-                max_safe_bid = round(min(mid_15m + tick_g * 2.0, hi_15m - tick_g * 1.0), 5)
+                max_safe_bid = round(min(mid_15m + tick_g * 2.0, hi_15m - tick_g * 1.0), dec_g)
                 if hi_15m - lo_15m <= tick_g * 3.1:
-                    max_safe_bid = round(hi_15m, 5)
-                out[sym_g] = {"max_bid": max_safe_bid, "mid": round(mid_15m, 5), "hi": hi_15m, "lo": lo_15m, "falling": falling}
+                    max_safe_bid = round(hi_15m - (tick_g if sym_g == "FDUSDUSDT" else 0.0), dec_g)
+                out[sym_g] = {"max_bid": max_safe_bid, "mid": round(mid_15m, dec_g), "hi": hi_15m, "lo": lo_15m, "falling": falling}
         except Exception:
             pass
     api._cons_guard = {"ts": now_t, "pairs": out}
@@ -291,8 +296,8 @@ def compute_conservative_guard(api, bbos):
 
 
 def rebalance_to_50_50(api, bbos):
-    # Repay any free USDT debt automatically (0% interest drain)
-    auto_compound_borrow(api)
+    # Trim only excess idle sitting USDT (> $460) while keeping active leveraged working pool deployed!
+    auto_compound_borrow(api, force_repay_all=False)
 
 
 def halt_all_orders_and_repay(api):
@@ -312,7 +317,7 @@ def halt_all_orders_and_repay(api):
                 oid = oo.get("orderId")
                 if oid:
                     api.request("DELETE", "/sapi/v1/margin/order", {"symbol": iso_sym, "isIsolated": "TRUE", "orderId": oid}, signed=True)
-    auto_compound_borrow(api)
+    auto_compound_borrow(api, force_repay_all=True)
 
 
 def adopt_existing_tranches(api):
@@ -333,7 +338,7 @@ def adopt_existing_tranches(api):
         if isinstance(_old_oc, list):
             for _oo in _old_oc:
                 api.request("DELETE", "/sapi/v1/margin/order", {"symbol": _old_sym, "orderId": _oo["orderId"]}, signed=True)
-    auto_compound_borrow(api)
+    auto_compound_borrow(api, force_repay_all=True)
     fifo_lots = {}
     for _cm_sym in ("USD1USDT", "USD1USDC", "FDUSDUSDT", "FDUSDUSDC", "USDCUSDT", "USD1U", "UUSDT", "UUSDC", "BTCU", "ETHU", "BNBU", "BNBFDUSD", "SOLFDUSD"):
         fifo_lots[_cm_sym] = []
@@ -434,7 +439,7 @@ def main():
         pass
 
     # Auto-compound USD1USDT 5x Isolated & Cross Margin on startup
-    auto_compound_borrow(api)
+    auto_compound_borrow(api, force_repay_all=True)
 
     active_tranches = adopt_existing_tranches(api)
     trades_cache = {s: [] for s in ("USDCUSDT", "USDCUSDT_CM", "USD1USDT_CM", "USD1USDT_ISO", "USD1USDC_CM", "USD1U_CM", "UUSDT_CM", "FDUSDUSDT", "FDUSDUSDT_CM", "FDUSDUSDC", "FDUSDUSDC_CM", "BTCU_CM", "BNBU_CM", "ETHU_CM", "BNBFDUSD_CM", "SOLFDUSD_CM", "EURIUSDT", "BTCU", "ETHU")}
@@ -702,10 +707,10 @@ def main():
                 live_hourly_rate_usd = round(cur_pace_hr, 4)
                 live_daily_rate_usd = round(live_hourly_rate_usd * 24.0, 4)
 
-            # 2. Auto-Compound Borrow & Non-Destructive 50/50 Rebalance every 60s
+            # 2. Auto-Compound Borrow & Idle-Debt Trim every 12s
             if loop_ts - last_compound_ts >= 12.0:
                 last_compound_ts = loop_ts
-                auto_compound_borrow(api)
+                auto_compound_borrow(api, force_repay_all=False)
                 rebalance_to_50_50(api, bbos)
 
             # 3. Single-Call Bulk Open Orders Diff every 0.10s (1-Call Zero-Drop Guard + <100ms Flip Speed)
@@ -962,7 +967,7 @@ def main():
                             # Conservative Pre-Fill Shield: Cancel resting BUY if top-of-book bid support collapses (< 22% of ask wall) or 15m trend drops sharply!
                             cg_live = compute_conservative_guard(api, bbos).get(sym, {})
                             weak_bid_wall = (
-                                sym in ("USD1USDT", "USDCUSDT")
+                                sym in ("USD1USDT", "USDCUSDT", "FDUSDUSDT")
                                 and abs(tr["buy_px"] - q_bbo["bid"]) < spec["tick"] * 0.4
                                 and (q_bbo["bidQty"] < q_bbo["askQty"] * 0.22 or (cg_live.get("falling", False) and q_bbo["bidQty"] < q_bbo["askQty"] * 0.55) or (cg_live.get("max_bid") and tr["buy_px"] > cg_live["max_bid"] + spec["tick"] * 0.8))
                             )
@@ -1266,15 +1271,25 @@ def main():
 
                 active_tranches = still_tranches
 
-                # 4B-0. Rapid Zero-Noise Cleanup: Repay USDT debt to $0.00 & liquidate volatile SOL / floating FDUSD+USD1 via 0% fee LIMIT_MAKER at live Ask!
+                # 4B-0. On-Demand Active Working Leverage (~$960 max loan -> $2,000+ pool equival, zero idle-reserve borrowing) + Soft $496.80 De-Leverage Shield!
                 cm_ut_debt = sum(float(b.get("borrowed", 0)) for b in cached_balances if "USDT (5x Cross)" in b.get("asset", ""))
-                if cm_ut_debt > 0.01 and free_map["CM_USDT"] >= 0.50 and (loop_ts - getattr(api, "_last_repay_tick", 0.0)) >= 1.5:
+                soft_delev = (85.0 < cached_total_usd <= 496.80)
+                if soft_delev and cm_ut_debt > 0.01 and free_map["CM_USDT"] >= 0.50 and (loop_ts - getattr(api, "_last_repay_tick", 0.0)) >= 1.5:
                     api._last_repay_tick = loop_ts
                     rep_q = min(free_map["CM_USDT"], cm_ut_debt)
                     rr = api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "USDT", "isIsolated": "FALSE", "amount": f"{rep_q:.6f}", "type": "REPAY"}, signed=True)
                     if "tranId" in rr:
                         free_map["CM_USDT"] = max(0.0, free_map["CM_USDT"] - rep_q)
                         cm_ut_debt = max(0.0, cm_ut_debt - rep_q)
+                elif (not soft_delev) and cached_total_usd > 497.20 and cm_ut_debt < 960.0 and free_map["CM_USDT"] < 240.0 and (loop_ts - getattr(api, "_last_borrow_tick", 0.0)) >= 6.0:
+                    # Step 2 On-Demand Borrow: ONLY borrow $120 chunks when free USDT drops below $240 so we NEVER pay interest on idle $650 reserve!
+                    api._last_borrow_tick = loop_ts
+                    bor_q = min(120.0, 960.0 - cm_ut_debt)
+                    if bor_q >= 25.0:
+                        br_r = api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "USDT", "isIsolated": "FALSE", "amount": f"{bor_q:.2f}", "type": "BORROW"}, signed=True)
+                        if "tranId" in br_r:
+                            free_map["CM_USDT"] += bor_q
+                            cm_ut_debt += bor_q
 
                 # Close SOL immediately via 0%-fee SOLFDUSD LIMIT_MAKER @ live Ask (eliminates ±$0.25/min crypto mark-to-market noise!)
                 sol_drain_ord = getattr(api, "_sol_drain_oid", None)
@@ -1292,7 +1307,7 @@ def main():
                         free_map["CM_SOL"] = 0.0
                         api._sol_drain_oid = (sr_sol["orderId"], spx_sol, loop_ts)
 
-                # Close FDUSD (~118 FDUSD once SOL sells) via 0%-fee FDUSDUSDT LIMIT_MAKER @ live Ask
+                # Drain excess FDUSD (> 265 FDUSD or soft_delev) via 0%-fee FDUSDUSDT LIMIT_MAKER @ live Ask
                 fd_drain_ord = getattr(api, "_fd_drain_oid", None)
                 if fd_drain_ord is not None:
                     if not any(o.get("orderId") == fd_drain_ord[0] for o in cached_open_orders):
@@ -1300,15 +1315,18 @@ def main():
                     elif "FDUSDUSDT" in bbos and (bbos["FDUSDUSDT"]["ask"] < fd_drain_ord[1] - 0.00005 or loop_ts - fd_drain_ord[2] > 5.0):
                         api.request("DELETE", "/sapi/v1/margin/order", {"symbol": "FDUSDUSDT", "orderId": fd_drain_ord[0]}, signed=True)
                         api._fd_drain_oid = None
-                elif "FDUSDUSDT" in bbos and free_map["CM_FDUSD"] >= 6.0:
-                    sq_fd = math.floor(free_map["CM_FDUSD"])
-                    spx_fd = bbos["FDUSDUSDT"]["ask"]
-                    sr_fd = api.request("POST", "/sapi/v1/margin/order", {"symbol": "FDUSDUSDT", "side": "SELL", "type": "LIMIT_MAKER", "quantity": str(sq_fd), "price": f"{spx_fd:.4f}"}, signed=True)
-                    if "orderId" in sr_fd:
-                        free_map["CM_FDUSD"] = max(0.0, free_map["CM_FDUSD"] - sq_fd)
-                        api._fd_drain_oid = (sr_fd["orderId"], spx_fd, loop_ts)
+                elif "FDUSDUSDT" in bbos and free_map["CM_FDUSD"] >= 6.0 and (soft_delev or sum(t["qty"] for t in active_tranches if t["symbol"] == "FDUSDUSDT" and t["state"] == "SELL_OPEN") + free_map["CM_FDUSD"] > 265.0):
+                    tot_fd_now = sum(t["qty"] for t in active_tranches if t["symbol"] == "FDUSDUSDT" and t["state"] == "SELL_OPEN") + free_map["CM_FDUSD"]
+                    exc_fd = free_map["CM_FDUSD"] if soft_delev else max(0.0, tot_fd_now - 245.0)
+                    sq_fd = math.floor(min(free_map["CM_FDUSD"], exc_fd))
+                    if sq_fd >= 6:
+                        spx_fd = bbos["FDUSDUSDT"]["ask"]
+                        sr_fd = api.request("POST", "/sapi/v1/margin/order", {"symbol": "FDUSDUSDT", "side": "SELL", "type": "LIMIT_MAKER", "quantity": str(sq_fd), "price": f"{spx_fd:.4f}"}, signed=True)
+                        if "orderId" in sr_fd:
+                            free_map["CM_FDUSD"] = max(0.0, free_map["CM_FDUSD"] - sq_fd)
+                            api._fd_drain_oid = (sr_fd["orderId"], spx_fd, loop_ts)
 
-                # Conservative Pure-USDT Cash Shield: Drain excess USD1 (> 78 USD1) to pure USDT at live Ask so >=70% (~$345+) stays in $1.00000 USDT!
+                # Drain excess USD1 (> 520 USD1 or soft_delev) to pure USDT at live Ask!
                 u1_drain_ord = getattr(api, "_u1_drain_oid", None)
                 if u1_drain_ord is not None:
                     if not any(o.get("orderId") == u1_drain_ord[0] for o in cached_open_orders):
@@ -1316,9 +1334,9 @@ def main():
                     elif "USD1USDT" in bbos and (bbos["USD1USDT"]["ask"] < u1_drain_ord[1] - 0.000005 or loop_ts - u1_drain_ord[2] > 4.0):
                         api.request("DELETE", "/sapi/v1/margin/order", {"symbol": "USD1USDT", "orderId": u1_drain_ord[0]}, signed=True)
                         api._u1_drain_oid = None
-                elif "USD1USDT" in bbos and free_map["CM_USD1"] >= 6.0 and (cm_ut_debt > 1.0 or sum(t["qty"] for t in active_tranches if t["symbol"] == "USD1USDT" and t["state"] == "SELL_OPEN") + free_map["CM_USD1"] > 78.0):
+                elif "USD1USDT" in bbos and free_map["CM_USD1"] >= 6.0 and (soft_delev or sum(t["qty"] for t in active_tranches if t["symbol"] == "USD1USDT" and t["state"] == "SELL_OPEN") + free_map["CM_USD1"] > 520.0):
                     tot_u1_now = sum(t["qty"] for t in active_tranches if t["symbol"] == "USD1USDT" and t["state"] == "SELL_OPEN") + free_map["CM_USD1"]
-                    exc_u1 = free_map["CM_USD1"] if cm_ut_debt > 1.0 else max(0.0, tot_u1_now - 72.0)
+                    exc_u1 = free_map["CM_USD1"] if soft_delev else max(0.0, tot_u1_now - 490.0)
                     sq_u1 = min(250, math.floor(min(free_map["CM_USD1"], exc_u1)))
                     if sq_u1 >= 6:
                         spx_u1 = bbos["USD1USDT"]["ask"]
@@ -1327,7 +1345,7 @@ def main():
                             free_map["CM_USD1"] = max(0.0, free_map["CM_USD1"] - sq_u1)
                             api._u1_drain_oid = (sr_u1["orderId"], spx_u1, loop_ts)
 
-                # Drain excess USDC (> 78 USDC) to pure USDT at live Ask so >=70% (~$345+) stays in $1.00000 USDT!
+                # Drain excess USDC (> 560 USDC or soft_delev) to pure USDT at live Ask!
                 uc_seed_ord = getattr(api, "_uc_seed_oid", None)
                 if uc_seed_ord is not None:
                     if not any(o.get("orderId") == uc_seed_ord[1] for o in cached_open_orders):
@@ -1335,9 +1353,9 @@ def main():
                     elif "USDCUSDT" in bbos and (bbos["USDCUSDT"]["ask"] < uc_seed_ord[3] - 0.000005 or loop_ts - uc_seed_ord[2] > 4.0):
                         api.request("DELETE", "/sapi/v1/margin/order", {"symbol": "USDCUSDT", "orderId": uc_seed_ord[1]}, signed=True)
                         api._uc_seed_oid = None
-                elif "USDCUSDT" in bbos and free_map["CM_USDC"] >= 6.0 and (cm_ut_debt > 1.0 or sum(t["qty"] for t in active_tranches if t["symbol"] == "USDCUSDT" and t["state"] == "SELL_OPEN") + free_map["CM_USDC"] > 78.0):
+                elif "USDCUSDT" in bbos and free_map["CM_USDC"] >= 6.0 and (soft_delev or sum(t["qty"] for t in active_tranches if t["symbol"] == "USDCUSDT" and t["state"] == "SELL_OPEN") + free_map["CM_USDC"] > 560.0):
                     tot_uc_now = sum(t["qty"] for t in active_tranches if t["symbol"] == "USDCUSDT" and t["state"] == "SELL_OPEN") + free_map["CM_USDC"]
-                    exc_uc = free_map["CM_USDC"] if cm_ut_debt > 1.0 else max(0.0, tot_uc_now - 72.0)
+                    exc_uc = free_map["CM_USDC"] if soft_delev else max(0.0, tot_uc_now - 525.0)
                     uc_s_mkr = min(200, math.floor(min(free_map["CM_USDC"], exc_uc)))
                     if uc_s_mkr >= 6:
                         uc_ask_now = bbos["USDCUSDT"]["ask"]
@@ -1346,12 +1364,13 @@ def main():
                             free_map["CM_USDC"] = max(0.0, free_map["CM_USDC"] - uc_s_mkr)
                             api._uc_seed_oid = ("SELL", s_res["orderId"], loop_ts, uc_ask_now)
 
-                # 4B. Conservative & Profitable Shield Engine: Keeps >=$340 (~69%) parked in pure $1.00000 USDT cash reserve & runs 6 nimble $18 tranches per pair with 15m anti-spike + bid-wall support!
+                # 4B. v6.1 2K+ CONSERVATIVE SCALED ENGINE (Step 1: 65% own cash + Step 2: On-demand active working leverage up to ~$1,310 active across USD1/USDC/FDUSD, $175 untouched cash reserve!)
                 cons_guards = compute_conservative_guard(api, bbos)
-                allow_buys = (cm_ut_debt <= 1.0)
-                for sym_p, is_iso, f_key, b_key, max_tr, max_buy, t_size, lbl_p in (
-                    ("USD1USDT",  False, "CM_USDT",  "CM_USD1",   6 if allow_buys else 0,  2 if allow_buys else 0, 18.0, "CONSERVATIVE • USD1 $18"),
-                    ("USDCUSDT",  False, "CM_USDT",  "CM_USDC",   6 if allow_buys else 0,  2 if allow_buys else 0, 18.0, "CONSERVATIVE • USDC $18"),
+                allow_buys = (not soft_delev)
+                for sym_p, is_iso, f_key, b_key, max_tr, max_buy, t_size, max_sell_cap, lbl_p in (
+                    ("USD1USDT",  False, "CM_USDT",  "CM_USD1",   14 if allow_buys else 0,  6 if allow_buys else 0, 36.0, 504.0, "2K-CONSERVATIVE • USD1 $36"),
+                    ("USDCUSDT",  False, "CM_USDT",  "CM_USDC",   14 if allow_buys else 0,  6 if allow_buys else 0, 38.0, 532.0, "2K-CONSERVATIVE • USDC $38"),
+                    ("FDUSDUSDT", False, "CM_USDT",  "CM_FDUSD",   8 if allow_buys else 0,  4 if allow_buys else 0, 34.0, 272.0, "2K-CONSERVATIVE • FDUSD $34"),
                 ):
                     q_bbo = bbos.get(sym_p)
                     if not q_bbo or q_bbo["bid"] <= 0:
@@ -1407,14 +1426,14 @@ def main():
                         else:
                             break
 
-                    # Post conservative maker BUY above $340 pure USDT reserve + healthy bid support + 15m anti-spike guard!
+                    # Post conservative maker BUY above $175 pure USDT dry-powder reserve + healthy bid support + 15m anti-spike guard!
                     p_buying = [t for t in p_tr if t["state"] == "BUY_OPEN"]
                     p_selling_qty = sum(t["qty"] for t in p_tr if t["state"] == "SELL_OPEN")
                     cg_p = cons_guards.get(sym_p, {})
                     bid_wall_ok = (q_bbo["bidQty"] >= q_bbo["askQty"] * 0.45 and not (cg_p.get("falling", False) and q_bbo["bidQty"] < q_bbo["askQty"] * 0.90))
-                    # Reserve at least $340.00 pure USDT untouched (~69%+ of equity) so nimble $18 BUY tranches never stall when 2-3 sells are resting!
-                    while (sym_p not in getattr(api, "_disabled_fee_keys", set())) and bid_wall_ok and p_selling_qty <= 74.0 and len(p_buying) < max_buy and len(p_tr) < max_tr and free_map[f_key] >= 342.0:
-                        avail_above_reserve = max(0.0, free_map[f_key] - 340.0)
+                    # Keep $175.00 own USDT untouched as zero-interest dry powder while deploying up to ~$1,310 active staggered working capital!
+                    while (sym_p not in getattr(api, "_disabled_fee_keys", set())) and bid_wall_ok and p_selling_qty <= max_sell_cap and len(p_buying) < max_buy and len(p_tr) < max_tr and free_map[f_key] >= 176.0:
+                        avail_above_reserve = max(0.0, free_map[f_key] - 175.0)
                         use_usd = min(t_size, avail_above_reserve)
                         raw_bq = use_usd / q_bbo["bid"]
                         bq = round(math.floor(raw_bq / spec["step"] + 1e-9) * spec["step"], 6)
@@ -1437,13 +1456,11 @@ def main():
                                 break
                             cap_top, cap_sub, max_lvls = (24, 0, 1) if sym_p == "USD1USDC" else (6, 0, 1)
                         elif sym_p == "FDUSDUSDT":
-                            cap_top, cap_sub, max_lvls = 4, 2, 1
+                            cap_top, cap_sub, max_lvls = 3, 3, 2
                         elif sym_p == "USDCUSDT":
-                            cap_top, cap_sub, max_lvls = 6, 4, 2
+                            cap_top, cap_sub, max_lvls = 4, 4, 2
                         else:
-                            cap_top = max(5, (8 if vol_mode_b == "HIGH" else (7 if vol_mode_b == "MEDIUM" else 8)) - inv_skew)
-                            cap_sub = 6 if (near_hard_b or vol_mode_b == "HIGH") else 7
-                            max_lvls = 10
+                            cap_top, cap_sub, max_lvls = 4, 4, 3
                         base_bpx = round(q_bbo["bid"] + spec["tick"], spec["dec"]) if (q_bbo["ask"] - q_bbo["bid"] >= spec["tick"] * 1.9) else round(q_bbo["bid"], spec["dec"])
                         if cg_p.get("max_bid"):
                             base_bpx = round(min(base_bpx, cg_p["max_bid"]), spec["dec"])
@@ -1558,7 +1575,7 @@ def main():
                         "status": (
                             f"PAUSED AT <=$495.00 — ALL TRADING STOPPED UNTIL USER REPLY (Eq ${cached_total_usd:.4f})"
                             if getattr(api, "_paused_495", False)
-                            else f"v6.0 CONSERVATIVE SHIELD • $495 GUARD (Cash ${free_map.get('CM_USDT', 0.0):.0f} USDT • 1h {'+$' if equity_changes.get('1h', 0)>=0 else '-$'}{abs(equity_changes.get('1h', 0)):.4f})"
+                            else f"v6.1 2K+ CONSERVATIVE SCALED • $495 GUARD (Pool ${cached_leveraged_pool:.0f} • 1h {'+$' if equity_changes.get('1h', 0)>=0 else '-$'}{abs(equity_changes.get('1h', 0)):.4f})"
                         ),
                         "paused": bool(getattr(api, "_paused_495", False)),
                         "pauseReason": (
