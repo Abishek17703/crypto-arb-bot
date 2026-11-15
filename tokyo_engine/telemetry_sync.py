@@ -218,7 +218,7 @@ def auto_compound_borrow(api, force_repay_all=False):
                     if rep_amt >= 10.0:
                         api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "USDT", "isIsolated": "FALSE", "amount": f"{rep_amt:.2f}", "type": "REPAY"}, signed=True)
                         api._last_repay_tick = time.time()
-                elif ml > 1.50 and tot_ut < 1150.0 and bv_u < 820.0 and tot_net_btc > 0:
+                elif ml > 1.38 and tot_ut < 1150.0 and bv_u < 820.0 and tot_net_btc > 0:
                     brw_ut = min(1200.0 - tot_ut, 820.0 - bv_u, 380.0)
                     if brw_ut >= 40.0:
                         br_u_r = api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "USDT", "isIsolated": "FALSE", "amount": f"{brw_ut:.2f}", "type": "BORROW"}, signed=True)
@@ -231,7 +231,7 @@ def auto_compound_borrow(api, force_repay_all=False):
                     if rep_uc >= 10.0:
                         api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "USDC", "isIsolated": "FALSE", "amount": f"{rep_uc:.2f}", "type": "REPAY"}, signed=True)
                         api._last_uc_rep = time.time()
-                elif ml > 1.55 and tot_uc < 520.0 and bv_u < 520.0 and tot_net_btc > 0:
+                elif ml > 1.38 and tot_uc < 520.0 and bv_u < 520.0 and tot_net_btc > 0:
                     brw_uc = min(560.0 - tot_uc, 520.0 - bv_u, 320.0)
                     if brw_uc >= 40.0:
                         br_c_r = api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "USDC", "isIsolated": "FALSE", "amount": f"{brw_uc:.2f}", "type": "BORROW"}, signed=True)
@@ -246,13 +246,13 @@ def auto_compound_borrow(api, force_repay_all=False):
                 u_free_for_btcu = fv_u
                 if bv_u > 1.0 and u_free_for_btcu > 210.0:
                     api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "U", "isIsolated": "FALSE", "amount": f"{min(u_free_for_btcu - 140.0, bv_u):.2f}", "type": "REPAY"}, signed=True)
-                elif ml > 1.50 and u_free_for_btcu < 135.0 and bv_u < 220.0 and tot_net_btc > 0:
+                elif ml > 1.35 and u_free_for_btcu < 135.0 and bv_u < 220.0 and tot_net_btc > 0:
                     brw_u_amt = min(175.0 - u_free_for_btcu, 220.0 - bv_u, 150.0)
                     if brw_u_amt >= 20.0:
                         api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "U", "isIsolated": "FALSE", "amount": f"{brw_u_amt:.2f}", "type": "BORROW"}, signed=True)
             elif ast_u == "BTC":
                 # Keep 1:1 Cross-Margin BTC short hedge (~0.00145 BTC = ~$94, midpoint of $185 max sleeve) so BTCU inventory stays delta-neutral!
-                target_btc_h = 0.00145 if (not force_repay_all and ml > 1.50 and tot_net_btc > 0) else 0.0
+                target_btc_h = 0.00145 if (not force_repay_all and ml > 1.35 and tot_net_btc > 0) else 0.0
                 if target_btc_h > 0 and bv_u < target_btc_h * 0.80:
                     brw_btc = round(target_btc_h - bv_u, 5)
                     if brw_btc >= 0.00010:
