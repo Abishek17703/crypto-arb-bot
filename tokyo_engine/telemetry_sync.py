@@ -1955,7 +1955,7 @@ def main():
                             and tx["sell_px"] >= bbo_r["ask"] + spec_r["tick"] * 2.5
                             and (loop_ts - tx.get("ts", 0)) >= 15.0
                         ]
-                        if far_sells_r and len(sh_open_r) < 3 and not (sym_r == "USDCUSDT" and free_map["CM_USDC"] < 28.0):
+                        if far_sells_r and len(sh_open_r) < 6 and not (sym_r == "USDCUSDT" and free_map["CM_USDC"] < 28.0):
                             far_sells_r.sort(key=lambda x: x["sell_px"], reverse=True)
                             tx_far = far_sells_r[0]
                             cr_f = api.request("DELETE", "/sapi/v1/margin/order", {"symbol": sym_r, "orderId": tx_far["sell_oid"]}, signed=True)
@@ -2213,8 +2213,8 @@ def main():
                     ("FDUSDUSDC", False, "CM_USDC",  "CM_FDUSD",   (4 if allow_buys else 0), (2 if allow_buys else 0), 28.0,  56.0, "LATENCY-TRI • FDUSD/USDC"),
                     ("USD1U",     False, "CM_U",     "CM_USD1",    (2 if allow_buys else 0), (1 if allow_buys else 0), 14.0,  28.0, "LATENCY-TRI • USD1/U"),
                     ("FDUSDUSDT", False, "CM_USDT",  "CM_FDUSD",   (2 if fd_thin_ok else 1) if allow_buys else 0, (1 if fd_thin_ok else 0) if allow_buys else 0, 28.0,  56.0, "FDUSD-10x • SNIPER $28"),
-                    ("USDCUSDT",  False, "CM_USDT",  "CM_USDC",    12 if allow_buys else 0, 8 if allow_buys else 0, main_t_sz, 168.0, "DIP-SNIPER • USDC"),
-                    ("USD1USDT",  False, "CM_USDT",  "CM_USD1",    14 if allow_buys else 0, 10 if allow_buys else 0, main_t_sz, 196.0, "DIP-SNIPER • USD1"),
+                    ("USDCUSDT",  False, "CM_USDT",  "CM_USDC",    14 if allow_buys else 0, 8 if allow_buys else 0, main_t_sz, 168.0, "DIP-SNIPER • USDC"),
+                    ("USD1USDT",  False, "CM_USDT",  "CM_USD1",    18 if allow_buys else 0, 10 if allow_buys else 0, main_t_sz, 224.0, "DIP-SNIPER • USD1"),
                     ("USD1USDC",  False, "CM_USDC",  "CM_USD1",    0, 0, 14.1,  28.0, "TRI-MAKER • USD1/USDC"),
                     ("UUSDT",     False, "CM_USDT",  "CM_U",       1 if allow_buys else 0, 0, 14.1,  28.0, "FULL-10x • U/USDT $14"),
                 ):
@@ -2340,7 +2340,7 @@ def main():
                                 break
                             if (bbos[ref_chk_p]["ask"] / bbos[q_bridge_p]["ask"]) - q_bbo["bid"] < 0.000050:
                                 break
-                            cap_top, cap_sub, max_lvls = 1, 0, 1
+                            cap_top, cap_sub, max_lvls = 2, 0, 1
                         elif sym_p in ("UUSDT", "USD1USDC"):
                             # U/USDT 10x Yield ($0.00010 tick): Stack up to 3x$14 on strong >=2.2x Bid wall (2x on >=1.35x), plus 2x$14 at Bid-1!
                             cap_top = 3 if q_bbo["bidQty"] >= q_bbo["askQty"] * 2.20 else (2 if q_bbo["bidQty"] >= q_bbo["askQty"] * 1.35 else 0)
