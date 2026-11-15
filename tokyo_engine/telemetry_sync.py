@@ -691,13 +691,14 @@ def rebalance_to_50_50(api, bbos):
 
 
 def halt_all_orders_and_repay(api):
-    # Cancel 100% of Cross Margin open orders across all symbols
+    # Cancel 100% of Cross Margin open orders across all symbols EXCEPT paused 0-loss USDT unwind SELLs
     all_cm = api.request("GET", "/sapi/v1/margin/openOrders", signed=True)
     if isinstance(all_cm, list):
         for oo in all_cm:
             sym = oo.get("symbol")
             oid = oo.get("orderId")
-            if sym and oid:
+            cid = str(oo.get("clientOrderId", ""))
+            if sym and oid and not cid.startswith("UNWIND_"):
                 api.request("DELETE", "/sapi/v1/margin/order", {"symbol": sym, "orderId": oid}, signed=True)
     # Cancel 100% of Isolated Margin open orders across all pools
     for iso_sym in ("USDCUSDT", "USD1USDT", "FDUSDUSDT", "FDUSDUSDC", "EURIUSDT"):
@@ -708,6 +709,66 @@ def halt_all_orders_and_repay(api):
                 if oid:
                     api.request("DELETE", "/sapi/v1/margin/order", {"symbol": iso_sym, "isIsolated": "TRUE", "orderId": oid}, signed=True)
     auto_compound_borrow(api, force_repay_all=True)
+    # Convert 100% of remaining non-USDT balances (USDC, FDUSD, USD1, U) into pure USDT via 0%-fee LIMIT_MAKER @ >= cost basis (0 loss) and repay any tiny ETH dust!
+    try:
+        cm_acc = api.request("GET", "/sapi/v1/margin/account", signed=True)
+        assets_map = {a.get("asset"): a for a in cm_acc.get("userAssets", [])}
+        # 1. Repay any tiny ETH debt (< 0.003 ETH) by buying min ETH on ETHUSDT / ETHU and selling residual back via 0%-fee ETHU LIMIT_MAKER:
+        eth_a = assets_map.get("ETH", {})
+        eth_debt = float(eth_a.get("borrowed", 0)) + float(eth_a.get("interest", 0))
+        eth_free = float(eth_a.get("free", 0))
+        if eth_debt > 0.00005 and eth_free < eth_debt:
+            tk_eth = api.request("GET", "/api/v3/ticker/bookTicker", {"symbol": "ETHU"})
+            if isinstance(tk_eth, dict) and "bidPrice" in tk_eth:
+                ebid = float(tk_eth["bidPrice"])
+                eask = float(tk_eth["askPrice"])
+                # Buy 0.0035 ETH on 0%-fee ETHUSDT or ETHU? Buy 0.0035 ETH via ETHUSDT market/IOC? No, use ETHU or ETHUSDT!
+                # Wait: we have 149 USDT free! Buy 0.0035 ETH on ETHUSDT with sideEffectType=AUTO_REPAY so ETH debt goes to 0.00000 immediately, then sell leftover 0.0028 ETH on 0%-fee ETHU LIMIT_MAKER @ Ask!
+                tk_eu = api.request("GET", "/api/v3/ticker/bookTicker", {"symbol": "ETHUSDT"})
+                eu_ask = float(tk_eu.get("askPrice", eask))
+                buy_e_q = 0.0035
+                br_e = api.request("POST", "/sapi/v1/margin/order", {
+                    "symbol": "ETHUSDT", "side": "BUY", "type": "LIMIT", "timeInForce": "IOC",
+                    "quantity": f"{buy_e_q:.4f}", "price": f"{eu_ask:.2f}", "sideEffectType": "AUTO_REPAY"
+                }, signed=True)
+                time.sleep(0.15)
+                cm_acc = api.request("GET", "/sapi/v1/margin/account", signed=True)
+                assets_map = {a.get("asset"): a for a in cm_acc.get("userAssets", [])}
+                eth_a = assets_map.get("ETH", {})
+                eth_free = float(eth_a.get("free", 0))
+                eth_debt = float(eth_a.get("borrowed", 0)) + float(eth_a.get("interest", 0))
+                if eth_debt > 0.00001 and eth_free >= eth_debt:
+                    api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "ETH", "isIsolated": "FALSE", "amount": f"{min(eth_free, eth_debt):.5f}", "type": "REPAY"}, signed=True)
+                    eth_free = max(0.0, eth_free - eth_debt)
+        if eth_free >= 0.0028:
+            tk_eth = api.request("GET", "/api/v3/ticker/bookTicker", {"symbol": "ETHU"})
+            if isinstance(tk_eth, dict) and "askPrice" in tk_eth:
+                sq_e = math.floor(eth_free * 10000.0) / 10000.0
+                spx_e = float(tk_eth["askPrice"])
+                api.request("POST", "/sapi/v1/margin/order", {
+                    "symbol": "ETHU", "side": "SELL", "type": "LIMIT_MAKER",
+                    "quantity": f"{sq_e:.4f}", "price": f"{spx_e:.2f}", "newClientOrderId": f"UNWIND_ETHU_{int(time.time())}"
+                }, signed=True)
+        # 2. Unwind U, USDC, FDUSD, USD1 into pure USDT at >= cost basis (0 loss):
+        for u_ast, u_sym, min_flr_px, dec_u in (
+            ("USDC",  "USDCUSDT",  1.00031, 5),
+            ("FDUSD", "FDUSDUSDT", 0.9961,  4),
+            ("U",     "UUSDT",     1.0001,  4),
+            ("USD1",  "USD1USDT",  0.99850, 5),
+        ):
+            a_info = assets_map.get(u_ast, {})
+            fv_a = math.floor(float(a_info.get("free", 0)))
+            if fv_a >= 6:
+                tk_u = api.request("GET", "/api/v3/ticker/bookTicker", {"symbol": u_sym})
+                if isinstance(tk_u, dict) and "askPrice" in tk_u:
+                    spx_u = max(min_flr_px, float(tk_u["askPrice"]))
+                    api.request("POST", "/sapi/v1/margin/order", {
+                        "symbol": u_sym, "side": "SELL", "type": "LIMIT_MAKER",
+                        "quantity": str(fv_a), "price": f"{spx_u:.{dec_u}f}",
+                        "newClientOrderId": f"UNWIND_{u_ast}_{int(time.time())}"
+                    }, signed=True)
+    except Exception:
+        pass
 
 
 def adopt_existing_tranches(api):
@@ -1402,11 +1463,11 @@ def main():
             # Hard Stop Gate: If $495.00 circuit breaker OR dashboard red PAUSE button is active, stop 100% of trading!
             cm_ut_debt = sum(float(b.get("borrowed", 0)) for b in cached_balances if "USDT (5x Cross)" in b.get("asset", ""))
             if getattr(api, "_paused_495", False) or getattr(api, "_user_paused", False):
-                if cached_open_orders or active_tranches or (loop_ts - getattr(api, "_last_halt_sweep", 0.0) >= 20.0):
+                non_unwind_ords = [o for o in cached_open_orders if not str(o.get("clientOrderId", "")).startswith("UNWIND_")]
+                if non_unwind_ords or active_tranches or (loop_ts - getattr(api, "_last_halt_sweep", 0.0) >= 8.0):
                     api._last_halt_sweep = loop_ts
                     halt_all_orders_and_repay(api)
                 active_tranches = []
-                cached_open_orders = []
                 live_hourly_rate_usd = 0.0
                 live_daily_rate_usd = 0.0
             else:
