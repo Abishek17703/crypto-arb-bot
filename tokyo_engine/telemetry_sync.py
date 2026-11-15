@@ -214,20 +214,26 @@ def auto_compound_borrow(api, force_repay_all=False):
                     rep_amt = min(fv_u - 90.0, bv_u)
                     if rep_amt >= 10.0:
                         api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "USDT", "isIsolated": "FALSE", "amount": f"{rep_amt:.2f}", "type": "REPAY"}, signed=True)
+                        api._last_repay_tick = time.time()
                 elif ml > 1.55 and tot_ut < 1420.0 and bv_u < 1050.0 and tot_net_btc > 0:
-                    brw_ut = min(1480.0 - tot_ut, 1050.0 - bv_u, 350.0)
+                    brw_ut = min(1480.0 - tot_ut, 1050.0 - bv_u, 450.0)
                     if brw_ut >= 40.0:
-                        api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "USDT", "isIsolated": "FALSE", "amount": f"{brw_ut:.2f}", "type": "BORROW"}, signed=True)
+                        br_u_r = api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "USDT", "isIsolated": "FALSE", "amount": f"{brw_ut:.2f}", "type": "BORROW"}, signed=True)
+                        if "tranId" in br_u_r:
+                            api._last_ut_borrow_ts = time.time()
             elif ast_u == "USDC":
                 tot_uc = fv_u + lv_u
                 if bv_u > 1.0 and fv_u > 140.0:
                     rep_uc = min(fv_u - 80.0, bv_u)
                     if rep_uc >= 10.0:
                         api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "USDC", "isIsolated": "FALSE", "amount": f"{rep_uc:.2f}", "type": "REPAY"}, signed=True)
-                elif ml > 1.55 and tot_uc < 480.0 and bv_u < 520.0 and tot_net_btc > 0:
-                    brw_uc = min(520.0 - tot_uc, 520.0 - bv_u, 260.0)
+                        api._last_uc_rep = time.time()
+                elif ml > 1.55 and tot_uc < 520.0 and bv_u < 520.0 and tot_net_btc > 0:
+                    brw_uc = min(560.0 - tot_uc, 520.0 - bv_u, 320.0)
                     if brw_uc >= 40.0:
-                        api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "USDC", "isIsolated": "FALSE", "amount": f"{brw_uc:.2f}", "type": "BORROW"}, signed=True)
+                        br_c_r = api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "USDC", "isIsolated": "FALSE", "amount": f"{brw_uc:.2f}", "type": "BORROW"}, signed=True)
+                        if "tranId" in br_c_r:
+                            api._last_uc_borrow_ts = time.time()
             elif ast_u == "USD1":
                 if bv_u > 1.0 and fv_u >= 1.0:
                     api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "USD1", "isIsolated": "FALSE", "amount": f"{min(fv_u, bv_u):.6f}", "type": "REPAY"}, signed=True)
@@ -751,7 +757,7 @@ def main():
             if loop_ts - last_compound_ts >= 12.0:
                 last_compound_ts = loop_ts
                 auto_compound_borrow(api, force_repay_all=False)
-                rebalance_to_50_50(api, bbos)
+                api._last_full_acct = 0.0
 
             # 3. Single-Call Bulk Open Orders Diff every 0.10s (1-Call Zero-Drop Guard + <100ms Flip Speed)
             if loop_ts - last_acct_poll >= 0.10:
@@ -1415,10 +1421,10 @@ def main():
                         if "orderId" in br_uw:
                             free_map["CM_USDT"] = max(0.0, free_map["CM_USDT"] - need_uc * bpx_uw)
                             api._uc_unwind_oid = (br_uw["orderId"], bpx_uw, loop_ts)
-                # Trim only excess idle borrowed cash (> $160 free) during normal trading; full repay on soft_delev!
-                if cm_uc_debt > 0.01 and (soft_delev or free_map["CM_USDC"] > 150.0) and (loop_ts - getattr(api, "_last_uc_rep", 0.0)) >= 4.0:
+                # Trim only excess idle borrowed cash (> $160 free) AFTER 15s grace so freshly borrowed cash deploys into orders first!
+                if cm_uc_debt > 0.01 and (soft_delev or (free_map["CM_USDC"] > 170.0 and loop_ts - getattr(api, "_last_uc_borrow_ts", 0.0) >= 15.0)) and (loop_ts - getattr(api, "_last_uc_rep", 0.0)) >= 5.0:
                     api._last_uc_rep = loop_ts
-                    rep_uc = min(free_map["CM_USDC"] if soft_delev else max(0.0, free_map["CM_USDC"] - 90.0), cm_uc_debt)
+                    rep_uc = min(free_map["CM_USDC"] if soft_delev else max(0.0, free_map["CM_USDC"] - 95.0), cm_uc_debt)
                     if rep_uc >= 5.0:
                         rr_uc = api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "USDC", "isIsolated": "FALSE", "amount": f"{rep_uc:.4f}", "type": "REPAY"}, signed=True)
                         if "tranId" in rr_uc:
@@ -1431,9 +1437,9 @@ def main():
                     if "tranId" in rr_u1:
                         free_map["CM_USD1"] = max(0.0, free_map["CM_USD1"] - rep_u1)
                         cm_u1_debt = max(0.0, cm_u1_debt - rep_u1)
-                if cm_ut_debt > 0.01 and (soft_delev or free_map["CM_USDT"] > 170.0) and (loop_ts - getattr(api, "_last_repay_tick", 0.0)) >= 4.0:
+                if cm_ut_debt > 0.01 and (soft_delev or (free_map["CM_USDT"] > 190.0 and loop_ts - getattr(api, "_last_ut_borrow_ts", 0.0) >= 15.0)) and (loop_ts - getattr(api, "_last_repay_tick", 0.0)) >= 5.0:
                     api._last_repay_tick = loop_ts
-                    rep_q = min(free_map["CM_USDT"] if soft_delev else max(0.0, free_map["CM_USDT"] - 90.0), cm_ut_debt)
+                    rep_q = min(free_map["CM_USDT"] if soft_delev else max(0.0, free_map["CM_USDT"] - 95.0), cm_ut_debt)
                     if rep_q >= 5.0:
                         rr = api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "USDT", "isIsolated": "FALSE", "amount": f"{rep_q:.4f}", "type": "REPAY"}, signed=True)
                         if "tranId" in rr:
@@ -1511,10 +1517,10 @@ def main():
                 cons_guards = compute_conservative_guard(api, bbos)
                 allow_buys = (not soft_delev)
                 for sym_p, is_iso, f_key, b_key, max_tr, max_buy, t_size, max_sell_cap, lbl_p in (
-                    ("USD1USDC",  False, "CM_USDC",  "CM_USD1",   20 if allow_buys else 0, 12 if allow_buys else 0, 42.1, 300.0, "10x-1BPS • USD1/USDC $42"),
-                    ("UUSDT",     False, "CM_USDT",  "CM_U",      14 if allow_buys else 0,  8 if allow_buys else 0, 42.1, 210.0, "10x-1BPS • U/USDT $42"),
-                    ("USD1USDT",  False, "CM_USDT",  "CM_USD1",   28 if allow_buys else 0, 18 if allow_buys else 0, 35.1, 350.0, "5x-POOL • USD1 $35"),
-                    ("USDCUSDT",  False, "CM_USDT",  "CM_USDC",   24 if allow_buys else 0, 15 if allow_buys else 0, 35.1, 315.0, "5x-POOL • USDC $35"),
+                    ("USD1USDC",  False, "CM_USDC",  "CM_USD1",   22 if allow_buys else 0, 14 if allow_buys else 0, 42.1, 460.0, "10x-1BPS • USD1/USDC $42"),
+                    ("UUSDT",     False, "CM_USDT",  "CM_U",      14 if allow_buys else 0,  8 if allow_buys else 0, 42.1, 240.0, "10x-1BPS • U/USDT $42"),
+                    ("USD1USDT",  False, "CM_USDT",  "CM_USD1",   30 if allow_buys else 0, 18 if allow_buys else 0, 35.1, 560.0, "5x-POOL • USD1 $35"),
+                    ("USDCUSDT",  False, "CM_USDT",  "CM_USDC",   24 if allow_buys else 0, 15 if allow_buys else 0, 35.1, 420.0, "5x-POOL • USDC $35"),
                 ):
                     q_bbo = bbos.get(sym_p)
                     if not q_bbo or q_bbo["bid"] <= 0:
