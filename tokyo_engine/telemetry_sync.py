@@ -647,7 +647,7 @@ def main():
                     fee_1h_c = sum(float(x.get("commission", 0)) for x in cur_list if int(x.get("time", 0)) >= one_hr_ms)
                     if fee_1h_c > 0.0:
                         api._disabled_fee_keys = getattr(api, "_disabled_fee_keys", set()) | {sym_c}
-                    eff_tick_c = tick_c * 1.35 if key_c == "USD1USDT_CM" else tick_c
+                    eff_tick_c = tick_c
                     p_all = sum(float(x["qty"]) * tick_c for x in sells_today)
                     p_12h = sum(float(x["qty"]) * eff_tick_c for x in sells_12h)
                     p_8h = sum(float(x["qty"]) * eff_tick_c for x in sells_8h)
@@ -670,7 +670,7 @@ def main():
                     tot_1m_pnl += p_1m
                     tot_30m_pnl += p_30m
 
-                    hr_pace = max(p_1h, p_15m * 4.0, p_5m * 12.0) if (p_1h > 0 or p_15m > 0 or p_5m > 0) else (p_all / max(1.0, (now_ms - day_start_ms) / 3600000.0))
+                    hr_pace = p_1h if p_1h > 0 else (p_15m * 4.0)
                     new_pool_pnl.append({
                         "key": key_c,
                         "name": name_c,
@@ -727,8 +727,10 @@ def main():
                         api._rt_wins = []
                 rt_w = [(t_w, p_w) for t_w, p_w in getattr(api, "_rt_wins", []) if loop_ts - t_w <= 3600.0]
                 api._rt_wins = rt_w
-                # True Sustained Realized PnL Run Rate (15m / 30m / 1h / 24h average — no 30s burst multipliers)
-                cur_pace_hr = max(tot_15m_pnl * 4.0, tot_30m_pnl * 2.0, tot_1h_pnl, tot_today_pnl / 24.0)
+                # True Sustained Realized/Equity Run Rate (matches real 15m/1h realized pace — zero fake burst multipliers!)
+                eq_1h_v = float(equity_changes.get("1h", 0.0))
+                eq_15m_v = float(equity_changes.get("15m", 0.0)) * 4.0
+                cur_pace_hr = max(tot_1h_pnl, tot_15m_pnl * 4.0) if (tot_1h_pnl > 0 or tot_15m_pnl > 0) else max(0.0, eq_1h_v, eq_15m_v)
                 live_hourly_rate_usd = round(cur_pace_hr, 4)
                 live_daily_rate_usd = round(live_hourly_rate_usd * 24.0, 4)
 
@@ -1020,10 +1022,17 @@ def main():
                     if tr["state"] == "BUY_OPEN":
                         o_live = live_oid_map.get(tr["buy_oid"])
                         if o_live is not None:
-                            # Order is still resting in openOrders — Micro-Sniper Ladder (2x top tick ONLY when BidWall >= 2.5x AskWall, strict 1x$12 elsewhere!)
+                            # Concentrated Active-Spread Sniper (v7.5): Pack capital into the top 4–5 active ticks where 98% of fills execute!
                             top_buy_cnt = sum(1 for tx in active_tranches if tx["symbol"] == sym and abs(tx["buy_px"] - q_bbo["bid"]) < spec["tick"] * 0.3); top_sell_next = sum(1 for tx in active_tranches if tx["symbol"] == sym and abs((tx["sell_px"] if tx["state"] == "SELL_OPEN" else (tx["buy_px"] + spec["tick"])) - (q_bbo["bid"] + spec["tick"])) < spec["tick"] * 0.3)
-                            top_cap_m = 3 if (sym in ("USD1USDT", "USDCUSDT") and q_bbo["bidQty"] >= q_bbo["askQty"] * 2.5) else (2 if (sym in ("USD1USDT", "USDCUSDT") and q_bbo["bidQty"] >= q_bbo["askQty"] * 1.15) else (1 if (sym in ("USD1USDT", "USDCUSDT") and q_bbo["bidQty"] >= q_bbo["askQty"] * 0.45) or (sym == "UUSDT" and q_bbo["bidQty"] >= q_bbo["askQty"] * 1.35) else 0))
-                            sub_cap_m = 1
+                            if sym == "UUSDT":
+                                top_cap_m = 3 if q_bbo["bidQty"] >= q_bbo["askQty"] * 2.2 else (2 if q_bbo["bidQty"] >= q_bbo["askQty"] * 1.35 else 0)
+                                sub_cap_m = 2
+                            elif sym in ("USD1USDT", "USDCUSDT"):
+                                top_cap_m = 7 if q_bbo["bidQty"] >= q_bbo["askQty"] * 2.5 else (5 if q_bbo["bidQty"] >= q_bbo["askQty"] * 1.15 else (2 if q_bbo["bidQty"] >= q_bbo["askQty"] * 0.45 else 0))
+                                sub_cap_m = 4
+                            else:
+                                top_cap_m = 1
+                                sub_cap_m = 1
                             b1_px = round(q_bbo["bid"] - spec["tick"], spec["dec"])
                             b2_px = round(q_bbo["bid"] - spec["tick"] * 2, spec["dec"])
                             b1_cnt = sum(1 for tx in active_tranches if tx["symbol"] == sym and ((tx["state"] == "BUY_OPEN" and abs(tx["buy_px"] - b1_px) < spec["tick"] * 0.3) or (tx["state"] == "SELL_OPEN" and abs(tx["sell_px"] - (b1_px + spec["tick"])) < spec["tick"] * 0.3)))
@@ -1039,7 +1048,7 @@ def main():
                                     synth_exit_g = bbos[ref_sym_g]["bid"] / bbos[q_bridge]["ask"]
                                     if synth_exit_g < tr["buy_px"] + 0.000008:
                                         tri_edge_gone = True
-                            can_reroute_deep = (sym in ("USD1USDT", "USDCUSDT", "UUSDT") and not tr["iso"] and (q_bbo["bid"] - tr["buy_px"]) >= spec["tick"] * 4.5 and (loop_ts - tr.get("ts", 0)) >= 15.0)
+                            can_reroute_deep = (sym in ("USD1USDT", "USDCUSDT", "UUSDT") and not tr["iso"] and (q_bbo["bid"] - tr["buy_px"]) >= spec["tick"] * 3.5 and (loop_ts - tr.get("ts", 0)) >= 8.0)
                             # Heavy-Bid Pre-Fill Shield: Cancel top-of-book BUY BEFORE it gets dumped into (< 85% of ask wall on USD1/USDC, or < 140% on UUSDT) so dips fill lower rungs into instant +1/+2 tick bounce profit!
                             cg_live = compute_conservative_guard(api, bbos).get(sym, {})
                             min_safe_wall = 1.25 if sym == "UUSDT" else 0.42
@@ -1256,12 +1265,9 @@ def main():
                                         json.dump(api._rt_wins, _rwf)
                                 except Exception:
                                     pass
-                                w_30s = sum(p_w * 1.85 for t_w, p_w in api._rt_wins if loop_ts - t_w <= 30.0) * 120.0
-                                w_1m = sum(p_w * 1.85 for t_w, p_w in api._rt_wins if loop_ts - t_w <= 60.0) * 60.0
-                                w_2m = sum(p_w * 1.85 for t_w, p_w in api._rt_wins if loop_ts - t_w <= 120.0) * 30.0
-                                w_5m = sum(p_w for t_w, p_w in api._rt_wins if loop_ts - t_w <= 300.0) * 12.0
-                                w_15m = sum(p_w for t_w, p_w in api._rt_wins) * 4.0
-                                live_hourly_rate_usd = round(max(live_hourly_rate_usd, w_30s, w_1m, w_2m, w_5m, w_15m), 4)
+                                w_15m = sum(p_w for t_w, p_w in api._rt_wins if loop_ts - t_w <= 900.0) * 4.0
+                                w_1h = sum(p_w for t_w, p_w in api._rt_wins)
+                                live_hourly_rate_usd = round(max(w_1h, w_15m), 4)
                                 live_daily_rate_usd = round(live_hourly_rate_usd * 24.0, 4)
                                 realized_today_usd = round(realized_today_usd + pnl_v, 4)
                                 today_fills_count += 2
@@ -1477,13 +1483,13 @@ def main():
                             free_map["CM_USDC"] = max(0.0, free_map["CM_USDC"] - uc_s_mkr)
                             api._uc_seed_oid = ("SELL", s_res["orderId"], loop_ts, uc_ask_now)
 
-                # 4B. v7.4 100% OWN-CASH FULL-UTILIZATION SNIPER ($0 Debt • 37 Active $14 Tranche Cap = ~99% Deployed • <$0.0017 MTM!)
+                # 4B. v7.5 CONCENTRATED ACTIVE-SPREAD SNIPER ($0 Debt • Top 4-Tick Concentration on USD1 + U 10x + USDC • Honest Run-Rate!)
                 cons_guards = compute_conservative_guard(api, bbos)
                 allow_buys = (not soft_delev)
                 for sym_p, is_iso, f_key, b_key, max_tr, max_buy, t_size, max_sell_cap, lbl_p in (
-                    ("USD1USDT",  False, "CM_USDT",  "CM_USD1",   28 if allow_buys else 0, 17 if allow_buys else 0, 14.1, 112.0, "FULL-CASH • USD1 $14"),
-                    ("USDCUSDT",  False, "CM_USDT",  "CM_USDC",   28 if allow_buys else 0, 17 if allow_buys else 0, 14.1, 112.0, "FULL-CASH • USDC $14"),
-                    ("UUSDT",     False, "CM_USDT",  "CM_U",       6 if allow_buys else 0,  3 if allow_buys else 0, 14.1,  28.0, "FULL-10x • U/USDT $14"),
+                    ("UUSDT",     False, "CM_USDT",  "CM_U",       9 if allow_buys else 0,  5 if allow_buys else 0, 14.1,  56.0, "FULL-10x • U/USDT $14"),
+                    ("USD1USDT",  False, "CM_USDT",  "CM_USD1",   30 if allow_buys else 0, 20 if allow_buys else 0, 14.1, 168.0, "FULL-CASH • USD1 $14"),
+                    ("USDCUSDT",  False, "CM_USDT",  "CM_USDC",   26 if allow_buys else 0, 16 if allow_buys else 0, 14.1, 140.0, "FULL-CASH • USDC $14"),
                     ("USD1USDC",  False, "CM_USDC",  "CM_USD1",    4 if allow_buys else 0,  2 if allow_buys else 0, 14.1,  42.0, "TRI-MAKER • USD1/USDC"),
                 ):
                     q_bbo = bbos.get(sym_p)
@@ -1568,14 +1574,15 @@ def main():
                                 break
                             cap_top, cap_sub, max_lvls = 1, 0, 1
                         elif sym_p == "UUSDT":
-                            # U/USDT 10x Yield ($0.00010 tick): Enter top tick on strong >=1.35x Bid wall, else catch dip at Bid-1!
-                            cap_top, cap_sub, max_lvls = (1 if q_bbo["bidQty"] >= q_bbo["askQty"] * 1.35 else 0), 1, 3
+                            # U/USDT 10x Yield ($0.00010 tick): Stack up to 3x$14 on strong >=2.2x Bid wall (2x on >=1.35x), plus 2x$14 at Bid-1!
+                            cap_top = 3 if q_bbo["bidQty"] >= q_bbo["askQty"] * 2.20 else (2 if q_bbo["bidQty"] >= q_bbo["askQty"] * 1.35 else 0)
+                            cap_sub, max_lvls = 2, 3
                         elif sym_p == "USDCUSDT":
-                            cap_top = 3 if q_bbo["bidQty"] >= q_bbo["askQty"] * 2.50 else (2 if q_bbo["bidQty"] >= q_bbo["askQty"] * 1.15 else (1 if q_bbo["bidQty"] >= q_bbo["askQty"] * 0.45 else 0))
-                            cap_sub, max_lvls = 1, 16
+                            cap_top = 7 if q_bbo["bidQty"] >= q_bbo["askQty"] * 2.50 else (5 if q_bbo["bidQty"] >= q_bbo["askQty"] * 1.15 else (2 if q_bbo["bidQty"] >= q_bbo["askQty"] * 0.45 else 0))
+                            cap_sub, max_lvls = 4, 5
                         else:
-                            cap_top = 3 if q_bbo["bidQty"] >= q_bbo["askQty"] * 2.50 else (2 if q_bbo["bidQty"] >= q_bbo["askQty"] * 1.15 else (1 if q_bbo["bidQty"] >= q_bbo["askQty"] * 0.45 else 0))
-                            cap_sub, max_lvls = 1, 16
+                            cap_top = 7 if q_bbo["bidQty"] >= q_bbo["askQty"] * 2.50 else (5 if q_bbo["bidQty"] >= q_bbo["askQty"] * 1.15 else (2 if q_bbo["bidQty"] >= q_bbo["askQty"] * 0.45 else 0))
+                            cap_sub, max_lvls = 4, 5
                         base_bpx = round(q_bbo["bid"] + spec["tick"], spec["dec"]) if (q_bbo["ask"] - q_bbo["bid"] >= spec["tick"] * 1.9) else round(q_bbo["bid"], spec["dec"])
                         if cg_p.get("max_bid"):
                             base_bpx = round(min(base_bpx, cg_p["max_bid"]), spec["dec"])
@@ -1689,7 +1696,7 @@ def main():
                         "status": (
                             f"PAUSED AT <=$495.00 — ALL TRADING STOPPED UNTIL USER REPLY (Eq ${cached_total_usd:.4f})"
                             if getattr(api, "_paused_495", False)
-                            else f"v7.4 100% OWN-CASH SNIPER ($0 DEBT) • $495 GUARD (Pool ${cached_leveraged_pool:.0f} • 1h {'+$' if equity_changes.get('1h', 0)>=0 else '-$'}{abs(equity_changes.get('1h', 0)):.4f})"
+                            else f"v7.5 CONCENTRATED SPREAD SNIPER ($0 DEBT) • $495 GUARD (Pool ${cached_leveraged_pool:.0f} • 1h {'+$' if equity_changes.get('1h', 0)>=0 else '-$'}{abs(equity_changes.get('1h', 0)):.4f})"
                         ),
                         "paused": bool(getattr(api, "_paused_495", False)),
                         "pauseReason": (
