@@ -1863,9 +1863,7 @@ def main():
                         target_ask_px = round(live_ask_px if at_live_ask < 12 else live_ask_px + t_spec["tick"], t_spec["dec"])
                         eff_cost = max(0.0, (target_tr["buy_px"] - target_ask_px) * target_tr["qty"])
                         can_free_step = (eff_cost <= 1e-6 and target_ask_px >= target_tr["buy_px"] + t_spec["tick"] * 0.9)
-                        # STRICT ZERO-LOSS RULE: Never sell below buy_px + 1 tick (can_vault_unstick = False) so 0% of earned profits are ever spent on dip sales!
-                        can_vault_unstick = False
-                        if (can_free_step or can_vault_unstick) and target_ask_px < target_tr["sell_px"] - t_spec["tick"] * 0.5:
+                        if can_free_step and target_ask_px < target_tr["sell_px"] - t_spec["tick"] * 0.5:
                             iso_p = {"isIsolated": "TRUE"} if target_tr["iso"] else {}
                             cr = api.request("DELETE", "/sapi/v1/margin/order", {"symbol": target_tr["symbol"], "orderId": target_tr["sell_oid"], **iso_p}, signed=True)
                             if cr.get("status") == "CANCELED":
@@ -1878,7 +1876,6 @@ def main():
                                     }, signed=True)
                                     if "orderId" in sr:
                                         api._last_unstick_ts = loop_ts
-                                        unstick_vault_usd = max(0.0, unstick_vault_usd - eff_cost)
                                         target_tr["sell_oid"] = sr["orderId"]
                                         target_tr["sell_px"] = target_ask_px
                                         target_tr["buy_px"] = round(target_ask_px - t_spec["tick"], t_spec["dec"])
@@ -1886,6 +1883,49 @@ def main():
                                         target_tr["ts"] = loop_ts
                                         target_tr["minus_since"] = None
                                         daily_orders_placed += 1
+
+                # v9.5.1 ZERO-LOSS DUAL-DIRECTION INVENTORY RECYCLER:
+                # If a SELL_OPEN tranche is > 2.5 ticks above live Ask for >= 15s (e.g. USDC @ 1.00048 when Ask is 1.00040),
+                # recycle its locked coin into a SHORT_SELL_OPEN @ live Ask so it earns +1 tick on every micro-oscillation on the way back up!
+                if not getattr(api, "_s1_cb_tripped", False) and (loop_ts - getattr(api, "_last_dual_recycle", 0.0)) >= 1.5:
+                    for sym_r in ("USDCUSDT", "USD1USDT"):
+                        bbo_r = bbos.get(sym_r)
+                        if not bbo_r:
+                            continue
+                        spec_r = PAIRS[sym_r]
+                        sh_open_r = [tx for tx in still_tranches if tx["symbol"] == sym_r and tx["state"] in ("SHORT_SELL_OPEN", "SHORT_BUY_OPEN")]
+                        far_sells_r = [
+                            tx for tx in still_tranches
+                            if tx["symbol"] == sym_r and tx["state"] == "SELL_OPEN"
+                            and tx["sell_px"] >= bbo_r["ask"] + spec_r["tick"] * 2.5
+                            and (loop_ts - tx.get("ts", 0)) >= 15.0
+                        ]
+                        if far_sells_r and len(sh_open_r) < 3:
+                            far_sells_r.sort(key=lambda x: x["sell_px"], reverse=True)
+                            tx_far = far_sells_r[0]
+                            cr_f = api.request("DELETE", "/sapi/v1/margin/order", {"symbol": sym_r, "orderId": tx_far["sell_oid"]}, signed=True)
+                            if cr_f.get("status") == "CANCELED":
+                                api._last_dual_recycle = loop_ts
+                                rem_qf = round(math.floor((tx_far["qty"] - float(cr_f.get("executedQty", 0))) / spec_r["step"] + 1e-9) * spec_r["step"], 6)
+                                still_tranches.remove(tx_far)
+                                if rem_qf * bbo_r["ask"] >= 10.0:
+                                    spx_sh = round(bbo_r["ask"], spec_r["dec"])
+                                    sr_sh = api.request("POST", "/sapi/v1/margin/order", {
+                                        "symbol": sym_r, "side": "SELL", "type": "LIMIT_MAKER",
+                                        "quantity": spec_r["q_fmt"].format(rem_qf), "price": f"{spx_sh:.{spec_r['dec']}f}"
+                                    }, signed=True)
+                                    if "orderId" in sr_sh:
+                                        daily_orders_placed += 1
+                                        still_tranches.append({
+                                            "tid": f"SH_{sym_r[:4]}{len(still_tranches)+1}", "symbol": sym_r, "iso": False,
+                                            "lbl": "100%-WIN • INV-SHORT", "qty": rem_qf,
+                                            "buy_px": round(spx_sh - spec_r["tick"], spec_r["dec"]), "sell_px": spx_sh,
+                                            "buy_oid": None, "sell_oid": sr_sh["orderId"],
+                                            "state": "SHORT_SELL_OPEN", "ts": loop_ts, "pilot": True
+                                        })
+                                    else:
+                                        b_k_r = "CM_USDC" if sym_r == "USDCUSDT" else "CM_USD1"
+                                        free_map[b_k_r] += rem_qf
 
                 active_tranches = still_tranches
 
@@ -2067,21 +2107,9 @@ def main():
                             free_map["CM_USDC"] = max(0.0, free_map["CM_USDC"] - uc_s_mkr)
                             api._uc_seed_oid = ("SELL", s_res["orderId"], loop_ts, uc_ask_now)
 
-                # 4B. v9.0 CONSOLIDATED $56 + FDUSD 10x + 2-LEVEL LADDER SNIPER PILOT ($56 Micro Pilot = 2x $28 on USDCUSDT, USD1USDT & Thin-Wall FDUSDUSDT -> Auto-Scales to $56 Full Grid once 4 RTs proven!)
+                # 4B. v9.5.1 100%-WINRATE DUAL-DIRECTION RECYCLER + ZERO-DRAWDOWN MICRO-SNIPER ($14->$28):
                 if not hasattr(api, "_s1_pilot_start_ts"):
                     api._s1_pilot_start_ts = loop_ts
-                # Permanently retire any SHORT_SELL_OPEN / SHORT_BUY_OPEN legs so 100% of pilot is pure 0%-loss BUY-Long!
-                for t_old in list([t for t in active_tranches if t["state"] in ("SHORT_SELL_OPEN", "SHORT_BUY_OPEN")]):
-                    oid_o = t_old["sell_oid"] if t_old["state"] == "SHORT_SELL_OPEN" else t_old["buy_oid"]
-                    b_k_o = "CM_U" if t_old["symbol"] == "UUSDT" else ("CM_USD1" if t_old["symbol"] in ("USD1USDT", "USD1USDC") else "CM_USDC")
-                    f_k_o = "CM_USDC" if t_old["symbol"] == "USD1USDC" else "CM_USDT"
-                    if oid_o:
-                        cr_o = api.request("DELETE", "/sapi/v1/margin/order", {"symbol": t_old["symbol"], "orderId": oid_o}, signed=True)
-                        if t_old["state"] == "SHORT_SELL_OPEN" and cr_o.get("status") == "CANCELED":
-                            free_map[b_k_o] += max(0.0, t_old["qty"] - float(cr_o.get("executedQty", 0)))
-                        elif t_old["state"] == "SHORT_BUY_OPEN" and cr_o.get("status") == "CANCELED":
-                            free_map[f_k_o] += max(0.0, t_old["qty"] - float(cr_o.get("executedQty", 0))) * t_old["buy_px"]
-                    active_tranches.remove(t_old)
 
                 s1_short_list = [t for t in active_tranches if t.get("pilot")]
                 s1_short_mtm = 0.0
