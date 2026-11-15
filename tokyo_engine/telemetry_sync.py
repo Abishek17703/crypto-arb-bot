@@ -241,33 +241,19 @@ def auto_compound_borrow(api, force_repay_all=False):
                 if bv_u > 0.01 and fv_u >= 0.50:
                     api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "USD1", "isIsolated": "FALSE", "amount": f"{min(fv_u, bv_u):.4f}", "type": "REPAY"}, signed=True)
             elif ast_u == "U":
-                tot_u = fv_u + lv_u
-                # Exclude UUSDT SELL orders from BTCU working U budget!
-                u_free_for_btcu = fv_u
-                if bv_u > 1.0 and u_free_for_btcu > 210.0:
-                    api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "U", "isIsolated": "FALSE", "amount": f"{min(u_free_for_btcu - 140.0, bv_u):.2f}", "type": "REPAY"}, signed=True)
-                elif ml > 1.35 and u_free_for_btcu < 135.0 and bv_u < 220.0 and tot_net_btc > 0:
-                    brw_u_amt = min(175.0 - u_free_for_btcu, 220.0 - bv_u, 150.0)
-                    if brw_u_amt >= 20.0:
-                        api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "U", "isIsolated": "FALSE", "amount": f"{brw_u_amt:.2f}", "type": "BORROW"}, signed=True)
+                if bv_u > 0.01 and fv_u >= 0.50:
+                    api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "U", "isIsolated": "FALSE", "amount": f"{min(fv_u, bv_u):.4f}", "type": "REPAY"}, signed=True)
             elif ast_u == "BTC":
-                # Keep 1:1 Cross-Margin BTC short hedge (~0.00145 BTC = ~$94, midpoint of $185 max sleeve) so BTCU inventory stays delta-neutral!
-                target_btc_h = 0.00145 if (not force_repay_all and ml > 1.35 and tot_net_btc > 0) else 0.0
-                if target_btc_h > 0 and bv_u < target_btc_h * 0.80:
-                    brw_btc = round(target_btc_h - bv_u, 5)
-                    if brw_btc >= 0.00010:
-                        rr_b = api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "BTC", "isIsolated": "FALSE", "amount": f"{brw_btc:.5f}", "type": "BORROW"}, signed=True)
-                        if "tranId" in rr_b:
-                            # Sell borrowed BTC once at maker Ask on 0%-fee BTCU to lock neutral cash offset!
-                            tk_bu = api.request("GET", "/api/v3/ticker/bookTicker", {"symbol": "BTCU"})
-                            if isinstance(tk_bu, dict) and "askPrice" in tk_bu:
-                                spx_h = float(tk_bu["askPrice"])
-                                hr_o = api.request("POST", "/sapi/v1/margin/order", {"symbol": "BTCU", "side": "SELL", "type": "LIMIT_MAKER", "quantity": f"{brw_btc:.5f}", "price": f"{spx_h:.2f}"}, signed=True)
-                                if "orderId" in hr_o:
-                                    api._btc_hedge_oid = hr_o["orderId"]
-                elif bv_u > target_btc_h + 0.00040 and fv_u >= 0.00010:
-                    rep_btc = min(fv_u, bv_u - target_btc_h)
-                    if rep_btc >= 0.00005:
+                # EMERGENCY STOP & UNWIND: Cancel all BTCU orders, repay 100% of BTC debt immediately, and drain excess BTC to U @ 0% maker fee!
+                if bv_u > 0.00001 and fv_u < bv_u:
+                    _bu_oc = api.request("GET", "/sapi/v1/margin/openOrders", {"symbol": "BTCU"}, signed=True)
+                    if isinstance(_bu_oc, list):
+                        for _oo in _bu_oc:
+                            api.request("DELETE", "/sapi/v1/margin/order", {"symbol": "BTCU", "orderId": _oo["orderId"]}, signed=True)
+                            fv_u += max(0.0, float(_oo.get("origQty", 0)) - float(_oo.get("executedQty", 0))) if _oo.get("side") == "SELL" else 0.0
+                if bv_u > 0.00001 and fv_u >= 0.00002:
+                    rep_btc = math.floor(min(fv_u, bv_u) * 100000.0) / 100000.0
+                    if rep_btc >= 0.00002:
                         api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "BTC", "isIsolated": "FALSE", "amount": f"{rep_btc:.5f}", "type": "REPAY"}, signed=True)
     except Exception:
         pass
@@ -416,12 +402,12 @@ def adopt_existing_tranches(api):
         pass
     # 1. Seamless Anti-Loop Startup: Cancel non-core symbols & BUY orders, while ADOPTING existing USD1USDT/USDCUSDT SELL orders with exact saved buy_px so zero over-price loss occurs!
     open_cm = []
-    for _old_sym in ("BTCUSD1", "ETHUSD1", "BNBUSD1", "ETHU", "BNBU", "BNBFDUSD", "SOLFDUSD", "FDUSDUSDT", "FDUSDUSDC", "USD1U", "UUSDC"):
+    for _old_sym in ("BTCU", "BTCUSD1", "ETHUSD1", "BNBUSD1", "ETHU", "BNBU", "BNBFDUSD", "SOLFDUSD", "FDUSDUSDT", "FDUSDUSDC", "USD1U", "UUSDC"):
         _old_oc = api.request("GET", "/sapi/v1/margin/openOrders", {"symbol": _old_sym}, signed=True)
         if isinstance(_old_oc, list):
             for _oo in _old_oc:
                 api.request("DELETE", "/sapi/v1/margin/order", {"symbol": _old_sym, "orderId": _oo["orderId"]}, signed=True)
-    for _core_sym in ("USDCUSDT", "USD1USDT", "UUSDT", "USD1USDC", "BTCU"):
+    for _core_sym in ("USDCUSDT", "USD1USDT", "UUSDT", "USD1USDC"):
         _core_oc = api.request("GET", "/sapi/v1/margin/openOrders", {"symbol": _core_sym}, signed=True)
         if isinstance(_core_oc, list):
             for _oo in _core_oc:
@@ -831,6 +817,7 @@ def main():
                     api._last_orphan_heal = loop_ts
                     drain_oids = {
                         (getattr(api, "_sol_drain_oid", None) or (None,))[0],
+                        (getattr(api, "_btc_drain_oid", None) or (None,))[0],
                         (getattr(api, "_fd_drain_oid", None) or (None,))[0],
                         (getattr(api, "_u1_drain_oid", None) or (None,))[0],
                         (getattr(api, "_uc_seed_oid", None) or (None, None))[1],
@@ -1537,6 +1524,41 @@ def main():
                         free_map["CM_SOL"] = 0.0
                         api._sol_drain_oid = (sr_sol["orderId"], spx_sol, loop_ts)
 
+                # Close 100% of remaining BTC immediately via 0%-fee BTCU LIMIT_MAKER @ live Ask and repay U debt!
+                cm_btc_debt = sum(float(b.get("borrowed", 0)) for b in cached_balances if "BTC (5x Cross)" in b.get("asset", ""))
+                cm_u_debt = sum(float(b.get("borrowed", 0)) for b in cached_balances if "U (5x Cross)" in b.get("asset", ""))
+                if cm_btc_debt > 0.00001 and free_map["CM_BTC"] >= 0.00002:
+                    rep_b_fast = math.floor(min(free_map["CM_BTC"], cm_btc_debt) * 100000.0) / 100000.0
+                    if rep_b_fast >= 0.00002:
+                        rr_bf = api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "BTC", "isIsolated": "FALSE", "amount": f"{rep_b_fast:.5f}", "type": "REPAY"}, signed=True)
+                        if "tranId" in rr_bf:
+                            free_map["CM_BTC"] = max(0.0, free_map["CM_BTC"] - rep_b_fast)
+                            cm_btc_debt = max(0.0, cm_btc_debt - rep_b_fast)
+                if cm_u_debt > 0.01 and free_map["CM_U"] >= 1.0 and (loop_ts - getattr(api, "_last_u_rep", 0.0)) >= 3.0:
+                    api._last_u_rep = loop_ts
+                    rep_u_fast = min(free_map["CM_U"], cm_u_debt)
+                    rr_uf = api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "U", "isIsolated": "FALSE", "amount": f"{rep_u_fast:.2f}", "type": "REPAY"}, signed=True)
+                    if "tranId" in rr_uf:
+                        free_map["CM_U"] = max(0.0, free_map["CM_U"] - rep_u_fast)
+                        cm_u_debt = max(0.0, cm_u_debt - rep_u_fast)
+                btc_drain_ord = getattr(api, "_btc_drain_oid", None)
+                if btc_drain_ord is not None:
+                    if not any(o.get("orderId") == btc_drain_ord[0] for o in cached_open_orders):
+                        api._btc_drain_oid = None
+                    elif "BTCU" in bbos and (bbos["BTCU"]["ask"] < btc_drain_ord[1] - 0.05 or loop_ts - btc_drain_ord[2] > 2.5):
+                        api.request("DELETE", "/sapi/v1/margin/order", {"symbol": "BTCU", "orderId": btc_drain_ord[0]}, signed=True)
+                        api._btc_drain_oid = None
+                elif cm_btc_debt < 0.00003 and "BTCU" in bbos and free_map["CM_BTC"] * bbos["BTCU"]["ask"] >= 5.2:
+                    sq_btc = math.floor(free_map["CM_BTC"] * 100000.0) / 100000.0
+                    spx_btc = bbos["BTCU"]["ask"]
+                    sr_btc = api.request("POST", "/sapi/v1/margin/order", {"symbol": "BTCU", "side": "SELL", "type": "LIMIT_MAKER", "sideEffectType": "AUTO_REPAY", "quantity": f"{sq_btc:.5f}", "price": f"{spx_btc:.2f}"}, signed=True)
+                    if "orderId" not in sr_btc and "immediately match" in str(sr_btc.get("msg", "")):
+                        spx_btc = round(bbos["BTCU"]["ask"] + 0.01, 2)
+                        sr_btc = api.request("POST", "/sapi/v1/margin/order", {"symbol": "BTCU", "side": "SELL", "type": "LIMIT_MAKER", "sideEffectType": "AUTO_REPAY", "quantity": f"{sq_btc:.5f}", "price": f"{spx_btc:.2f}"}, signed=True)
+                    if "orderId" in sr_btc:
+                        free_map["CM_BTC"] = 0.0
+                        api._btc_drain_oid = (sr_btc["orderId"], spx_btc, loop_ts)
+
                 # Drain 100% of FDUSD down to 0 via 0%-fee FDUSDUSDT LIMIT_MAKER @ live Ask (eliminates coarse $0.00010 FDUSD unrealized drag completely!)
                 fd_drain_ord = getattr(api, "_fd_drain_oid", None)
                 if fd_drain_ord is not None:
@@ -1588,12 +1610,10 @@ def main():
                             free_map["CM_USDC"] = max(0.0, free_map["CM_USDC"] - uc_s_mkr)
                             api._uc_seed_oid = ("SELL", s_res["orderId"], loop_ts, uc_ask_now)
 
-                # 4B. v7.8 VOLATILITY-GUARDED BTCU STEP-1 ($180 DELTA-HEDGED) + FIFO-LOCKED $2K STABLECOIN SNIPER
+                # 4B. v7.9 EMERGENCY BTC STOP & UNWIND + PURE STABLECOIN FIFO SNIPER
                 cons_guards = compute_conservative_guard(api, bbos)
                 allow_buys = (not soft_delev)
-                btcu_vol_ok = not cons_guards.get("BTCU", {}).get("hi_vol", False)
                 for sym_p, is_iso, f_key, b_key, max_tr, max_buy, t_size, max_sell_cap, lbl_p in (
-                    ("BTCU",      False, "CM_U",     "CM_BTC",    10 if (allow_buys and btcu_vol_ok) else 0,  6 if (allow_buys and btcu_vol_ok) else 0, 28.0, 0.00285, "VOL-GUARD • BTC/U $28"),
                     ("USD1USDC",  False, "CM_USDC",  "CM_USD1",   22 if allow_buys else 0, 14 if allow_buys else 0, 42.1, 460.0, "10x-1BPS • USD1/USDC $42"),
                     ("UUSDT",     False, "CM_USDT",  "CM_U",      14 if allow_buys else 0,  8 if allow_buys else 0, 42.1, 240.0, "10x-1BPS • U/USDT $42"),
                     ("USD1USDT",  False, "CM_USDT",  "CM_USD1",   30 if allow_buys else 0, 18 if allow_buys else 0, 35.1, 560.0, "5x-POOL • USD1 $35"),
@@ -1818,7 +1838,7 @@ def main():
                         "status": (
                             f"PAUSED AT <=$495.00 — ALL TRADING STOPPED UNTIL USER REPLY (Eq ${cached_total_usd:.4f})"
                             if getattr(api, "_paused_495", False)
-                            else f"v7.8 VOL-GUARDED BTCU ($180) + $2K FIFO SNIPER • $495 GUARD (Pool ${cached_leveraged_pool:.0f} • BTCVol {cons_guards.get('BTCU', {}).get('vol_1m_bps', 0):.1f}bps • 1h {'+$' if equity_changes.get('1h', 0)>=0 else '-$'}{abs(equity_changes.get('1h', 0)):.4f})"
+                            else f"v7.9 BTC HALTED & UNWOUND • PURE STABLECOIN FIFO SNIPER (Pool ${cached_leveraged_pool:.0f} • 1h {'+$' if equity_changes.get('1h', 0)>=0 else '-$'}{abs(equity_changes.get('1h', 0)):.4f})"
                         ),
                         "paused": bool(getattr(api, "_paused_495", False)),
                         "pauseReason": (
