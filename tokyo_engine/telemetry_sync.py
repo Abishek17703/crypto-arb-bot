@@ -744,19 +744,27 @@ def halt_all_orders_and_repay(api):
             cm_acc = api.request("GET", "/sapi/v1/margin/account", signed=True)
             assets_map = {a.get("asset"): a for a in cm_acc.get("userAssets", [])}
             eth_free = float(assets_map.get("ETH", {}).get("free", 0))
-        # Sell any Cross-Margin ETH >= 0.0028 directly into USDT via ETHUSDT MARKET:
-        if eth_free >= 0.0028:
+        # Sell any Cross-Margin ETH >= 0.0001 into USDT (top up 0.0030 ETH if < 0.0030, then sell 100% of 4-decimal ETH):
+        if 0.0001 <= eth_free < 0.0030:
+            api.request("POST", "/sapi/v1/margin/order", {
+                "symbol": "ETHUSDT", "side": "BUY", "type": "MARKET", "quantity": "0.0030"
+            }, signed=True)
+            time.sleep(0.1)
+            cm_acc = api.request("GET", "/sapi/v1/margin/account", signed=True)
+            assets_map = {a.get("asset"): a for a in cm_acc.get("userAssets", [])}
+            eth_free = float(assets_map.get("ETH", {}).get("free", 0))
+        if eth_free >= 0.0030:
             sq_e = math.floor(eth_free * 10000.0) / 10000.0
             api.request("POST", "/sapi/v1/margin/order", {
                 "symbol": "ETHUSDT", "side": "SELL", "type": "MARKET", "quantity": f"{sq_e:.4f}"
             }, signed=True)
             time.sleep(0.1)
-        # 3c. Sell integer balances >= 6 of FDUSD, U, USDC, USD1 in Cross Margin directly to USDT, or top up $6 if 0.01 <= free < 6:
+        # 3c. Sell integer balances >= 6 of FDUSD, U, USDC, USD1 in Cross Margin directly to USDT, or top up $6 if 0.05 <= free < 6:
         cm_acc2 = api.request("GET", "/sapi/v1/margin/account", signed=True)
         amap2 = {a.get("asset"): a for a in cm_acc2.get("userAssets", [])}
         for s_ast, s_sym in (("FDUSD", "FDUSDUSDT"), ("U", "UUSDT"), ("USDC", "USDCUSDT"), ("USD1", "USD1USDT")):
             fv_s = float(amap2.get(s_ast, {}).get("free", 0))
-            if 1.0 <= fv_s < 6.0:
+            if 0.05 <= fv_s < 6.0:
                 need_top = int(math.ceil(6.0 - math.floor(fv_s)))
                 api.request("POST", "/sapi/v1/margin/order", {
                     "symbol": s_sym, "side": "BUY", "type": "MARKET", "quantity": str(need_top)
@@ -770,7 +778,7 @@ def halt_all_orders_and_repay(api):
                     "symbol": s_sym, "side": "SELL", "type": "MARKET", "quantity": str(q_int_s)
                 }, signed=True)
                 time.sleep(0.1)
-        # 3d. Transfer 100% of remaining fractional non-USDT assets (< 1.0 unit: 0.83 USDC, 0.03 U, 0.00009 ETH, etc.) from Cross Margin to Spot so Cross Margin is 100.0000% pure USDT!
+        # 3d. Transfer 100% of remaining fractional non-USDT assets (< 1.0 unit: 0.83 USDC, 0.02 U, 0.00002 ETH, etc.) from Cross Margin to Spot so Cross Margin is 100.0000% pure USDT!
         cm_acc4 = api.request("GET", "/sapi/v1/margin/account", signed=True)
         for a4 in cm_acc4.get("userAssets", []):
             ast4 = a4.get("asset", "")
@@ -782,6 +790,9 @@ def halt_all_orders_and_repay(api):
                     if amt_c and float(amt_c) > 0:
                         r_cm = api.request("POST", "/sapi/v1/margin/transfer", {"asset": ast4, "amount": amt_c, "type": "2"}, signed=True)
                         if "tranId" in r_cm:
+                            break
+                        r_cm2 = api.request("POST", "/sapi/v1/asset/transfer", {"type": "MARGIN_MAIN", "asset": ast4, "amount": amt_c}, signed=True)
+                        if "tranId" in r_cm2:
                             break
         # 3e. In Spot, top-up & sell any non-USDT stablecoin/crypto dust or convert via Binance Convert / Dust-to-BNB->USDT, then transfer 100% of Spot USDT into Cross Margin!
         spot_a = api.request("GET", "/api/v3/account", signed=True)
