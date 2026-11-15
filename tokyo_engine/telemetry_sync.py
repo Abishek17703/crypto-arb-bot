@@ -2101,7 +2101,7 @@ def main():
                             free_map["CM_BTC"] = 0.0
                             api._btc_drain_oid = (sr_btc["orderId"], spx_btc, loop_ts)
 
-                # Drain excess U above 14 U via 0%-fee UUSDT LIMIT_MAKER @ live Ask so +$42 extra USDT is free for USD1USDT/USDCUSDT!
+                # Drain excess U above 34 U via 0%-fee UUSDT LIMIT_MAKER @ live Ask!
                 u_drain_ord = getattr(api, "_u_drain_oid", None)
                 if u_drain_ord is not None:
                     if not any(o.get("orderId") == u_drain_ord[0] for o in cached_open_orders):
@@ -2117,6 +2117,14 @@ def main():
                         if "orderId" in sr_u_d:
                             free_map["CM_U"] = max(0.0, free_map["CM_U"] - sq_u_d)
                             api._u_drain_oid = (sr_u_d["orderId"], spx_u_d, loop_ts)
+
+                # Cancel any UUSDT SELL order that trapped CM_U needed for ETHU Delta-Neutral Pilot (< 26 U available)!
+                for tx_uu in list([t for t in active_tranches if t["symbol"] == "UUSDT" and t["state"] == "SELL_OPEN"]):
+                    if free_map["CM_U"] < 26.0 and tx_uu.get("sell_oid"):
+                        cr_uu = api.request("DELETE", "/sapi/v1/margin/order", {"symbol": "UUSDT", "orderId": tx_uu["sell_oid"]}, signed=True)
+                        if cr_uu.get("status") == "CANCELED":
+                            free_map["CM_U"] += max(0.0, tx_uu["qty"] - float(cr_uu.get("executedQty", 0)))
+                        active_tranches.remove(tx_uu)
 
                 # v9.7 DELTA-NEUTRAL ETHU 0%-FEE LEAD-LAG MICRO-PILOT ($28 Scaled Budget = 0.0150 ETH 1:1 Hedged):
                 eth_debt_now = sum(float(b.get("borrowed", 0)) for b in cached_balances if "ETH (5x Cross)" in b.get("asset", ""))
@@ -2296,7 +2304,7 @@ def main():
                                     s1_short_list.append(nt_pl)
 
                     # Immediately post maker SELL for any free non-hedged base inventory (keep at least 28 USDC reserved for FDUSDUSDC latency arb when edge >= +0.70 bps!)
-                    while sym_p not in ("USD1USDC", "FDUSDUSDC", "USD1U") and (free_map[b_key] - (28.5 if (sym_p == "USDCUSDT" and fd_tri_edge_ok) else 0.0)) * q_bbo["ask"] >= 5.6 and len(p_tr) < (max_tr if is_crypto_u1 else max(1, max_tr - 2)):
+                    while sym_p not in ("USD1USDC", "FDUSDUSDC", "USD1U", "UUSDT") and (free_map[b_key] - (28.5 if (sym_p == "USDCUSDT" and fd_tri_edge_ok) else 0.0)) * q_bbo["ask"] >= 5.6 and len(p_tr) < (max_tr if is_crypto_u1 else max(1, max_tr - 2)):
                         if (sym_p == "USD1USDT" and cm_u1_debt >= 1.0) or (sym_p == "USDCUSDT" and cm_uc_debt >= 1.0):
                             break
                         max_base_s = max(0.0, free_map[b_key] - (28.5 if (sym_p == "USDCUSDT" and fd_tri_edge_ok) else 0.0))
