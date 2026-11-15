@@ -2556,7 +2556,7 @@ def main():
                                 break
 
                     # Immediately post maker SELL for any free non-hedged base inventory (keep at least 28 USDC reserved for FDUSDUSDC latency arb when edge >= +0.70 bps!)
-                    while sym_p not in ("USD1USDC", "FDUSDUSDC", "USD1U", "UUSDT") and (free_map[b_key] - (28.5 if (sym_p == "USDCUSDT" and fd_tri_edge_ok) else 0.0)) * q_bbo["ask"] >= 5.6 and len(p_tr) < (max_tr if is_crypto_u1 else max(1, max_tr - 2)):
+                    while sym_p not in ("USD1USDC", "FDUSDUSDC", "USD1U", "UUSDT") and (free_map[b_key] - (28.5 if (sym_p == "USDCUSDT" and fd_tri_edge_ok) else 0.0)) * q_bbo["ask"] >= 5.6 and len(p_tr) < max_tr:
                         if (sym_p == "USD1USDT" and cm_u1_debt >= 1.0) or (sym_p == "USDCUSDT" and cm_uc_debt >= 1.0):
                             break
                         max_base_s = max(0.0, free_map[b_key] - (28.5 if (sym_p == "USDCUSDT" and fd_tri_edge_ok) else 0.0))
@@ -2578,7 +2578,7 @@ def main():
                         min_gain_flr = 2.50 if (sym_p in ("BTCU", "BTCUSD1") and p_flr > 0) else (round(p_flr * 0.00005, spec["dec"]) if (is_crypto_u1 and p_flr > 0) else spec["tick"])
                         min_spx = round(max(q_bbo["ask"], (p_flr + max(spec["tick"], min_gain_flr)) if p_flr > 0 else q_bbo["ask"]), spec["dec"])
                         spx = min_spx
-                        s_cap = 1
+                        s_cap = 4 if sym_p in ("USD1USDT", "FDUSDUSDT") else 1
                         for _slvl in range(10):
                             if sum(1 for sx in used_spxs if abs(sx - spx) < spec["tick"] * 0.3) >= s_cap:
                                 spx = round(spx + spec["tick"], spec["dec"])
