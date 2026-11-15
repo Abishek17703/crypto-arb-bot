@@ -994,7 +994,7 @@ def main():
 
     # Load hard latched $495.00 circuit breaker & S3 user pause state BEFORE startup borrow/adopt!
     api._paused_495 = False
-    api._user_paused = True
+    api._user_paused = False
     try:
         if os.path.exists("/tmp/pause_495_latch.json"):
             with open("/tmp/pause_495_latch.json") as _pf:
@@ -1002,10 +1002,10 @@ def main():
     except Exception:
         pass
     try:
-        s3.put_object(Bucket=S3_BUCKET, Key="pause-control.json", Body=json.dumps({"paused": True, "ts": int(time.time() * 1000)}).encode("utf-8"), ContentType="application/json")
+        s3.put_object(Bucket=S3_BUCKET, Key="pause-control.json", Body=json.dumps({"paused": False, "ts": int(time.time() * 1000)}).encode("utf-8"), ContentType="application/json")
     except Exception:
         pass
-    api._user_paused = True
+    api._user_paused = False
 
     # Live 1:1 Delta-Lock Hedging: Base loans strictly match live inventory (0 static short overhang!)
     api._target_hedge_u1 = 0.0
@@ -2293,24 +2293,13 @@ def main():
                             free_map["CM_U"] += max(0.0, tx_uu["qty"] - float(cr_uu.get("executedQty", 0)))
                         active_tranches.remove(tx_uu)
 
-                # v9.7.4 2x-TRANCHE DELTA-NEUTRAL ETHU 0%-FEE LEAD-LAG MICRO-PILOT ($56 Scaled Budget = 0.0300 ETH 1:1 Hedged):
+                # v9.8 PURE 100%-USDT EVENT-DRIVEN LEAD-LAG SNIPER ($20 Micro-Clip + Hard -$0.0020 Sub-Cent Stop + 2.5s Time-Stop Scratch):
+                # Disable static ETH borrow seeding so 100% of account sits in pure USDT with $0.00 debt!
+                api._ethu_cb_tripped = True
                 eth_debt_now = sum(float(b.get("borrowed", 0)) for b in cached_balances if "ETH (5x Cross)" in b.get("asset", ""))
-                ethu_tr_list = [tx for tx in active_tranches if tx["symbol"] == "ETHU"]
-                # True 1:1 Delta-Neutral MTM: Because ETHU is 1:1 hedged against borrowed ETH, directional ETH moves cancel out 100% (0.0000 MTM)!
                 ethu_mtm = 0.0
                 ethu_real_v = float(getattr(api, "_ethu_realized_usd", 0.0))
                 ethu_net_v = round(ethu_real_v, 4)
-                if not soft_delev and "ETHU" in bbos and (loop_ts - getattr(api, "_last_eth_seed", 0.0)) >= 8.0:
-                    # Seed 2x fixed 0.0150 ETH (0.0300 ETH = ~$55.00 total) loan & convert to U on 0%-fee ETHU so 2 independent tranches trade across levels 100% 1:1 Delta-Neutral!
-                    ethu_u_locked = sum(tx["qty"] * tx["buy_px"] for tx in ethu_tr_list if tx["state"] == "BUY_OPEN")
-                    ethu_eth_locked = sum(tx["qty"] for tx in ethu_tr_list if tx["state"] == "SELL_OPEN")
-                    if eth_debt_now < 0.0230 and (free_map["CM_U"] + ethu_u_locked) < 48.0 and free_map["CM_ETH"] < 0.0080:
-                        api._last_eth_seed = loop_ts
-                        need_eth = round(max(0.0080, 0.0300 - eth_debt_now), 4)
-                        br_eth = api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "ETH", "isIsolated": "FALSE", "amount": f"{need_eth:.4f}", "type": "BORROW"}, signed=True)
-                        if "tranId" in br_eth:
-                            free_map["CM_ETH"] += need_eth
-                            eth_debt_now += need_eth
 
                 # Drain excess FDUSD above 14 FDUSD via 0%-fee FDUSDUSDT LIMIT_MAKER @ live Ask!
                 fd_drain_ord = getattr(api, "_fd_drain_oid", None)
@@ -2363,39 +2352,75 @@ def main():
                             free_map["CM_USDC"] = max(0.0, free_map["CM_USDC"] - uc_s_mkr)
                             api._uc_seed_oid = ("SELL", s_res["orderId"], loop_ts, uc_ask_now)
 
-                # 4B. v9.5.1 100%-WINRATE DUAL-DIRECTION RECYCLER + ZERO-DRAWDOWN MICRO-SNIPER ($14->$28):
+                # 4B. v9.8 100%-USDT EVENT-DRIVEN LEAD-LAG SNIPER ($20 Micro-Clip + Hard -$0.00020 Sub-Cent Stop + 2.5s Time-Stop Scratch):
                 if not hasattr(api, "_s1_pilot_start_ts"):
                     api._s1_pilot_start_ts = loop_ts
 
                 s1_short_list = [t for t in active_tranches if t.get("pilot")]
                 s1_short_mtm = 0.0
-                for t_s in s1_short_list:
+                for t_s in list(s1_short_list):
                     if t_s["state"] == "SELL_OPEN":
                         bid_s_now = float(bbos.get(t_s["symbol"], {}).get("bid", 0.0))
+                        ask_s_now = float(bbos.get(t_s["symbol"], {}).get("ask", 0.0))
+                        spec_s = PAIRS[t_s["symbol"]]
+                        age_s_open = loop_ts - float(t_s.get("ts", loop_ts))
                         if bid_s_now > 0:
-                            s1_short_mtm += (bid_s_now - t_s["buy_px"]) * t_s["qty"]
+                            leg_mtm = (bid_s_now - t_s["buy_px"]) * t_s["qty"]
+                            s1_short_mtm += leg_mtm
+                            # HARD SUB-CENT LOSS CAP (-$0.00020) & 2.5-SECOND TIME-STOP SCRATCH:
+                            # If leg doesn't fill at +profit within 2.5s and Ask moved to breakeven, OR if unrealized MTM touches -$0.00020 (2/100ths of a cent), scratch immediately back to 100% USDT!
+                            if leg_mtm <= -0.00020 or (age_s_open >= 2.5 and ask_s_now <= t_s["buy_px"] + spec_s["tick"] * 0.5):
+                                cr_sc = api.request("DELETE", "/sapi/v1/margin/order", {"symbol": t_s["symbol"], "orderId": t_s["sell_oid"]}, signed=True)
+                                if cr_sc.get("status") == "CANCELED":
+                                    rem_sc = round(math.floor((t_s["qty"] - float(cr_sc.get("executedQty", 0))) / spec_s["step"] + 1e-9) * spec_s["step"], 6)
+                                    if rem_sc * bid_s_now >= 5.2:
+                                        if ask_s_now <= t_s["buy_px"] + spec_s["tick"] * 0.2 and ask_s_now >= t_s["buy_px"] - spec_s["tick"] * 0.2:
+                                            sr_sc = api.request("POST", "/sapi/v1/margin/order", {
+                                                "symbol": t_s["symbol"], "side": "SELL", "type": "LIMIT_MAKER",
+                                                "quantity": spec_s["q_fmt"].format(rem_sc), "price": f"{ask_s_now:.{spec_s['dec']}f}"
+                                            }, signed=True)
+                                            if "orderId" in sr_sc:
+                                                t_s["sell_oid"] = sr_sc["orderId"]
+                                                t_s["sell_px"] = ask_s_now
+                                                t_s["ts"] = loop_ts
+                                                continue
+                                        sr_ioc_sc = api.request("POST", "/sapi/v1/margin/order", {
+                                            "symbol": t_s["symbol"], "side": "SELL", "type": "LIMIT", "timeInForce": "IOC",
+                                            "quantity": spec_s["q_fmt"].format(rem_sc), "price": f"{bid_s_now:.{spec_s['dec']}f}"
+                                        }, signed=True)
+                                        ex_sc = float(sr_ioc_sc.get("executedQty", 0))
+                                        if ex_sc > 0:
+                                            sc_pnl = round((bid_s_now - t_s["buy_px"]) * ex_sc, 6)
+                                            api._s1_short_realized = getattr(api, "_s1_short_realized", 0.0) + sc_pnl
+                                            free_map["CM_USDT"] += ex_sc * bid_s_now
+                                            if t_s in active_tranches:
+                                                active_tranches.remove(t_s)
+                                            if t_s in s1_short_list:
+                                                s1_short_list.remove(t_s)
+                    elif t_s["state"] == "BUY_OPEN":
+                        # Cancel any unfilled sniper BUY order after 1.8s if lead-lag impulse faded (never sit as a resting duck!)
+                        q_b_now = bbos.get(t_s["symbol"], {})
+                        if (loop_ts - float(t_s.get("ts", loop_ts))) >= 1.8 or float(q_b_now.get("bidQty", 0)) < float(q_b_now.get("askQty", 999999)) * 1.40:
+                            cr_b_sc = api.request("DELETE", "/sapi/v1/margin/order", {"symbol": t_s["symbol"], "orderId": t_s["buy_oid"]}, signed=True)
+                            if cr_b_sc.get("status") == "CANCELED":
+                                free_map["CM_USDT"] += max(0.0, t_s["qty"] - float(cr_b_sc.get("executedQty", 0))) * t_s["buy_px"]
+                                if t_s in active_tranches:
+                                    active_tranches.remove(t_s)
+                                if t_s in s1_short_list:
+                                    s1_short_list.remove(t_s)
                 s1_short_real = float(getattr(api, "_s1_short_realized", 0.0))
                 s1_short_net = round(s1_short_real + s1_short_mtm, 4)
                 s1_elapsed_hr = max(0.015, (loop_ts - float(getattr(api, "_s1_pilot_start_ts", loop_ts))) / 3600.0)
                 s1_raw_hr = round(s1_short_real / s1_elapsed_hr, 4)
-                s1_equiv_2k_hr = round(s1_raw_hr * (2000.0 / 56.0), 2)
-                s1_can_scale = bool(int(getattr(api, "_s1_short_rts", 0)) >= 4 and s1_short_net >= 0.0005 and not getattr(api, "_s1_cb_tripped", False))
-                api._v89_scaled = s1_can_scale
+                s1_equiv_2k_hr = round(s1_raw_hr * (2000.0 / 20.0), 2)
+                s1_can_scale = False
+                api._v89_scaled = False
                 fd_bbo_now = bbos.get("FDUSDUSDT", {})
                 fd_thin_ok = bool(fd_bbo_now.get("askQty", 999999.0) < 25000.0 and fd_bbo_now.get("bidQty", 999999.0) < 75000.0)
-                if s1_can_scale:
-                    # Reclaim idle BUY orders from thick-wall UUSDT / USD1USDC (and FDUSDUSDT when Bid queue > 75K) so 100% of cash feeds balanced USDCUSDT & USD1USDT $56 tranches!
-                    reclaim_syms = ("UUSDT", "USD1USDC") if fd_thin_ok else ("UUSDT", "USD1USDC", "FDUSDUSDT")
-                    for t_sl in list([t for t in active_tranches if t["symbol"] in reclaim_syms and t["state"] == "BUY_OPEN"]):
-                        if t_sl.get("buy_oid"):
-                            cr_sl = api.request("DELETE", "/sapi/v1/margin/order", {"symbol": t_sl["symbol"], "orderId": t_sl["buy_oid"]}, signed=True)
-                            if cr_sl.get("status") == "CANCELED":
-                                q_k_sl = "CM_USDC" if t_sl["symbol"] == "USD1USDC" else "CM_USDT"
-                                free_map[q_k_sl] += max(0.0, t_sl["qty"] - float(cr_sl.get("executedQty", 0))) * t_sl["buy_px"]
-                        active_tranches.remove(t_sl)
-                if s1_short_mtm <= -0.0150 and not getattr(api, "_s1_cb_tripped", False):
+                # Hard Session Sub-Cent Loss Cap: Trip pilot CB if cumulative net pilot loss ever reaches -$0.0040 (4/10ths of a cent)!
+                if s1_short_net <= -0.0040 and not getattr(api, "_s1_cb_tripped", False):
                     api._s1_cb_tripped = True
-                    api._s1_cb_reason = "Pilot MTM <= -$0.015"
+                    api._s1_cb_reason = "Hard Sub-Cent Cap (-$0.0040) Hit"
                     for t_s in list([tx for tx in s1_short_list if tx["state"] == "BUY_OPEN"]):
                         if t_s["buy_oid"]:
                             cr_s = api.request("DELETE", "/sapi/v1/margin/order", {"symbol": t_s["symbol"], "orderId": t_s["buy_oid"]}, signed=True)
@@ -2405,20 +2430,17 @@ def main():
 
                 cons_guards = compute_conservative_guard(api, bbos)
                 allow_buys = (not soft_delev)
-                main_t_sz = 28.0 if s1_can_scale else 14.0
-                fd_tri_edge_ok = bool(
-                    "FDUSDUSDT" in bbos and "USDCUSDT" in bbos and "FDUSDUSDC" in bbos
-                    and (bbos["FDUSDUSDT"]["bid"] / bbos["USDCUSDT"]["ask"]) - bbos["FDUSDUSDC"]["bid"] >= -0.00003
-                )
+                main_t_sz = 20.0
+                fd_tri_edge_ok = False
                 for sym_p, is_iso, f_key, b_key, max_tr, max_buy, t_size, max_sell_cap, lbl_p in (
-                    ("ETHU",      False, "CM_U",     "CM_ETH",     (3 if (allow_buys and not getattr(api, "_ethu_cb_tripped", False)) else 0), (2 if (allow_buys and not getattr(api, "_ethu_cb_tripped", False)) else 0), 27.5,  0.036, "DELTA-NEUTRAL • ETH/U $56"),
-                    ("FDUSDUSDC", False, "CM_USDC",  "CM_FDUSD",   (4 if allow_buys else 0), (2 if allow_buys else 0), 28.0,  56.0, "LATENCY-TRI • FDUSD/USDC"),
-                    ("USD1U",     False, "CM_U",     "CM_USD1",    0, 0, 14.0,  28.0, "LATENCY-TRI • USD1/U"),
-                    ("FDUSDUSDT", False, "CM_USDT",  "CM_FDUSD",   (2 if fd_thin_ok else 1) if allow_buys else 0, (1 if fd_thin_ok else 0) if allow_buys else 0, 28.0,  56.0, "FDUSD-10x • SNIPER $28"),
-                    ("USDCUSDT",  False, "CM_USDT",  "CM_USDC",    14 if allow_buys else 0, 8 if allow_buys else 0, main_t_sz, 168.0, "DIP-SNIPER • USDC"),
-                    ("USD1USDT",  False, "CM_USDT",  "CM_USD1",    18 if allow_buys else 0, 10 if allow_buys else 0, main_t_sz, 224.0, "DIP-SNIPER • USD1"),
-                    ("USD1USDC",  False, "CM_USDC",  "CM_USD1",    0, 0, 14.1,  28.0, "TRI-MAKER • USD1/USDC"),
-                    ("UUSDT",     False, "CM_USDT",  "CM_U",       0, 0, 14.1,  28.0, "FULL-10x • U/USDT $14"),
+                    ("ETHU",      False, "CM_U",     "CM_ETH",     0, 0, 20.0,  0.0,  "STOPPED"),
+                    ("FDUSDUSDC", False, "CM_USDC",  "CM_FDUSD",   0, 0, 20.0,  0.0,  "STOPPED"),
+                    ("USD1U",     False, "CM_U",     "CM_USD1",    0, 0, 14.0,  0.0,  "STOPPED"),
+                    ("FDUSDUSDT", False, "CM_USDT",  "CM_FDUSD",   0, 0, 20.0,  0.0,  "STOPPED"),
+                    ("USDCUSDT",  False, "CM_USDT",  "CM_USDC",    1 if allow_buys else 0, 0, 20.0, 20.0, "v9.8 SNIPER • USDC $20"),
+                    ("USD1USDT",  False, "CM_USDT",  "CM_USD1",    1 if allow_buys else 0, 0, 20.0, 20.0, "v9.8 SNIPER • USD1 $20"),
+                    ("USD1USDC",  False, "CM_USDC",  "CM_USD1",    0, 0, 14.1,  0.0,  "STOPPED"),
+                    ("UUSDT",     False, "CM_USDT",  "CM_U",       0, 0, 14.1,  0.0,  "STOPPED"),
                 ):
                     q_bbo = bbos.get(sym_p)
                     if not q_bbo or q_bbo["bid"] <= 0:
@@ -2428,17 +2450,21 @@ def main():
                     p_tr = [t for t in active_tranches if t["symbol"] == sym_p and t["iso"] == is_iso]
                     is_crypto_u1 = sym_p in ("BTCU", "BTCUSD1", "BNBU", "ETHU", "BNBFDUSD", "SOLFDUSD")
 
-                    # v9.5 100%-Winrate Zero-Drawdown Micro-Sniper ($14 tranches + >=0.85x Heavy-Wall Shield + Bid-1 Dip Catcher):
+                    # v9.8 Event-Driven Lead-Lag Micro-Sniper ($20 single clip + >=2.0x Bid/Ask Imbalance + Thin Ask Queue < 45,000 + Hard -$0.00020 Sub-Cent Stop):
                     if sym_p in ("USDCUSDT", "USD1USDT") and allow_buys and (not getattr(api, "_s1_cb_tripped", False)):
                         s1_lg_sym = [t for t in p_tr if t.get("pilot") and t["state"] in ("BUY_OPEN", "SELL_OPEN")]
-                        can_spot_pl = (free_map[f_key] >= 22.0 and not cons_guards.get(sym_p, {}).get("falling", False))
-                        if len(s1_lg_sym) < 1 and len(s1_short_list) < 2 and can_spot_pl:
-                            pl_usd_sz = (28.0 if s1_can_scale else 14.0)
+                        impulse_ok = (
+                            free_map[f_key] >= 25.0
+                            and not cons_guards.get(sym_p, {}).get("falling", False)
+                            and q_bbo["bidQty"] >= q_bbo["askQty"] * 2.00
+                            and q_bbo["askQty"] < 45000.0
+                        )
+                        if len(s1_lg_sym) < 1 and len(s1_short_list) < 1 and impulse_ok:
+                            pl_usd_sz = 20.0
                             bq_pl = round(math.floor((pl_usd_sz / q_bbo["bid"]) / spec["step"] + 1e-9) * spec["step"], 6)
                             if bq_pl * q_bbo["bid"] >= 10.0:
-                                # Only sit at live Bid if BidWall >= 0.90x AskWall; otherwise sit at Bid - 1 tick for 0-drawdown wick catch!
-                                bpx_pl = round(q_bbo["bid"] if q_bbo["bidQty"] >= q_bbo["askQty"] * 0.90 else (q_bbo["bid"] - spec["tick"]), spec["dec"])
-                                spx_pl = round(bpx_pl + spec["tick"] * (2 if q_bbo["askQty"] < 6000.0 else 1), spec["dec"])
+                                bpx_pl = round(q_bbo["bid"], spec["dec"])
+                                spx_pl = round(bpx_pl + spec["tick"] * (2 if q_bbo["askQty"] < 8000.0 else 1), spec["dec"])
                                 br_pl = api.request("POST", "/sapi/v1/margin/order", {
                                     "symbol": sym_p, "side": "BUY", "type": "LIMIT_MAKER",
                                     "quantity": spec["q_fmt"].format(bq_pl), "price": f"{bpx_pl:.{spec['dec']}f}"
@@ -2447,8 +2473,8 @@ def main():
                                     free_map[f_key] -= bq_pl * bpx_pl
                                     daily_orders_placed += 1
                                     nt_pl = {
-                                        "tid": f"V95_{sym_p[:4]}", "symbol": sym_p, "iso": False,
-                                        "lbl": f"v9.5 100%-WIN ${int(pl_usd_sz)}",
+                                        "tid": f"V98_{sym_p[:4]}", "symbol": sym_p, "iso": False,
+                                        "lbl": "v9.8 SNIPER $20 (CAP -$0.0002)",
                                         "qty": bq_pl, "buy_px": bpx_pl, "sell_px": spx_pl, "buy_oid": br_pl["orderId"], "sell_oid": None,
                                         "state": "BUY_OPEN", "ts": loop_ts, "pilot": True, "borrowed": False
                                     }
@@ -2661,7 +2687,7 @@ def main():
                 s1_eq500_v = round(s1_raw_v * (500.0 / 56.0), 2)
                 s1_scale_v = bool(s1_can_scale) if "s1_can_scale" in locals() else False
                 ethu_net_lbl = f"ETHU DN ${ethu_net_v:+.4f} ({int(getattr(api, '_ethu_rts', 0))} RTs)" if "ethu_net_v" in locals() else "ETHU DN $0.0000"
-                s1_st_lbl = ("PILOT CB: " + getattr(api, "_s1_cb_reason", "")) if getattr(api, "_s1_cb_tripped", False) else (f"SCALED $28 + {ethu_net_lbl} • Net ${s1_net_v:+.4f} ({int(getattr(api, '_s1_short_rts', 0))} RTs)" if s1_scale_v else f"v9.7 $14 ETHU DELTA-NEUTRAL + LATENCY PILOT ({ethu_net_lbl}) • Net ${s1_net_v:+.4f} ({int(getattr(api, '_s1_short_rts', 0))}/4 RTs)")
+                s1_st_lbl = ("PILOT CB: " + getattr(api, "_s1_cb_reason", "")) if getattr(api, "_s1_cb_tripped", False) else f"v9.8 $20 SNIPER (HARD CAP -$0.0002 / 2.5s SCRATCH) • Net ${s1_net_v:+.4f} ({int(getattr(api, '_s1_short_rts', 0))} RTs)"
                 payload = {
                     "ts": int(loop_ts * 1000),
                     "startEquityUsd": start_equity_usd,
@@ -2692,7 +2718,7 @@ def main():
                             else (
                                 f"PAUSED AT <=$495.00 — ALL TRADING STOPPED UNTIL USER REPLY (Eq ${cached_total_usd:.4f})"
                                 if getattr(api, "_paused_495", False)
-                                else f"v9.7 ETHU DELTA-NEUTRAL + LATENCY ARB ({s1_st_lbl}) • 1h {'+$' if equity_changes.get('1h', 0)>=0 else '-$'}{abs(equity_changes.get('1h', 0)):.4f}"
+                                else f"v9.8 100%-USDT LEAD-LAG SNIPER ({s1_st_lbl}) • 1h {'+$' if equity_changes.get('1h', 0)>=0 else '-$'}{abs(equity_changes.get('1h', 0)):.4f}"
                             )
                         ),
                         "paused": bool(getattr(api, "_paused_495", False) or getattr(api, "_user_paused", False)),
@@ -2701,9 +2727,9 @@ def main():
                             "active": not bool(getattr(api, "_s1_cb_tripped", False)),
                             "cbTripped": bool(getattr(api, "_s1_cb_tripped", False)),
                             "cbReason": getattr(api, "_s1_cb_reason", ""),
-                            "strategy": "v9.7_ETHU_DELTA_NEUTRAL_PILOT",
-                            "budgetUsd": 28.0,
-                            "trancheUsd": 28.0 if s1_scale_v else 14.0,
+                            "strategy": "v9.8_SUB_CENT_CAP_SNIPER_PILOT",
+                            "budgetUsd": 20.0,
+                            "trancheUsd": 20.0,
                             "realizedUsd": round(float(getattr(api, "_s1_short_realized", 0.0)), 4),
                             "netUsd": s1_net_v,
                             "rawHrUsd": s1_raw_v,
