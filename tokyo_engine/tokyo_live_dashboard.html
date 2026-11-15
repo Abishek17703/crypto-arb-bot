@@ -637,6 +637,10 @@
         pBtn.textContent = isPaused ? "▶ RESUME TRADING (PAUSED)" : "⏸ PAUSE TRADING";
         pBtn.style.backgroundColor = isPaused ? "#059669" : "#dc2626";
         pBtn.style.borderColor = isPaused ? "#34d399" : "#f87171";
+        if (isPaused && (!data.openOrders || data.openOrders.length === 0)) {
+          const og = document.getElementById("openOrdersGrid");
+          if (og) og.innerHTML = `<div class="order-row"><span class="txt-white fw-700">⏸ ALL TRADING PAUSED — 0 OPEN ORDERS & ALL LOANS REPAID</span></div>`;
+        }
       }
     }
 
@@ -650,12 +654,11 @@
         try {
           await fetch(putUrl, {
             method: "PUT",
-            headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ paused: nextPaused, ts: Date.now() })
           });
         } catch (_) {}
       }
-      setTimeout(pollTelemetry, 1500);
+      setTimeout(pollTelemetry, 1200);
     }
 
     async function fetchWithTimeout(url, ms) {

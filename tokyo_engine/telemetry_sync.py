@@ -209,7 +209,7 @@ def auto_compound_borrow(api, force_repay_all=False):
             bv_u = float(ua.get("borrowed", 0)) + float(ua.get("interest", 0))
             if force_repay_all:
                 if bv_u > 0.001 and fv_u >= 0.05:
-                    api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": ast_u, "isIsolated": "FALSE", "amount": f"{min(fv_u, bv_u):.6f}", "type": "REPAY"}, signed=True)
+                    api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": ast_u, "isIsolated": "FALSE", "amount": f"{min(fv_u, bv_u):.4f}", "type": "REPAY"}, signed=True)
                 continue
             if ast_u == "USDT":
                 tot_ut = fv_u + lv_u
@@ -405,6 +405,27 @@ def halt_all_orders_and_repay(api):
                 if oid:
                     api.request("DELETE", "/sapi/v1/margin/order", {"symbol": iso_sym, "isIsolated": "TRUE", "orderId": oid}, signed=True)
     auto_compound_borrow(api, force_repay_all=True)
+    # Liquidate non-USDT stablecoins at 0%-fee LIMIT_MAKER Ask with AUTO_REPAY so 100% of USDT debt is repaid!
+    try:
+        cm_now = api.request("GET", "/sapi/v1/margin/account", signed=True)
+        ut_debt_now = 0.0
+        free_now = {}
+        for ua in cm_now.get("userAssets", []):
+            free_now[ua.get("asset", "")] = float(ua.get("free", 0))
+            if ua.get("asset") == "USDT":
+                ut_debt_now = float(ua.get("borrowed", 0)) + float(ua.get("interest", 0))
+                if free_now["USDT"] >= 0.50 and ut_debt_now > 0.01:
+                    api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "USDT", "isIsolated": "FALSE", "amount": f"{min(free_now['USDT'], ut_debt_now):.4f}", "type": "REPAY"}, signed=True)
+        if ut_debt_now > 1.0:
+            for s_ast, s_sym, s_dec in (("USDC", "USDCUSDT", 5), ("U", "UUSDT", 4), ("USD1", "USD1USDT", 5)):
+                sq = math.floor(free_now.get(s_ast, 0.0))
+                if sq >= 6:
+                    tk = api.request("GET", "/api/v3/ticker/bookTicker", {"symbol": s_sym})
+                    if isinstance(tk, dict) and "askPrice" in tk:
+                        apx = float(tk["askPrice"])
+                        api.request("POST", "/sapi/v1/margin/order", {"symbol": s_sym, "side": "SELL", "type": "LIMIT_MAKER", "sideEffectType": "AUTO_REPAY", "quantity": str(sq), "price": f"{apx:.{s_dec}f}"}, signed=True)
+    except Exception:
+        pass
 
 
 def adopt_existing_tranches(api):
@@ -1104,11 +1125,10 @@ def main():
             # Hard Stop Gate: If $495.00 circuit breaker OR dashboard red PAUSE button is active, stop 100% of trading!
             cm_ut_debt = sum(float(b.get("borrowed", 0)) for b in cached_balances if "USDT (5x Cross)" in b.get("asset", ""))
             if getattr(api, "_paused_495", False) or getattr(api, "_user_paused", False):
-                if cached_open_orders or active_tranches or (loop_ts - getattr(api, "_last_halt_sweep", 0.0) >= 30.0):
+                if loop_ts - getattr(api, "_last_halt_sweep", 0.0) >= 8.0:
                     api._last_halt_sweep = loop_ts
                     halt_all_orders_and_repay(api)
                 active_tranches = []
-                cached_open_orders = []
                 live_hourly_rate_usd = 0.0
                 live_daily_rate_usd = 0.0
             else:
@@ -1920,11 +1940,25 @@ def main():
                         json.dump({str(t.get("sell_oid") or t.get("buy_oid")): t.get("buy_px") for t in active_tranches}, _tf)
                 except Exception:
                     pass
-                # Upload dashboard html once on startup (with red PAUSE TRADING button + presigned S3 pause/resume URLs!)
+                # Ensure S3 CORS allows browser PUT on pause-control.json & generate presigned URLs forboth pause & resume!
                 if not getattr(api, "_dash_uploaded", False):
                     api._dash_uploaded = True
                     try:
-                        _p_url = s3.generate_presigned_url("put_object", Params={"Bucket": S3_BUCKET, "Key": "pause-control.json", "ContentType": "application/json"}, ExpiresIn=604800)
+                        s3.put_bucket_cors(
+                            Bucket=S3_BUCKET,
+                            CORSConfiguration={
+                                "CORSRules": [{
+                                    "AllowedHeaders": ["*"],
+                                    "AllowedMethods": ["GET", "PUT", "POST", "HEAD"],
+                                    "AllowedOrigins": ["*"],
+                                    "MaxAgeSeconds": 86400,
+                                }]
+                            },
+                        )
+                    except Exception:
+                        pass
+                    try:
+                        _p_url = s3.generate_presigned_url("put_object", Params={"Bucket": S3_BUCKET, "Key": "pause-control.json"}, ExpiresIn=604800)
                     except Exception:
                         _p_url = ""
                     api._pause_put_url = _p_url
