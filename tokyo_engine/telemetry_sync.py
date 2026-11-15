@@ -2272,6 +2272,7 @@ def main():
                             api._btc_drain_oid = (sr_btc["orderId"], spx_btc, loop_ts)
 
                 # Maintain $40 U bridge (0 debt) ONLY for BTCU $100 Micro-Test (40 U + 30 USD1 + 30 USDC = $100 Test Pool, $399 USDT untouched reserve)!
+                tot_u_held = sum(float(b.get("free", 0)) + float(b.get("locked", 0)) for b in cached_balances if "U (5x Cross)" in b.get("asset", ""))
                 u_drain_ord = getattr(api, "_u_drain_oid", None)
                 if u_drain_ord is not None:
                     if not any(o.get("orderId") == u_drain_ord[0] for o in cached_open_orders):
@@ -2282,19 +2283,19 @@ def main():
                 elif cm_u_debt < 1.0 and "UUSDT" in bbos and free_map["CM_U"] >= 48.0:
                     sq_u_d = math.floor(free_map["CM_U"] - 42.0)
                     if sq_u_d >= 6:
-                        spx_u_d = bbos["UUSDT"]["ask"]
+                        spx_u_d = max(1.0001, bbos["UUSDT"]["ask"])
                         sr_u_d = api.request("POST", "/sapi/v1/margin/order", {"symbol": "UUSDT", "side": "SELL", "type": "LIMIT_MAKER", "quantity": str(sq_u_d), "price": f"{spx_u_d:.4f}"}, signed=True)
                         if "orderId" in sr_u_d:
                             free_map["CM_U"] = max(0.0, free_map["CM_U"] - sq_u_d)
                             api._u_drain_oid = (sr_u_d["orderId"], spx_u_d, loop_ts)
-                elif (not getattr(api, "_s1_cb_tripped", False)) and cm_u_debt < 1.0 and "UUSDT" in bbos and free_map["CM_U"] < 39.0 and free_map["CM_USDT"] >= 95.0 and not any(t.get("symbol") in ("BTCU", "ETHU") for t in active_tranches):
-                    need_u = max(6, math.ceil(42.0 - free_map["CM_U"]))
-                    u_ask_px = bbos["UUSDT"]["ask"]
-                    br_u_seed = api.request("POST", "/sapi/v1/margin/order", {"symbol": "UUSDT", "side": "BUY", "type": "LIMIT", "timeInForce": "IOC", "quantity": str(need_u), "price": f"{u_ask_px:.4f}"}, signed=True)
-                    ex_u_seed = float(br_u_seed.get("executedQty", 0))
-                    if ex_u_seed > 0:
-                        free_map["CM_USDT"] -= ex_u_seed * u_ask_px
-                        free_map["CM_U"] += ex_u_seed
+                elif (not getattr(api, "_s1_cb_tripped", False)) and cm_u_debt < 1.0 and "UUSDT" in bbos and max(free_map["CM_U"], tot_u_held) < 38.0 and (loop_ts - getattr(api, "_last_u_seed_ts", 0.0)) >= 15.0 and free_map["CM_USDT"] >= 95.0 and not any(t.get("symbol") in ("BTCU", "ETHU") for t in active_tranches):
+                    api._last_u_seed_ts = loop_ts
+                    need_u = max(6, math.ceil(41.0 - max(free_map["CM_U"], tot_u_held)))
+                    u_bpx = bbos["UUSDT"]["bid"]
+                    br_u_seed = api.request("POST", "/sapi/v1/margin/order", {"symbol": "UUSDT", "side": "BUY", "type": "LIMIT_MAKER", "quantity": str(need_u), "price": f"{u_bpx:.4f}"}, signed=True)
+                    if "orderId" in br_u_seed:
+                        free_map["CM_USDT"] -= need_u * u_bpx
+                        api._u_drain_oid = (br_u_seed["orderId"], u_bpx, loop_ts)
 
                 # Cancel any UUSDT SELL order that trapped CM_U needed for ETHU Delta-Neutral Pilot (< 54 U available)!
                 for tx_uu in list([t for t in active_tranches if t["symbol"] == "UUSDT" and t["state"] == "SELL_OPEN"]):
