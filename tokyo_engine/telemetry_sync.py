@@ -2508,7 +2508,7 @@ def main():
                             spx_target = round(max(q_bbo["bid"] + 1.50, q_bbo["ask"], (btc_fair_u - btc_ema_basis) - 0.20), spec["dec"])
                         else:
                             impulse_ok = (
-                                free_map[f_key] >= 350.0
+                                free_map[f_key] >= 220.0
                                 and not cons_guards.get(sym_p, {}).get("falling", False)
                                 and q_bbo["bidQty"] >= q_bbo["askQty"] * 3.00
                                 and q_bbo["askQty"] < 15000.0
