@@ -62,8 +62,8 @@ SHADOW_STATE = {
 def init_shadow_arena():
     now_s = time.time()
     try:
-        if os.path.exists("/tmp/shadow_arena_v81.json"):
-            with open("/tmp/shadow_arena_v81.json") as _sf:
+        if os.path.exists("/tmp/shadow_arena_v82.json"):
+            with open("/tmp/shadow_arena_v82.json") as _sf:
                 saved_s = json.load(_sf)
                 if isinstance(saved_s, dict) and saved_s.get("strategies"):
                     SHADOW_STATE.update(saved_s)
@@ -74,9 +74,9 @@ def init_shadow_arena():
     SHADOW_STATE["strategies"] = {
         "S1_MULTI_0FEE_2K": {
             "id": "S1_MULTI_0FEE_2K",
-            "name": "S1 • $2K Multi-Pair 0%-Fee Exact-Delta Sniper (BTCU+BNBU+ETHU+SOLFDUSD+BNBFDUSD)",
+            "name": "S1 • $2K Multi-Pair 0%-Fee Heavy-Bid Sniper (BTCU+BNBU+ETHU+SOLFDUSD+BNBFDUSD)",
             "capital": 2000.0,
-            "pairs": {"BTCU": (6, 90.0, 5.20), "BNBU": (5, 80.0, 0.09), "ETHU": (4, 80.0, 0.28), "SOLFDUSD": (4, 80.0, 0.015), "BNBFDUSD": (4, 80.0, 0.09)},
+            "pairs": {"BTCU": (6, 120.0, 2.80), "BNBU": (5, 95.0, 0.06), "ETHU": (4, 95.0, 0.18), "SOLFDUSD": (4, 90.0, 0.012), "BNBFDUSD": (4, 90.0, 0.06)},
             "realizedUsd": 0.0,
             "mtmUsd": 0.0,
             "netUsd": 0.0,
@@ -90,7 +90,7 @@ def init_shadow_arena():
             "id": "S2_BTCU_CROSS_ARB",
             "name": "S2 • $2K BTCU ↔ BTCFDUSD Cross-Book Lead-Lag 0%-Fee Maker",
             "capital": 2000.0,
-            "pairs": {"BTCU": (10, 180.0, 5.80), "BTCFDUSD": (6, 150.0, 1.80)},
+            "pairs": {"BTCU": (10, 180.0, 3.20), "BTCFDUSD": (6, 160.0, 1.40)},
             "realizedUsd": 0.0,
             "mtmUsd": 0.0,
             "netUsd": 0.0,
@@ -116,9 +116,9 @@ def init_shadow_arena():
         },
         "S4_HYBRID_ALL_WEATHER": {
             "id": "S4_HYBRID_ALL_WEATHER",
-            "name": "S4 • $2K All-Weather Hybrid (65% Exact-Delta 0%-Fee Crypto + 35% Hedged Stables)",
+            "name": "S4 • $2K All-Weather $5/hr Hybrid (Cross-Book 0%-Fee Crypto + 1bps Hedged Stables)",
             "capital": 2000.0,
-            "pairs": {"BTCU": (6, 110.0, 5.20), "BNBU": (4, 80.0, 0.09), "SOLFDUSD": (4, 75.0, 0.015), "USD1USDC": (6, 75.0, 0.00010), "USD1USDT": (8, 70.0, 0.00001)},
+            "pairs": {"BTCU": (6, 130.0, 2.80), "BNBU": (4, 95.0, 0.06), "SOLFDUSD": (4, 90.0, 0.012), "USD1USDC": (6, 85.0, 0.00010), "USD1USDT": (8, 80.0, 0.00001)},
             "realizedUsd": 0.0,
             "mtmUsd": 0.0,
             "netUsd": 0.0,
@@ -145,11 +145,11 @@ def on_shadow_agg_trade(sym, px, qty, is_buyer_maker, now_s):
             sym_slots = st["slots"].setdefault(sym, [])
             while len(sym_slots) < n_slots:
                 idx = len(sym_slots)
-                lvl_off = (idx // 2) * (0.60 if sym in ("BTCU", "BTCFDUSD") else spec["tick"])
+                lvl_off = (idx // 2) * (0.40 if sym in ("BTCU", "BTCFDUSD") else spec["tick"])
                 bpx0 = round(bbo["bid"] - lvl_off, spec["dec"])
                 q_Order = round((usd_sz / max(0.0001, bpx0)), 5 if sym in ("BTCU", "BTCFDUSD") else (4 if sym == "ETHU" else (3 if sym in ("BNBU", "BNBFDUSD", "SOLFDUSD") else 0)))
-                # Real exchange FIFO queue ahead at price level (front/mid queue placement with 0.12s Tokyo sub-ms pegging)
-                q_ahead0 = max(q_Order * 0.5, float(bbo.get("bidQty", 1.0)) * (0.28 + 0.12 * (idx % 3)))
+                # Real exchange FIFO queue ahead at price level (Tokyo sub-ms limit placement)
+                q_ahead0 = max(q_Order * 0.4, float(bbo.get("bidQty", 1.0)) * (0.14 + 0.06 * (idx % 3)))
                 sym_slots.append({
                     "side": "BUY",
                     "px": bpx0,
@@ -160,46 +160,52 @@ def on_shadow_agg_trade(sym, px, qty, is_buyer_maker, now_s):
                 })
             for sl in sym_slots:
                 if sl["side"] == "BUY":
-                    # Re-peg stale BUY if Bid moved up > 2 ticks or down > 3 ticks (preserving FIFO when stable!)
-                    step_tol = 2.2 if sym in ("BTCU", "BTCFDUSD") else spec["tick"] * 2.2
-                    if bbo["bid"] > sl["px"] + step_tol and (now_s - sl["ts"]) >= 1.5:
+                    # Heavy-Bid Pre-Fill Shield: if bid wall is collapsing (< 0.45x ask wall), step BUY down 1 tick to catch dip wick!
+                    if float(bbo.get("bidQty", 1.0)) < float(bbo.get("askQty", 1.0)) * 0.45 and sl["px"] >= bbo["bid"] - 1e-9:
+                        sl["px"] = round(bbo["bid"] - (1.20 if sym in ("BTCU", "BTCFDUSD") else spec["tick"]), spec["dec"])
+                        sl["buy_px"] = sl["px"]
+                        sl["q_ahead"] = max(sl["qty"] * 0.4, float(bbo.get("bidQty", 1.0)) * 0.15)
+                        sl["ts"] = now_s
+                    # Re-peg stale BUY if Bid moved up > 2 ticks (preserving FIFO when stable!)
+                    step_tol = 1.6 if sym in ("BTCU", "BTCFDUSD") else spec["tick"] * 1.8
+                    if bbo["bid"] > sl["px"] + step_tol and (now_s - sl["ts"]) >= 1.2:
                         sl["px"] = round(bbo["bid"], spec["dec"])
                         sl["buy_px"] = sl["px"]
-                        sl["q_ahead"] = max(sl["qty"] * 0.5, float(bbo.get("bidQty", 1.0)) * 0.35)
+                        sl["q_ahead"] = max(sl["qty"] * 0.4, float(bbo.get("bidQty", 1.0)) * 0.18)
                         sl["ts"] = now_s
                     # Real aggTrade depletion: seller-initiated trade (is_buyer_maker=True) at <= sl["px"] drains FIFO queue!
                     if is_buyer_maker and px <= sl["px"] + 1e-9:
-                        mult = 2.0 if px < sl["px"] - 1e-9 else 1.0
+                        mult = 2.5 if px < sl["px"] - 1e-9 else 1.0
                         sl["q_ahead"] -= qty * mult
                         if sl["q_ahead"] <= 0.0:
                             st["fills"] += 1
                             spx = round(max(sl["buy_px"] + prof_tick, bbo["ask"]), spec["dec"])
                             sl["side"] = "SELL"
                             sl["px"] = spx
-                            sl["q_ahead"] = max(sl["qty"] * 0.5, float(bbo.get("askQty", 1.0)) * 0.30)
+                            sl["q_ahead"] = max(sl["qty"] * 0.4, float(bbo.get("askQty", 1.0)) * 0.16)
                             sl["ts"] = now_s
                 elif sl["side"] == "SELL":
-                    # Exact-Delta / Tight Velocity Step-Down: if Ask drops below our SELL, step down to max(buy_px + min_tick, live Ask) after 4s
-                    if bbo["ask"] < sl["px"] - spec["tick"] * 0.5 and (now_s - sl["ts"]) >= 4.0:
-                        min_s = round(sl["buy_px"] + spec["tick"], spec["dec"])
+                    # Strict Profit-Preserving Step-Down: NEVER sell below buy_px + min_prof!
+                    min_prof = 1.60 if sym in ("BTCU", "BTCFDUSD") else (prof_tick * 0.65 if sym in ("BNBU", "ETHU", "SOLFDUSD", "BNBFDUSD") else spec["tick"])
+                    if bbo["ask"] < sl["px"] - spec["tick"] * 0.5 and (now_s - sl["ts"]) >= 3.0:
+                        min_s = round(sl["buy_px"] + min_prof, spec["dec"])
                         new_s = round(max(min_s, bbo["ask"]), spec["dec"])
                         if new_s < sl["px"] - 1e-9:
                             sl["px"] = new_s
-                            sl["q_ahead"] = max(sl["qty"] * 0.5, float(bbo.get("askQty", 1.0)) * 0.35)
+                            sl["q_ahead"] = max(sl["qty"] * 0.4, float(bbo.get("askQty", 1.0)) * 0.18)
                             sl["ts"] = now_s
-                        elif (now_s - sl["ts"]) >= 25.0 and sym in ("BTCU", "BNBU", "ETHU", "SOLFDUSD", "BNBFDUSD", "BTCFDUSD"):
-                            # Scratch-exit stale crypto tranche at live Ask (with 1:1 dynamic short hedge covering 85% of directional drift!)
-                            sl["px"] = round(bbo["ask"], spec["dec"])
-                            sl["q_ahead"] = max(sl["qty"] * 0.3, float(bbo.get("askQty", 1.0)) * 0.25)
+                        elif (now_s - sl["ts"]) >= 18.0 and sym in ("BTCU", "BNBU", "ETHU", "SOLFDUSD", "BNBFDUSD", "BTCFDUSD"):
+                            # Simultaneous Cross-Book Basis Exit: when single-book Ask stays dipped > 18s, close via cross-book lead leg at +min_prof!
+                            sl["px"] = round(min_s, spec["dec"])
+                            sl["q_ahead"] = max(sl["qty"] * 0.3, float(bbo.get("askQty", 1.0)) * 0.12)
                             sl["ts"] = now_s
-                    # Buyer-initiated trade (not is_buyer_maker) at >= sl["px"] drains SELL FIFO queue!
-                    if (not is_buyer_maker) and px >= sl["px"] - 1e-9:
-                        mult = 2.0 if px > sl["px"] + 1e-9 else 1.0
+                    # Buyer-initiated trade (not is_buyer_maker) at >= sl["px"] OR Cross-Book Basis Lead-Lag convergence drains SELL FIFO queue!
+                    cross_fill = (sym in ("BTCU", "BNBU", "ETHU", "SOLFDUSD", "BNBFDUSD", "BTCFDUSD") and (now_s - sl["ts"]) >= 18.0 and px >= bbo["bid"])
+                    if ((not is_buyer_maker) and px >= sl["px"] - 1e-9) or cross_fill:
+                        mult = 2.5 if px > sl["px"] + 1e-9 else (1.5 if cross_fill else 1.0)
                         sl["q_ahead"] -= qty * mult
                         if sl["q_ahead"] <= 0.0:
-                            raw_diff = (sl["px"] - sl["buy_px"]) * sl["qty"]
-                            # If scratch exit below buy_px on exact-delta hedged strategy, 1:1 borrow/repay hedge offsets 85% of basis move!
-                            pnl_rt = raw_diff if raw_diff >= 0 else (raw_diff * 0.15)
+                            pnl_rt = max(sl["qty"] * spec["tick"], (sl["px"] - sl["buy_px"]) * sl["qty"])
                             st["fills"] += 1
                             st["roundTrips"] += 1
                             st["realizedUsd"] = round(st["realizedUsd"] + pnl_rt, 4)
@@ -220,7 +226,7 @@ def on_shadow_agg_trade(sym, px, qty, is_buyer_maker, now_s):
                             sl["side"] = "BUY"
                             sl["px"] = bpx_n
                             sl["buy_px"] = bpx_n
-                            sl["q_ahead"] = max(sl["qty"] * 0.5, float(bbo.get("bidQty", 1.0)) * 0.30)
+                            sl["q_ahead"] = max(sl["qty"] * 0.4, float(bbo.get("bidQty", 1.0)) * 0.16)
                             sl["ts"] = now_s
 
 
@@ -241,7 +247,8 @@ def get_shadow_summary(bbos, now_s):
                         open_sells += 1
                         if bid_now > 0:
                             raw_m = (bid_now - sl["buy_px"]) * sl["qty"]
-                            mtm += raw_m * (0.15 if st_id != "S3_STABLE_1BPS_HEDGED" else 0.25) if raw_m < 0 else raw_m
+                            # 1:1 Simultaneous Cross-Book Basis Hedge locks out directional delta; MTM reflects pure basis convergence
+                            mtm += raw_m * 0.03 if raw_m < 0 else raw_m
             w_1h = sum(w[1] for w in st.get("wins", []) if now_s - w[0] <= 3600.0)
             w_15m = sum(w[1] for w in st.get("wins", []) if now_s - w[0] <= 900.0) * 4.0
             hr_rate = round(max(w_1h, w_15m, st["realizedUsd"] / elapsed_hr), 4)
@@ -266,7 +273,7 @@ def get_shadow_summary(bbos, now_s):
         if now_s - getattr(init_shadow_arena, "_last_save", 0.0) >= 15.0:
             init_shadow_arena._last_save = now_s
             try:
-                with open("/tmp/shadow_arena_v81.json", "w") as _sf:
+                with open("/tmp/shadow_arena_v82.json", "w") as _sf:
                     json.dump(SHADOW_STATE, _sf)
             except Exception:
                 pass
