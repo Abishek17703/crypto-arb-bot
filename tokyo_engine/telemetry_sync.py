@@ -195,29 +195,42 @@ def auto_compound_borrow(api, force_repay_all=False):
                     api.request("POST", "/sapi/v1/margin/transfer", {"asset": "USDT", "amount": f"{ut_free:.2f}", "type": "1"}, signed=True)
     except Exception:
         pass
-    # Repay 100% of any Cross-Margin debt so Binance async BORROW/REPAY settlement lag NEVER corrupts ledger equity or charges interest!
+    # Smart Active-Only $2,000 Pool Manager: Repay idle sitting free cash (> $120) so we never pay idle interest, while topping up active USDT + USDC working pools up to ~$2,000 total!
     try:
         cm_acc = api.request("GET", "/sapi/v1/margin/account", signed=True)
+        ml = float(cm_acc.get("marginLevel", 999.0) or 999.0)
+        tot_net_btc = float(cm_acc.get("totalNetAssetOfBtc", 1.0) or 0.0)
         for ua in cm_acc.get("userAssets", []):
-            if ua.get("asset") == "USDT":
-                fv_ut, bv_ut = float(ua.get("free", 0)), float(ua.get("borrowed", 0)) + float(ua.get("interest", 0))
-                if bv_ut > 0.001 and fv_ut >= 0.05:
-                    rep_amt = min(fv_ut, bv_ut)
-                    api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "USDT", "isIsolated": "FALSE", "amount": f"{rep_amt:.6f}", "type": "REPAY"}, signed=True)
-            elif ua.get("asset") == "USD1":
-                fv_u1, lv_u1, bv_u1 = float(ua.get("free", 0)), float(ua.get("locked", 0)), float(ua.get("borrowed", 0)) + float(ua.get("interest", 0))
-                t_hdg_u1 = 0.0 if force_repay_all else min(getattr(api, "_target_hedge_u1", 0.0), lv_u1)
-                if bv_u1 > t_hdg_u1 + 2.0 and fv_u1 >= 1.0:
-                    rep_u1 = min(fv_u1, bv_u1 - t_hdg_u1)
-                    if rep_u1 >= 0.5:
-                        api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "USD1", "isIsolated": "FALSE", "amount": f"{rep_u1:.6f}", "type": "REPAY"}, signed=True)
-            elif ua.get("asset") == "USDC":
-                fv_uc, lv_uc, bv_uc = float(ua.get("free", 0)), float(ua.get("locked", 0)), float(ua.get("borrowed", 0)) + float(ua.get("interest", 0))
-                t_hdg_uc = 0.0 if force_repay_all else min(getattr(api, "_target_hedge_uc", 0.0), lv_uc)
-                if bv_uc > t_hdg_uc + 2.0 and fv_uc >= 1.0:
-                    rep_uc = min(fv_uc, bv_uc - t_hdg_uc)
-                    if rep_uc >= 0.5:
-                        api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "USDC", "isIsolated": "FALSE", "amount": f"{rep_uc:.6f}", "type": "REPAY"}, signed=True)
+            ast_u = ua.get("asset")
+            fv_u, lv_u = float(ua.get("free", 0)), float(ua.get("locked", 0))
+            bv_u = float(ua.get("borrowed", 0)) + float(ua.get("interest", 0))
+            if force_repay_all:
+                if bv_u > 0.001 and fv_u >= 0.05:
+                    api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": ast_u, "isIsolated": "FALSE", "amount": f"{min(fv_u, bv_u):.6f}", "type": "REPAY"}, signed=True)
+                continue
+            if ast_u == "USDT":
+                tot_ut = fv_u + lv_u
+                if bv_u > 1.0 and fv_u > 160.0:
+                    rep_amt = min(fv_u - 90.0, bv_u)
+                    if rep_amt >= 10.0:
+                        api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "USDT", "isIsolated": "FALSE", "amount": f"{rep_amt:.2f}", "type": "REPAY"}, signed=True)
+                elif ml > 1.55 and tot_ut < 1420.0 and bv_u < 1050.0 and tot_net_btc > 0:
+                    brw_ut = min(1480.0 - tot_ut, 1050.0 - bv_u, 350.0)
+                    if brw_ut >= 40.0:
+                        api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "USDT", "isIsolated": "FALSE", "amount": f"{brw_ut:.2f}", "type": "BORROW"}, signed=True)
+            elif ast_u == "USDC":
+                tot_uc = fv_u + lv_u
+                if bv_u > 1.0 and fv_u > 140.0:
+                    rep_uc = min(fv_u - 80.0, bv_u)
+                    if rep_uc >= 10.0:
+                        api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "USDC", "isIsolated": "FALSE", "amount": f"{rep_uc:.2f}", "type": "REPAY"}, signed=True)
+                elif ml > 1.55 and tot_uc < 480.0 and bv_u < 520.0 and tot_net_btc > 0:
+                    brw_uc = min(520.0 - tot_uc, 520.0 - bv_u, 260.0)
+                    if brw_uc >= 40.0:
+                        api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "USDC", "isIsolated": "FALSE", "amount": f"{brw_uc:.2f}", "type": "BORROW"}, signed=True)
+            elif ast_u == "USD1":
+                if bv_u > 1.0 and fv_u >= 1.0:
+                    api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "USD1", "isIsolated": "FALSE", "amount": f"{min(fv_u, bv_u):.6f}", "type": "REPAY"}, signed=True)
     except Exception:
         pass
 
@@ -280,7 +293,7 @@ def compute_conservative_guard(api, bbos):
     if now_t - prev_g.get("ts", 0.0) < 8.0 and prev_g.get("pairs"):
         return prev_g["pairs"]
     out = dict(prev_g.get("pairs", {}))
-    for sym_g, tick_g, dec_g in (("USD1USDT", 0.00001, 5), ("USDCUSDT", 0.00001, 5), ("UUSDT", 0.00010, 4)):
+    for sym_g, tick_g, dec_g in (("USD1USDT", 0.00001, 5), ("USDCUSDT", 0.00001, 5), ("UUSDT", 0.00010, 4), ("USD1USDC", 0.00010, 4)):
         try:
             kl = api.request("GET", "/api/v3/klines", {"symbol": sym_g, "interval": "1m", "limit": 6})
             if isinstance(kl, list) and len(kl) >= 4:
@@ -595,7 +608,7 @@ def main():
                     ("USDCUSDT",     "USDCUSDT",  "TRUE",  0.000010, "USDC/USDT (10x Iso)",    "10x TURBO",  "10x ISO"),
                     ("USDCUSDT_CM",  "USDCUSDT",  "FALSE", 0.000010, "USDC/USDT (5x Cross)",   "TURBO CM",   "5x CM"),
                     ("UUSDT_CM",     "UUSDT",     "FALSE", 0.000100, "U/USDT (0% Maker)",      "10x YIELD",  "5x CM"),
-                    ("USD1USDC_CM",  "USD1USDC",  "FALSE", 0.000051, "USD1/USDC (Tri-IOC)",    "TRI-IOC",    "5x CM"),
+                    ("USD1USDC_CM",  "USD1USDC",  "FALSE", 0.000100, "USD1/USDC (0% Maker)",   "10x YIELD",  "5x CM"),
                     ("FDUSDUSDC_CM", "FDUSDUSDC", "FALSE", 0.000053, "FDUSD/USDC (Tri-IOC)",   "TRI-IOC",    "5x CM"),
                     ("USD1USDT_ISO", "USD1USDT",  "TRUE",  0.000010, "USD1/USDT (5x Iso)",     "50% CORE",   "5x ISO"),
                     ("USD1USDT_CM",  "USD1USDT",  "FALSE", 0.000010, "USD1/USDT (5x Cross)",   "50% CORE",   "5x CM"),
@@ -627,7 +640,7 @@ def main():
                             break
                     trades_cache[key_c] = cur_list
 
-                    sells_today = cur_list if key_c in ("USD1USDC_CM", "FDUSDUSDC_CM", "USD1U_CM") else [x for x in cur_list if not x.get("isBuyer") and int(x["time"]) >= roll_24h_ms]
+                    sells_today = cur_list if key_c in ("FDUSDUSDC_CM", "USD1U_CM") else [x for x in cur_list if not x.get("isBuyer") and int(x["time"]) >= roll_24h_ms]
                     sells_12h = [x for x in sells_today if int(x["time"]) >= twelve_hr_ms]
                     sells_8h = [x for x in sells_today if int(x["time"]) >= eight_hr_ms]
                     sells_4h = [x for x in sells_today if int(x["time"]) >= four_hr_ms]
@@ -901,16 +914,23 @@ def main():
                             spot_net += float(ia_x["baseAsset"]["netAsset"]) * b_px_x + float(ia_x["quoteAsset"]["netAsset"])
                     wb_r = api.request("GET", "/sapi/v1/asset/wallet/balance", {"quoteAsset": "USDT"}, signed=True)
                     wb_sum = sum(float(w.get("balance", 0)) for w in wb_r if w.get("activate")) if isinstance(wb_r, list) else 0.0
-                    # Reconcile any untouched Funding/Earn wallet dust ONCE at startup, and NEVER corrupt _static_dust_usd during 1-tick Binance /wallet/balance borrow/repay async lag!
+                    # Lock _static_dust_usd permanently at startup & persist when debt == 0 so restarts with active loans never jitter!
+                    tot_cm_debt_now = sum(float(a.get("borrowed", 0)) for a in cm.get("userAssets", []))
                     if not hasattr(api, "_static_dust_usd"):
-                        api._static_dust_usd = round(max(0.0, wb_sum - (total_net + spot_net)), 4) if (wb_sum > 85.0 and total_net > 85.0 and abs(wb_sum - (total_net + spot_net)) < 12.0) else 2.6163
-                    elif wb_sum > 85.0 and total_net > 85.0 and 15.0 < abs(wb_sum - (total_net + spot_net + api._static_dust_usd)) < 80.0:
-                        api._reanchor_hits = getattr(api, "_reanchor_hits", 0) + 1
-                        if api._reanchor_hits >= 4:
-                            api._static_dust_usd = round(max(0.0, wb_sum - (total_net + spot_net)), 4)
-                            api._reanchor_hits = 0
-                    else:
-                        api._reanchor_hits = 0
+                        try:
+                            import json as _sdj
+                            api._static_dust_usd = float(_sdj.load(open("/tmp/static_dust_usd.json")).get("dust", 2.6163))
+                        except Exception:
+                            api._static_dust_usd = round(max(0.0, wb_sum - (total_net + spot_net)), 4) if (tot_cm_debt_now < 1.0 and wb_sum > 85.0 and total_net > 85.0 and abs(wb_sum - (total_net + spot_net)) < 6.0) else 2.6163
+                    if tot_cm_debt_now < 1.0 and wb_sum > 85.0 and total_net > 85.0 and abs(wb_sum - (total_net + spot_net)) < 6.0:
+                        _clean_dust = round(max(0.0, wb_sum - (total_net + spot_net)), 4)
+                        if abs(_clean_dust - api._static_dust_usd) > 0.0005:
+                            api._static_dust_usd = _clean_dust
+                            try:
+                                import json as _sdj2
+                                _sdj2.dump({"dust": _clean_dust}, open("/tmp/static_dust_usd.json", "w"))
+                            except Exception:
+                                pass
                     exact_acct_eq = round(total_net + spot_net + api._static_dust_usd, 4)
                     prev_valid_eq = getattr(api, "_last_valid_eq", 498.4450)
                     # Use EXACT direct USDT ledger valuation (total_net + spot_net + static_dust) as primary truth so BTC->USDT double-conversion noise in /wallet/balance NEVER causes fake +/-$0.005 drops!
@@ -1022,14 +1042,14 @@ def main():
                     if tr["state"] == "BUY_OPEN":
                         o_live = live_oid_map.get(tr["buy_oid"])
                         if o_live is not None:
-                            # Concentrated Active-Spread Sniper (v7.5): Pack capital into the top 4–5 active ticks where 98% of fills execute!
+                            # Concentrated $2,000 Pool Sniper (v7.6): High-Yield 1bps USD1USDC + UUSDT + 0.1bps USD1USDT/USDCUSDT!
                             top_buy_cnt = sum(1 for tx in active_tranches if tx["symbol"] == sym and abs(tx["buy_px"] - q_bbo["bid"]) < spec["tick"] * 0.3); top_sell_next = sum(1 for tx in active_tranches if tx["symbol"] == sym and abs((tx["sell_px"] if tx["state"] == "SELL_OPEN" else (tx["buy_px"] + spec["tick"])) - (q_bbo["bid"] + spec["tick"])) < spec["tick"] * 0.3)
-                            if sym == "UUSDT":
-                                top_cap_m = 3 if q_bbo["bidQty"] >= q_bbo["askQty"] * 2.2 else (2 if q_bbo["bidQty"] >= q_bbo["askQty"] * 1.35 else 0)
-                                sub_cap_m = 2
+                            if sym in ("UUSDT", "USD1USDC"):
+                                top_cap_m = 4 if q_bbo["bidQty"] >= q_bbo["askQty"] * 2.0 else (3 if q_bbo["bidQty"] >= q_bbo["askQty"] * 1.25 else 0)
+                                sub_cap_m = 3
                             elif sym in ("USD1USDT", "USDCUSDT"):
-                                top_cap_m = 7 if q_bbo["bidQty"] >= q_bbo["askQty"] * 2.5 else (5 if q_bbo["bidQty"] >= q_bbo["askQty"] * 1.15 else (2 if q_bbo["bidQty"] >= q_bbo["askQty"] * 0.45 else 0))
-                                sub_cap_m = 4
+                                top_cap_m = 8 if q_bbo["bidQty"] >= q_bbo["askQty"] * 2.5 else (5 if q_bbo["bidQty"] >= q_bbo["askQty"] * 1.15 else (2 if q_bbo["bidQty"] >= q_bbo["askQty"] * 0.45 else 0))
+                                sub_cap_m = 5
                             else:
                                 top_cap_m = 1
                                 sub_cap_m = 1
@@ -1039,21 +1059,20 @@ def main():
                             b2_cnt = sum(1 for tx in active_tranches if tx["symbol"] == sym and ((tx["state"] == "BUY_OPEN" and abs(tx["buy_px"] - b2_px) < spec["tick"] * 0.3) or (tx["state"] == "SELL_OPEN" and abs(tx["sell_px"] - (b2_px + spec["tick"])) < spec["tick"] * 0.3)))
                             can_step_top = (q_bbo["bid"] > tr["buy_px"] + spec["tick"] * 0.5 and top_buy_cnt < top_cap_m and top_sell_next < top_cap_m)
                             can_step_sub = (b1_px > tr["buy_px"] + spec["tick"] * 0.5 and b1_cnt < sub_cap_m) or (b2_px > tr["buy_px"] + spec["tick"] * 0.5 and b2_cnt < sub_cap_m)
-                            # Pre-Fill 100%-Win-Rate Cancellation Guard for Triangular Maker-IOC BUYs (USD1USDC / FDUSDUSDC / USD1U):
                             tri_edge_gone = False
-                            if not tr["iso"] and sym in ("USD1USDC", "FDUSDUSDC", "USD1U"):
+                            if not tr["iso"] and sym in ("FDUSDUSDC", "USD1U"):
                                 q_bridge = "UUSDT" if sym == "USD1U" else "USDCUSDT"
-                                ref_sym_g = "USD1USDT" if sym in ("USD1USDC", "USD1U") else "FDUSDUSDT"
+                                ref_sym_g = "USD1USDT" if sym == "USD1U" else "FDUSDUSDT"
                                 if ref_sym_g in bbos and q_bridge in bbos:
                                     synth_exit_g = bbos[ref_sym_g]["bid"] / bbos[q_bridge]["ask"]
                                     if synth_exit_g < tr["buy_px"] + 0.000008:
                                         tri_edge_gone = True
-                            can_reroute_deep = (sym in ("USD1USDT", "USDCUSDT", "UUSDT") and not tr["iso"] and (q_bbo["bid"] - tr["buy_px"]) >= spec["tick"] * 3.5 and (loop_ts - tr.get("ts", 0)) >= 8.0)
-                            # Heavy-Bid Pre-Fill Shield: Cancel top-of-book BUY BEFORE it gets dumped into (< 85% of ask wall on USD1/USDC, or < 140% on UUSDT) so dips fill lower rungs into instant +1/+2 tick bounce profit!
+                            can_reroute_deep = (sym in ("USD1USDT", "USDCUSDT", "UUSDT", "USD1USDC") and not tr["iso"] and (q_bbo["bid"] - tr["buy_px"]) >= spec["tick"] * 3.5 and (loop_ts - tr.get("ts", 0)) >= 8.0)
+                            # Heavy-Bid Pre-Fill Shield: Cancel top-of-book BUY BEFORE it gets dumped into
                             cg_live = compute_conservative_guard(api, bbos).get(sym, {})
-                            min_safe_wall = 1.25 if sym == "UUSDT" else 0.42
+                            min_safe_wall = 1.20 if sym in ("UUSDT", "USD1USDC") else 0.42
                             weak_bid_wall = (
-                                sym in ("USD1USDT", "USDCUSDT", "UUSDT", "FDUSDUSDT")
+                                sym in ("USD1USDT", "USDCUSDT", "UUSDT", "USD1USDC", "FDUSDUSDT")
                                 and abs(tr["buy_px"] - q_bbo["bid"]) < spec["tick"] * 0.4
                                 and (q_bbo["bidQty"] < q_bbo["askQty"] * min_safe_wall or (cg_live.get("falling", False) and q_bbo["bidQty"] < q_bbo["askQty"] * 1.10) or (cg_live.get("max_bid") and tr["buy_px"] > cg_live["max_bid"] + spec["tick"] * 0.8))
                             )
@@ -1076,10 +1095,10 @@ def main():
                             else:
                                 still_tranches.append(tr)
                         else:
-                            # Pure Zero-Fee Maker-Maker Triangular Flip (<15ms): NEVER use IOC! Post LIMIT_MAKER exit on ref_sym_t at >= cost + profit!
-                            if not tr["iso"] and sym in ("USD1USDC", "FDUSDUSDC", "USD1U"):
+                            # Pure Zero-Fee Maker-Maker Triangular Flip (<15ms) for FDUSDUSDC / USD1U; USD1USDC scalps its own native 1.0 bps ($0.00010) spread directly!
+                            if not tr["iso"] and sym in ("FDUSDUSDC", "USD1U"):
                                 q_bridge_t = "UUSDT" if sym == "USD1U" else "USDCUSDT"
-                                ref_sym_t = "USD1USDT" if sym in ("USD1USDC", "USD1U") else "FDUSDUSDT"
+                                ref_sym_t = "USD1USDT" if sym == "USD1U" else "FDUSDUSDT"
                                 ref_dec_t = PAIRS[ref_sym_t]["dec"]
                                 ref_tick_t = PAIRS[ref_sym_t]["tick"]
                                 uc_bid_t = bbos.get(q_bridge_t, {}).get("bid", 1.0007)
@@ -1191,8 +1210,8 @@ def main():
                                                         tr["ts"] = loop_ts
                                                         still_tranches.append(tr)
                                                         continue
-                            if sym in ("USD1USDC", "FDUSDUSDC") and float(o_live.get("executedQty", 0)) == 0:
-                                ref_ut_s = "USD1USDT" if sym == "USD1USDC" else "FDUSDUSDT"
+                            if sym in ("FDUSDUSDC",) and float(o_live.get("executedQty", 0)) == 0:
+                                ref_ut_s = "FDUSDUSDT"
                                 ref_dec_s = PAIRS[ref_ut_s]["dec"]
                                 ref_tick_s = PAIRS[ref_ut_s]["tick"]
                                 eff_bpx_ut = tr["buy_px"] if tr["buy_px"] >= 0.99800 else round(tr["sell_px"] * bbos.get("USDCUSDT", {}).get("bid", 1.00071) - 0.00001, ref_dec_s)
@@ -1211,7 +1230,7 @@ def main():
                                             continue
                             # Smart +2 -> +1 Tick Profit Step-Down: Follow Ask down immediately if Ask drops, OR step +2 tick target down to +1 tick profit after 65s so capital never idles!
                             want_step_1tick = (
-                                sym not in ("USD1USDC", "FDUSDUSDC")
+                                sym not in ("FDUSDUSDC",)
                                 and float(o_live.get("executedQty", 0)) == 0
                                 and (
                                     (age_s > 0.45 and q_bbo["ask"] < tr["sell_px"] - spec["tick"] * 0.5 and max(tr["buy_px"] + spec["tick"], q_bbo["ask"]) < tr["sell_px"] - spec["tick"] * 0.5)
@@ -1244,7 +1263,11 @@ def main():
                             # Zero-GET Instant Recycle (<15ms): SELL vanished -> credit free_map & post new BUY on the exact same tick!
                             st_code = "FILLED"
                             if st_code == "FILLED":
-                                if sym in ("USD1USDC", "FDUSDUSDC") and "USDCUSDT" in bbos:
+                                if sym == "USD1USDC":
+                                    uc_bid = bbos.get("USDCUSDT", {}).get("bid", 1.0)
+                                    free_map["CM_USDC"] += tr["qty"] * tr["sell_px"]
+                                    pnl_v = tr["qty"] * (tr["sell_px"] - tr["buy_px"]) * uc_bid
+                                elif sym == "FDUSDUSDC" and "USDCUSDT" in bbos:
                                     uc_bid = bbos["USDCUSDT"]["bid"]
                                     uc_q = tr["qty"] * tr["sell_px"]
                                     free_map["CM_USDC"] += uc_q
@@ -1380,7 +1403,7 @@ def main():
                     elif "USDCUSDT" in bbos and (bbos["USDCUSDT"]["bid"] > uc_unwind[1] + 0.000005 or loop_ts - uc_unwind[2] > 3.5):
                         api.request("DELETE", "/sapi/v1/margin/order", {"symbol": "USDCUSDT", "orderId": uc_unwind[0]}, signed=True)
                         api._uc_unwind_oid = None
-                elif cm_uc_debt >= 6.0 and free_map["CM_USDC"] < cm_uc_debt - 1.0 and "USDCUSDT" in bbos and (loop_ts - getattr(api, "_last_uw_post", 0.0)) >= 5.5:
+                elif soft_delev and cm_uc_debt >= 6.0 and free_map["CM_USDC"] < cm_uc_debt - 1.0 and "USDCUSDT" in bbos and (loop_ts - getattr(api, "_last_uw_post", 0.0)) >= 5.5:
                     need_uc = math.ceil(min(160.0, cm_uc_debt - free_map["CM_USDC"]))
                     if need_uc >= 6 and free_map["CM_USDT"] >= need_uc * 1.002:
                         api._last_uw_post = loop_ts
@@ -1392,26 +1415,27 @@ def main():
                         if "orderId" in br_uw:
                             free_map["CM_USDT"] = max(0.0, free_map["CM_USDT"] - need_uc * bpx_uw)
                             api._uc_unwind_oid = (br_uw["orderId"], bpx_uw, loop_ts)
-                if cm_uc_debt > 0.01 and free_map["CM_USDC"] >= 0.50 and (loop_ts - getattr(api, "_last_uc_rep", 0.0)) >= 1.5:
+                # Trim only excess idle borrowed cash (> $160 free) during normal trading; full repay on soft_delev!
+                if cm_uc_debt > 0.01 and (soft_delev or free_map["CM_USDC"] > 150.0) and (loop_ts - getattr(api, "_last_uc_rep", 0.0)) >= 4.0:
                     api._last_uc_rep = loop_ts
-                    rep_uc = min(free_map["CM_USDC"], cm_uc_debt)
-                    rr_uc = api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "USDC", "isIsolated": "FALSE", "amount": f"{rep_uc:.6f}", "type": "REPAY"}, signed=True)
-                    if "tranId" in rr_uc:
-                        free_map["CM_USDC"] = max(0.0, free_map["CM_USDC"] - rep_uc)
-                        cm_uc_debt = max(0.0, cm_uc_debt - rep_uc)
-                if cm_u1_debt > 0.01 and free_map["CM_USD1"] >= 0.50 and (loop_ts - getattr(api, "_last_u1_rep", 0.0)) >= 1.5:
+                    rep_uc = min(free_map["CM_USDC"] if soft_delev else max(0.0, free_map["CM_USDC"] - 90.0), cm_uc_debt)
+                    if rep_uc >= 5.0:
+                        rr_uc = api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "USDC", "isIsolated": "FALSE", "amount": f"{rep_uc:.4f}", "type": "REPAY"}, signed=True)
+                        if "tranId" in rr_uc:
+                            free_map["CM_USDC"] = max(0.0, free_map["CM_USDC"] - rep_uc)
+                            cm_uc_debt = max(0.0, cm_uc_debt - rep_uc)
+                if cm_u1_debt > 0.01 and free_map["CM_USD1"] >= 0.50 and (loop_ts - getattr(api, "_last_u1_rep", 0.0)) >= 2.0:
                     api._last_u1_rep = loop_ts
                     rep_u1 = min(free_map["CM_USD1"], cm_u1_debt)
                     rr_u1 = api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "USD1", "isIsolated": "FALSE", "amount": f"{rep_u1:.6f}", "type": "REPAY"}, signed=True)
                     if "tranId" in rr_u1:
                         free_map["CM_USD1"] = max(0.0, free_map["CM_USD1"] - rep_u1)
                         cm_u1_debt = max(0.0, cm_u1_debt - rep_u1)
-                if cm_ut_debt > 0.01 and free_map["CM_USDT"] >= 0.50 and (loop_ts - getattr(api, "_last_repay_tick", 0.0)) >= 2.0:
-                    # Repay 100% of any margin debt so Binance async BORROW/REPAY settlement lag NEVER hits total_net or charges interest!
+                if cm_ut_debt > 0.01 and (soft_delev or free_map["CM_USDT"] > 170.0) and (loop_ts - getattr(api, "_last_repay_tick", 0.0)) >= 4.0:
                     api._last_repay_tick = loop_ts
-                    rep_q = min(free_map["CM_USDT"], cm_ut_debt)
-                    if rep_q >= 0.50:
-                        rr = api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "USDT", "isIsolated": "FALSE", "amount": f"{rep_q:.6f}", "type": "REPAY"}, signed=True)
+                    rep_q = min(free_map["CM_USDT"] if soft_delev else max(0.0, free_map["CM_USDT"] - 90.0), cm_ut_debt)
+                    if rep_q >= 5.0:
+                        rr = api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "USDT", "isIsolated": "FALSE", "amount": f"{rep_q:.4f}", "type": "REPAY"}, signed=True)
                         if "tranId" in rr:
                             free_map["CM_USDT"] = max(0.0, free_map["CM_USDT"] - rep_q)
                             cm_ut_debt = max(0.0, cm_ut_debt - rep_q)
@@ -1483,14 +1507,14 @@ def main():
                             free_map["CM_USDC"] = max(0.0, free_map["CM_USDC"] - uc_s_mkr)
                             api._uc_seed_oid = ("SELL", s_res["orderId"], loop_ts, uc_ask_now)
 
-                # 4B. v7.5 CONCENTRATED ACTIVE-SPREAD SNIPER ($0 Debt • Top 4-Tick Concentration on USD1 + U 10x + USDC • Honest Run-Rate!)
+                # 4B. v7.6 $2,000 POOL HIGH-YIELD SNIPER (USD1USDC 1bps + UUSDT 1bps + USD1/USDC Concentrated • Zero Below-Cost Dumps!)
                 cons_guards = compute_conservative_guard(api, bbos)
                 allow_buys = (not soft_delev)
                 for sym_p, is_iso, f_key, b_key, max_tr, max_buy, t_size, max_sell_cap, lbl_p in (
-                    ("UUSDT",     False, "CM_USDT",  "CM_U",       9 if allow_buys else 0,  5 if allow_buys else 0, 14.1,  56.0, "FULL-10x • U/USDT $14"),
-                    ("USD1USDT",  False, "CM_USDT",  "CM_USD1",   30 if allow_buys else 0, 20 if allow_buys else 0, 14.1, 168.0, "FULL-CASH • USD1 $14"),
-                    ("USDCUSDT",  False, "CM_USDT",  "CM_USDC",   26 if allow_buys else 0, 16 if allow_buys else 0, 14.1, 140.0, "FULL-CASH • USDC $14"),
-                    ("USD1USDC",  False, "CM_USDC",  "CM_USD1",    4 if allow_buys else 0,  2 if allow_buys else 0, 14.1,  42.0, "TRI-MAKER • USD1/USDC"),
+                    ("USD1USDC",  False, "CM_USDC",  "CM_USD1",   20 if allow_buys else 0, 12 if allow_buys else 0, 42.1, 300.0, "10x-1BPS • USD1/USDC $42"),
+                    ("UUSDT",     False, "CM_USDT",  "CM_U",      14 if allow_buys else 0,  8 if allow_buys else 0, 42.1, 210.0, "10x-1BPS • U/USDT $42"),
+                    ("USD1USDT",  False, "CM_USDT",  "CM_USD1",   28 if allow_buys else 0, 18 if allow_buys else 0, 35.1, 350.0, "5x-POOL • USD1 $35"),
+                    ("USDCUSDT",  False, "CM_USDT",  "CM_USDC",   24 if allow_buys else 0, 15 if allow_buys else 0, 35.1, 315.0, "5x-POOL • USDC $35"),
                 ):
                     q_bbo = bbos.get(sym_p)
                     if not q_bbo or q_bbo["bid"] <= 0:
@@ -1502,7 +1526,7 @@ def main():
 
                     # Immediately post maker SELL for any free non-hedged base inventory (keep at least 5 tranche slots free for live BUY flips!)
                     while sym_p not in ("USD1USDC", "FDUSDUSDC", "USD1U") and free_map[b_key] * q_bbo["ask"] >= 5.6 and len(p_tr) < max(1, max_tr - 5):
-                        if (sym_p == "USD1USDT" and cm_u1_debt >= 1.0) or (sym_p == "USDCUSDT" and cm_uc_debt >= 1.0):
+                        if (sym_p == "USD1USDT" and cm_u1_debt >= 1.0) or (sym_p == "USDCUSDT" and cm_uc_debt >= 1.0 and free_map["CM_USDC"] <= 520.0):
                             break
                         max_base_s = free_map[b_key]
                         target_base_s = (t_size / q_bbo["ask"]) if is_crypto_u1 else t_size
@@ -1553,9 +1577,9 @@ def main():
                     p_selling_qty = sum(t["qty"] for t in p_tr if t["state"] == "SELL_OPEN")
                     near_ask_sells = sum(1 for t in p_tr if t["state"] == "SELL_OPEN" and abs(t["sell_px"] - q_bbo["ask"]) <= spec["tick"] * 1.5)
                     cg_p = cons_guards.get(sym_p, {})
-                    bid_wall_ok = (sym_p == "USD1USDC") or (not (cg_p.get("falling", False) and q_bbo["bidQty"] < q_bbo["askQty"] * 0.45)) and not (sym_p == "USDCUSDT" and cm_uc_debt >= 6.0)
-                    min_res_f = 4.0 if f_key == "CM_USDT" else 0.0
-                    can_buy_cap = (p_selling_qty <= max_sell_cap) or (near_ask_sells < 2 and len(p_buying) < 3 and p_selling_qty <= max_sell_cap + 28.0)
+                    bid_wall_ok = not (cg_p.get("falling", False) and q_bbo["bidQty"] < q_bbo["askQty"] * 0.45)
+                    min_res_f = 8.0 if f_key == "CM_USDT" else 4.0
+                    can_buy_cap = (p_selling_qty <= max_sell_cap) or (near_ask_sells < 2 and len(p_buying) < 3 and p_selling_qty <= max_sell_cap + 45.0)
                     while (sym_p not in getattr(api, "_disabled_fee_keys", set())) and bid_wall_ok and can_buy_cap and len(p_buying) < max_buy and len(p_tr) < max_tr and free_map[f_key] >= (min_res_f + 6.5):
                         avail_above_reserve = max(0.0, free_map[f_key] - min_res_f)
                         use_usd = min(t_size, avail_above_reserve)
@@ -1565,24 +1589,24 @@ def main():
                             break
                         if is_crypto_u1:
                             cap_top, cap_sub, max_lvls = 1, 1, 2
-                        elif sym_p in ("USD1USDC", "FDUSDUSDC", "USD1U"):
+                        elif sym_p in ("FDUSDUSDC", "USD1U"):
                             q_bridge_p = "UUSDT" if sym_p == "USD1U" else "USDCUSDT"
-                            ref_chk_p = "USD1USDT" if sym_p in ("USD1USDC", "USD1U") else "FDUSDUSDT"
+                            ref_chk_p = "USD1USDT" if sym_p == "USD1U" else "FDUSDUSDT"
                             if ref_chk_p not in bbos or q_bridge_p not in bbos:
                                 break
                             if (bbos[ref_chk_p]["bid"] / bbos[q_bridge_p]["ask"]) - q_bbo["bid"] < 0.000018:
                                 break
                             cap_top, cap_sub, max_lvls = 1, 0, 1
-                        elif sym_p == "UUSDT":
-                            # U/USDT 10x Yield ($0.00010 tick): Stack up to 3x$14 on strong >=2.2x Bid wall (2x on >=1.35x), plus 2x$14 at Bid-1!
-                            cap_top = 3 if q_bbo["bidQty"] >= q_bbo["askQty"] * 2.20 else (2 if q_bbo["bidQty"] >= q_bbo["askQty"] * 1.35 else 0)
-                            cap_sub, max_lvls = 2, 3
+                        elif sym_p in ("UUSDT", "USD1USDC"):
+                            # 1.0 bps ($0.00010 tick = 10x Yield): Stack up to 4x$42 on strong >=2.0x Bid wall (3x on >=1.25x), plus 3x$42 at Bid-1..Bid-2!
+                            cap_top = 4 if q_bbo["bidQty"] >= q_bbo["askQty"] * 2.00 else (3 if q_bbo["bidQty"] >= q_bbo["askQty"] * 1.25 else 0)
+                            cap_sub, max_lvls = 3, 4
                         elif sym_p == "USDCUSDT":
-                            cap_top = 7 if q_bbo["bidQty"] >= q_bbo["askQty"] * 2.50 else (5 if q_bbo["bidQty"] >= q_bbo["askQty"] * 1.15 else (2 if q_bbo["bidQty"] >= q_bbo["askQty"] * 0.45 else 0))
-                            cap_sub, max_lvls = 4, 5
+                            cap_top = 8 if q_bbo["bidQty"] >= q_bbo["askQty"] * 2.50 else (5 if q_bbo["bidQty"] >= q_bbo["askQty"] * 1.15 else (2 if q_bbo["bidQty"] >= q_bbo["askQty"] * 0.45 else 0))
+                            cap_sub, max_lvls = 5, 5
                         else:
-                            cap_top = 7 if q_bbo["bidQty"] >= q_bbo["askQty"] * 2.50 else (5 if q_bbo["bidQty"] >= q_bbo["askQty"] * 1.15 else (2 if q_bbo["bidQty"] >= q_bbo["askQty"] * 0.45 else 0))
-                            cap_sub, max_lvls = 4, 5
+                            cap_top = 8 if q_bbo["bidQty"] >= q_bbo["askQty"] * 2.50 else (5 if q_bbo["bidQty"] >= q_bbo["askQty"] * 1.15 else (2 if q_bbo["bidQty"] >= q_bbo["askQty"] * 0.45 else 0))
+                            cap_sub, max_lvls = 5, 5
                         base_bpx = round(q_bbo["bid"] + spec["tick"], spec["dec"]) if (q_bbo["ask"] - q_bbo["bid"] >= spec["tick"] * 1.9) else round(q_bbo["bid"], spec["dec"])
                         if cg_p.get("max_bid"):
                             base_bpx = round(min(base_bpx, cg_p["max_bid"]), spec["dec"])
@@ -1666,8 +1690,8 @@ def main():
                     else:
                         active_tr_cnt += 1
 
-                free_tr_cnt = max(0, 37 - (active_tr_cnt + stuck_tr_cnt))
-                tot_tr_cnt = max(37, active_tr_cnt + free_tr_cnt + stuck_tr_cnt)
+                free_tr_cnt = max(0, 55 - (active_tr_cnt + stuck_tr_cnt))
+                tot_tr_cnt = max(55, active_tr_cnt + free_tr_cnt + stuck_tr_cnt)
 
                 payload = {
                     "ts": int(loop_ts * 1000),
@@ -1696,7 +1720,7 @@ def main():
                         "status": (
                             f"PAUSED AT <=$495.00 — ALL TRADING STOPPED UNTIL USER REPLY (Eq ${cached_total_usd:.4f})"
                             if getattr(api, "_paused_495", False)
-                            else f"v7.5 CONCENTRATED SPREAD SNIPER ($0 DEBT) • $495 GUARD (Pool ${cached_leveraged_pool:.0f} • 1h {'+$' if equity_changes.get('1h', 0)>=0 else '-$'}{abs(equity_changes.get('1h', 0)):.4f})"
+                            else f"v7.6 $2K-POOL 1BPS+0.1BPS SNIPER • $495 GUARD (Pool ${cached_leveraged_pool:.0f} • 1h {'+$' if equity_changes.get('1h', 0)>=0 else '-$'}{abs(equity_changes.get('1h', 0)):.4f})"
                         ),
                         "paused": bool(getattr(api, "_paused_495", False)),
                         "pauseReason": (
