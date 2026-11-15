@@ -248,10 +248,9 @@ def auto_compound_borrow(api, force_repay_all=False):
                 elif ml > 1.55 and tot_u < 28.0 and bv_u < 35.0 and tot_net_btc > 0:
                     api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "U", "isIsolated": "FALSE", "amount": "32.00", "type": "BORROW"}, signed=True)
             elif ast_u == "BTC":
-                # Keep 1:1 Cross-Margin BTC short hedge (~0.00038 BTC = ~$25) so micro BTCU + BTCUSD1 maker scalps have ZERO BTC price exposure!
-                btc_px_m = 65000.0
-                target_btc_h = 0.00038 if (not force_repay_all and ml > 1.55 and tot_net_btc > 0) else 0.0
-                if target_btc_h > 0 and bv_u < target_btc_h * 0.70:
+                # Keep 1:1 Cross-Margin BTC short hedge (~0.00050 BTC = ~$32.50) matching micro BTCU + BTCUSD1 inventory so net BTC delta stays ~0.00000!
+                target_btc_h = 0.00050 if (not force_repay_all and ml > 1.55 and tot_net_btc > 0) else 0.0
+                if target_btc_h > 0 and bv_u < target_btc_h * 0.75:
                     brw_btc = round(target_btc_h - bv_u, 5)
                     if brw_btc >= 0.00010:
                         rr_b = api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "BTC", "isIsolated": "FALSE", "amount": f"{brw_btc:.5f}", "type": "BORROW"}, signed=True)
@@ -263,7 +262,7 @@ def auto_compound_borrow(api, force_repay_all=False):
                                 hr_o = api.request("POST", "/sapi/v1/margin/order", {"symbol": "BTCU", "side": "SELL", "type": "LIMIT_MAKER", "quantity": f"{brw_btc:.5f}", "price": f"{spx_h:.2f}"}, signed=True)
                                 if "orderId" in hr_o:
                                     api._btc_hedge_oid = hr_o["orderId"]
-                elif bv_u > target_btc_h + 0.00025 and fv_u >= 0.00010:
+                elif bv_u > target_btc_h + 0.00030 and fv_u >= 0.00010:
                     rep_btc = min(fv_u, bv_u - target_btc_h)
                     if rep_btc >= 0.00005:
                         api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "BTC", "isIsolated": "FALSE", "amount": f"{rep_btc:.5f}", "type": "REPAY"}, signed=True)
@@ -851,6 +850,8 @@ def main():
 
                     for a in cm.get("userAssets", []):
                         fv, lv, bv, nv = float(a["free"]), float(a["locked"]), float(a["borrowed"]), float(a["netAsset"])
+                        iv = float(a.get("interest", 0))
+                        true_nv = fv + lv - bv - iv
                         ast = a["asset"]
                         if ast == "USDT":
                             free_map["CM_USDT"] = fv
@@ -880,9 +881,9 @@ def main():
                             elif ast == "U":
                                 px = bbos.get("UUSDT", {}).get("bid", 1.0003)
                             elif ast in ("BTC", "ETH", "BNB", "SOL"):
-                                # Anchor sub-$0.10 tiny crypto commission dust (<$0.25) to startup price so BTC/ETH moves don't jitter stablecoin net equity!
+                                # Anchor sub-$0.25 tiny crypto commission dust to startup price; value any real BTC/ETH hedge leg at LIVE price!
                                 raw_cpx = bbos.get(ast + "USDT", {}).get("bid", 0.0)
-                                if abs(nv) * raw_cpx < 0.50 and raw_cpx > 0:
+                                if (fv + lv + bv) * raw_cpx < 0.25 and abs(true_nv) * raw_cpx < 0.25 and raw_cpx > 0:
                                     api._dust_px_map = getattr(api, "_dust_px_map", {})
                                     px = api._dust_px_map.setdefault(ast, raw_cpx)
                                 else:
@@ -892,9 +893,9 @@ def main():
                             else:
                                 px = bbos.get(ast + "USDT", {}).get("bid", 0.0)
                             if (fv + lv + bv) * px > 0.01:
-                                total_net += nv * px
+                                total_net += true_nv * px
                                 total_pool += (fv + lv) * px
-                                bals.append({"asset": f"{ast} (5x Cross)", "free": f"{fv:.5f}", "locked": f"{lv:.5f}", "borrowed": f"{bv:.2f}"})
+                                bals.append({"asset": f"{ast} (5x Cross)", "free": f"{fv:.5f}", "locked": f"{lv:.5f}", "borrowed": f"{bv:.5f}" if ast in ("BTC", "ETH") else f"{bv:.2f}"})
 
                     for ia in iso.get("assets", []):
                         sym = ia["symbol"]
@@ -1010,9 +1011,9 @@ def main():
                         cached_leveraged_pool = round(total_pool, 2)
                         cached_balances = bals
 
-                    # Scrub any prior single-tick borrow/repay API lag outliers (< $460 or > $550 or the 00:41 _static_dust_usd=0.0 $497.88 glitch) from eq_series
+                    # Scrub any prior single-tick borrow/repay API lag outliers (including the $499.82-$499.91 BTC-borrow display glitch) from eq_series
                     if 498.10 < cached_total_usd < 540.0 and eq_series:
-                        eq_series = [pt for pt in eq_series if (460.0 < float(pt[1]) < 545.0) and not (1794683450.0 <= float(pt[0]) <= 1794683750.0 and float(pt[1]) < 498.10)]
+                        eq_series = [pt for pt in eq_series if (460.0 < float(pt[1]) < 545.0) and not (1794683450.0 <= float(pt[0]) <= 1794683750.0 and float(pt[1]) < 498.10) and not (float(pt[0]) >= loop_ts - 600.0 and float(pt[1]) > cached_total_usd + 0.25)]
 
                     # TRUE SIGNED WALLET EQUITY & 8-HORIZON DELTAS (No artificial floor/clamp — if equity went in minus over any window, shows exact negative minus!)
                     if cached_total_usd > 85.0:
@@ -1584,7 +1585,9 @@ def main():
                         pmap = getattr(api, "_partial_buy_map", {}).get(sym_p, (0.0, 0.0))
                         lpx = getattr(api, "_last_buy_map", {}).get(sym_p, 0.0)
                         p_flr = max(pmap[0] if (loop_ts - pmap[1] < 60.0) else 0.0, lpx)
-                        min_gain_flr = round(p_flr * 0.00010, spec["dec"]) if (is_crypto_u1 and p_flr > 0) else spec["tick"]
+                        if is_crypto_u1 and p_flr <= 0:
+                            p_flr = q_bbo["bid"]
+                        min_gain_flr = round(p_flr * 0.00005, spec["dec"]) if (is_crypto_u1 and p_flr > 0) else spec["tick"]
                         min_spx = round(max(q_bbo["ask"], (p_flr + max(spec["tick"], min_gain_flr)) if p_flr > 0 else q_bbo["ask"]), spec["dec"])
                         spx = min_spx
                         s_cap = 1
