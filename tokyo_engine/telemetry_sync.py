@@ -1717,6 +1717,105 @@ def main():
                             else:
                                 still_tranches.append(tr)
 
+                    elif tr["state"] == "SHORT_SELL_OPEN":
+                        # S1 Bi-Directional SELL-First (Own-Inventory Short — $0 Margin Debt!): Sells existing stablecoin @ Ask when Ask wall is heavy, then buys back @ Bid (-1 tick)!
+                        o_live = live_oid_map.get(tr["sell_oid"])
+                        b_key_s = "CM_U" if sym == "UUSDT" else ("CM_USD1" if sym in ("USD1USDT", "USD1USDC") else ("CM_USDC" if sym == "USDCUSDT" else "CM_FDUSD"))
+                        f_key_s = "CM_USDC" if sym == "USD1USDC" else "CM_USDT"
+                        if o_live is not None:
+                            imb_s = q_bbo["bidQty"] / max(0.0001, q_bbo["askQty"])
+                            # Pre-Fill Shield: if Ask wall weakens (bidQty > 1.40x askQty) or Ask moved down > 0.5 tick, cancel & recycle!
+                            if float(o_live.get("executedQty", 0)) == 0 and (imb_s > 1.40 or q_bbo["ask"] < tr["sell_px"] - spec["tick"] * 0.5 or getattr(api, "_s1_cb_tripped", False)):
+                                cr = api.request("DELETE", "/sapi/v1/margin/order", {"symbol": sym, "orderId": tr["sell_oid"]}, signed=True)
+                                exec_s = float(cr.get("executedQty", 0))
+                                if exec_s > 0:
+                                    free_map[f_key_s] += exec_s * tr["sell_px"]
+                                if cr.get("status") == "CANCELED":
+                                    free_map[b_key_s] += max(0.0, tr["qty"] - exec_s)
+                                elif cr.get("code") != -2011 and exec_s > 0:
+                                    still_tranches.append(tr)
+                            else:
+                                still_tranches.append(tr)
+                        else:
+                            # SELL-First filled @ Ask -> immediately post maker BUY-back @ min(sell_px - tick, live Bid) to lock +1 tick profit on coin drop!
+                            bpx_cov = round(min(tr["sell_px"] - spec["tick"], q_bbo["bid"]), spec["dec"])
+                            q_str_c = spec["q_fmt"].format(tr["qty"])
+                            br_c = api.request("POST", "/sapi/v1/margin/order", {
+                                "symbol": sym, "side": "BUY", "type": "LIMIT_MAKER",
+                                "quantity": q_str_c, "price": f"{bpx_cov:.{spec['dec']}f}"
+                            }, signed=True)
+                            if "orderId" not in br_c and "immediately match" in str(br_c.get("msg", "")):
+                                bpx_cov = round(bpx_cov - spec["tick"], spec["dec"])
+                                br_c = api.request("POST", "/sapi/v1/margin/order", {
+                                    "symbol": sym, "side": "BUY", "type": "LIMIT_MAKER",
+                                    "quantity": q_str_c, "price": f"{bpx_cov:.{spec['dec']}f}"
+                                }, signed=True)
+                            if "orderId" in br_c:
+                                tr["buy_oid"] = br_c["orderId"]
+                                tr["buy_px"] = bpx_cov
+                                tr["state"] = "SHORT_BUY_OPEN"
+                                tr["ts"] = loop_ts
+                                daily_orders_placed += 1
+                                still_tranches.append(tr)
+                            else:
+                                free_map[f_key_s] += tr["qty"] * tr["sell_px"]
+
+                    elif tr["state"] == "SHORT_BUY_OPEN":
+                        o_live = live_oid_map.get(tr["buy_oid"])
+                        b_key_s = "CM_U" if sym == "UUSDT" else ("CM_USD1" if sym in ("USD1USDT", "USD1USDC") else ("CM_USDC" if sym == "USDCUSDT" else "CM_FDUSD"))
+                        f_key_s = "CM_USDC" if sym == "USD1USDC" else "CM_USDT"
+                        if o_live is not None:
+                            age_sb = loop_ts - tr["ts"]
+                            max_cov_b = round(tr["sell_px"] - spec["tick"], spec["dec"])
+                            if float(o_live.get("executedQty", 0)) == 0 and age_sb >= 0.8 and q_bbo["bid"] > tr["buy_px"] + spec["tick"] * 0.5 and min(max_cov_b, q_bbo["bid"]) > tr["buy_px"] + spec["tick"] * 0.5:
+                                cr = api.request("DELETE", "/sapi/v1/margin/order", {"symbol": sym, "orderId": tr["buy_oid"]}, signed=True)
+                                if cr.get("status") == "CANCELED":
+                                    rem_q_c = round(math.floor((tr["qty"] - float(cr.get("executedQty", 0))) / spec["step"] + 1e-9) * spec["step"], 6)
+                                    if rem_q_c * q_bbo["bid"] >= 5.2:
+                                        nb_px = round(min(max_cov_b, q_bbo["bid"]), spec["dec"])
+                                        br_n = api.request("POST", "/sapi/v1/margin/order", {
+                                            "symbol": sym, "side": "BUY", "type": "LIMIT_MAKER",
+                                            "quantity": spec["q_fmt"].format(rem_q_c), "price": f"{nb_px:.{spec['dec']}f}"
+                                        }, signed=True)
+                                        if "orderId" in br_n:
+                                            tr["buy_oid"] = br_n["orderId"]
+                                            tr["buy_px"] = nb_px
+                                            tr["qty"] = rem_q_c
+                                            tr["ts"] = loop_ts
+                                            daily_orders_placed += 1
+                                            still_tranches.append(tr)
+                                elif cr.get("code") != -2011:
+                                    still_tranches.append(tr)
+                            else:
+                                still_tranches.append(tr)
+                        else:
+                            # SHORT_BUY_OPEN filled @ Bid -> completed SELL-First -> BUY-Back round-trip!
+                            pnl_v = tr["qty"] * max(spec["tick"], tr["sell_px"] - tr["buy_px"])
+                            unstick_vault_usd += pnl_v
+                            session_live_pnl += pnl_v
+                            session_live_fills += 2
+                            api._s1_short_realized = getattr(api, "_s1_short_realized", 0.0) + pnl_v
+                            api._s1_short_rts = getattr(api, "_s1_short_rts", 0) + 1
+                            rt_wins = getattr(api, "_rt_wins", [])
+                            rt_wins.append((loop_ts, pnl_v))
+                            api._rt_wins = [(t_w, p_w) for t_w, p_w in rt_wins if loop_ts - t_w <= 3600.0]
+                            w_15m = sum(p_w for t_w, p_w in api._rt_wins if loop_ts - t_w <= 900.0) * 4.0
+                            w_1h = sum(p_w for t_w, p_w in api._rt_wins)
+                            live_hourly_rate_usd = round(max(w_1h, w_15m), 4)
+                            live_daily_rate_usd = round(live_hourly_rate_usd * 24.0, 4)
+                            realized_today_usd = round(realized_today_usd + pnl_v, 4)
+                            today_fills_count += 2
+                            free_map[b_key_s] += tr["qty"]
+                            round_trips.insert(0, {
+                                "time": int(loop_ts * 1000),
+                                "symbol": f"{sym} (S1-SHORT)",
+                                "type": "COMPLETED",
+                                "route": f"[{tr['tid']} • S1 BI-DIR SHORT] SELL {spec['q_fmt'].format(tr['qty'])} @ ${tr['sell_px']:.{spec['dec']}f} -> BUY @ ${tr['buy_px']:.{spec['dec']}f}",
+                                "id": f"#{tr['sell_oid']}->{tr['buy_oid']}",
+                                "pnl": pnl_v,
+                                "eqAfter": cached_total_usd,
+                            })
+
                 # 300s (5-MINUTE) INDIVIDUAL UNDERWATER TIMER + STRICT 5-PER-LEVEL LADDER:
                 stuck_sells = []
                 active_bbo_cnt = sum(
@@ -1948,7 +2047,34 @@ def main():
                             free_map["CM_USDC"] = max(0.0, free_map["CM_USDC"] - uc_s_mkr)
                             api._uc_seed_oid = ("SELL", s_res["orderId"], loop_ts, uc_ask_now)
 
-                # 4B. v8.3 PURE STABLECOIN $0-DEBT SNIPER (BTC Permanently Stopped • 5-Pair 0%-Fee Stablecoin Compounder + Live Stablecoin Shadow Arena!)
+                # 4B. v8.5 LIVE S1 BI-DIRECTIONAL STABLECOIN SNIPER ($0-Debt Own-Inventory BUY-Long + SELL-Short • Hard -$0.02 Circuit Breaker!)
+                s1_short_list = [t for t in active_tranches if t["state"] in ("SHORT_SELL_OPEN", "SHORT_BUY_OPEN")]
+                s1_short_mtm = 0.0
+                s1_trig_45s = False
+                for t_s in s1_short_list:
+                    if t_s["state"] == "SHORT_BUY_OPEN":
+                        ask_s_now = float(bbos.get(t_s["symbol"], {}).get("ask", 0.0))
+                        if ask_s_now > 0:
+                            s1_short_mtm += (t_s["sell_px"] - ask_s_now) * t_s["qty"]
+                        if (loop_ts - t_s.get("ts", loop_ts)) >= 45.0:
+                            s1_trig_45s = True
+                s1_short_real = float(getattr(api, "_s1_short_realized", 0.0))
+                s1_short_net = round(s1_short_real + s1_short_mtm, 4)
+                if (s1_short_net <= -0.0200 or s1_trig_45s) and not getattr(api, "_s1_cb_tripped", False):
+                    api._s1_cb_tripped = True
+                    api._s1_cb_reason = "S1 MTM+Realized <= -$0.02" if s1_short_net <= -0.0200 else "S1 SHORT_BUY > 45s"
+                    for t_s in list(s1_short_list):
+                        oid_s = t_s["sell_oid"] if t_s["state"] == "SHORT_SELL_OPEN" else t_s["buy_oid"]
+                        b_k_s = "CM_U" if t_s["symbol"] == "UUSDT" else ("CM_USD1" if t_s["symbol"] in ("USD1USDT", "USD1USDC") else ("CM_USDC" if t_s["symbol"] == "USDCUSDT" else "CM_FDUSD"))
+                        f_k_s = "CM_USDC" if t_s["symbol"] == "USD1USDC" else "CM_USDT"
+                        if oid_s:
+                            cr_s = api.request("DELETE", "/sapi/v1/margin/order", {"symbol": t_s["symbol"], "orderId": oid_s}, signed=True)
+                            if t_s["state"] == "SHORT_SELL_OPEN" and cr_s.get("status") == "CANCELED":
+                                free_map[b_k_s] += max(0.0, t_s["qty"] - float(cr_s.get("executedQty", 0)))
+                            elif t_s["state"] == "SHORT_BUY_OPEN" and cr_s.get("status") == "CANCELED":
+                                free_map[f_k_s] += max(0.0, t_s["qty"] - float(cr_s.get("executedQty", 0))) * t_s["buy_px"]
+                        active_tranches.remove(t_s)
+
                 cons_guards = compute_conservative_guard(api, bbos)
                 allow_buys = (not soft_delev)
                 for sym_p, is_iso, f_key, b_key, max_tr, max_buy, t_size, max_sell_cap, lbl_p in (
@@ -1965,6 +2091,34 @@ def main():
                     iso_param = {"isIsolated": "TRUE"} if is_iso else {}
                     p_tr = [t for t in active_tranches if t["symbol"] == sym_p and t["iso"] == is_iso]
                     is_crypto_u1 = sym_p in ("BTCU", "BTCUSD1", "BNBU", "ETHU", "BNBFDUSD", "SOLFDUSD")
+
+                    # S1 Bi-Directional SELL-First Entry ($0-Debt Own-Inventory Short): When Ask wall is heavy (bidQty < 0.70x askQty), post SHORT_SELL_OPEN @ live Ask so coin drops immediately lock +1 tick profit on BUY-back!
+                    s1_shorts_sym = [t for t in p_tr if t["state"] in ("SHORT_SELL_OPEN", "SHORT_BUY_OPEN")]
+                    imb_p = q_bbo["bidQty"] / max(0.0001, q_bbo["askQty"])
+                    while allow_buys and (not getattr(api, "_s1_cb_tripped", False)) and imb_p < 0.70 and len(s1_shorts_sym) < 2 and len(s1_short_list) < 4 and free_map[b_key] * q_bbo["ask"] >= 14.2:
+                        sq_sh = round(math.floor(min(t_size, free_map[b_key]) / spec["step"] + 1e-9) * spec["step"], 6)
+                        if sq_sh * q_bbo["ask"] < 6.0:
+                            break
+                        spx_sh = round(q_bbo["ask"], spec["dec"])
+                        bpx_sh = round(spx_sh - spec["tick"], spec["dec"])
+                        sr_sh = api.request("POST", "/sapi/v1/margin/order", {
+                            "symbol": sym_p, "side": "SELL", "type": "LIMIT_MAKER",
+                            "quantity": spec["q_fmt"].format(sq_sh), "price": f"{spx_sh:.{spec['dec']}f}"
+                        }, signed=True)
+                        if "orderId" in sr_sh:
+                            free_map[b_key] = max(0.0, free_map[b_key] - sq_sh)
+                            daily_orders_placed += 1
+                            nt_sh = {
+                                "tid": f"S1SH{len(s1_short_list)+1}", "symbol": sym_p, "iso": False, "lbl": "S1 BI-DIR SHORT $14",
+                                "qty": sq_sh, "buy_px": bpx_sh, "sell_px": spx_sh, "buy_oid": None, "sell_oid": sr_sh["orderId"],
+                                "state": "SHORT_SELL_OPEN", "ts": loop_ts
+                            }
+                            active_tranches.append(nt_sh)
+                            p_tr.append(nt_sh)
+                            s1_shorts_sym.append(nt_sh)
+                            s1_short_list.append(nt_sh)
+                        else:
+                            break
 
                     # Immediately post maker SELL for any free non-hedged base inventory (keep at least 5 tranche slots free for live BUY flips!)
                     while sym_p not in ("USD1USDC", "FDUSDUSDC", "USD1U") and free_map[b_key] * q_bbo["ask"] >= 5.6 and len(p_tr) < (max_tr if is_crypto_u1 else max(1, max_tr - 5)):
@@ -2153,6 +2307,8 @@ def main():
 
                 btcu_net_val = btcu_net_pnl if "btcu_net_pnl" in locals() else 0.0
                 btcu_pilot_str = ("CB TRIPPED: " + getattr(api, "_btcu_cb_reason", "")) if getattr(api, "_btcu_cb_tripped", False) else f"ACTIVE • Net ${btcu_net_val:+.4f}"
+                s1_net_v = s1_short_net if "s1_short_net" in locals() else 0.0
+                s1_st_lbl = ("S1 CB TRIPPED: " + getattr(api, "_s1_cb_reason", "")) if getattr(api, "_s1_cb_tripped", False) else f"S1 BI-DIR ACTIVE • Net ${s1_net_v:+.4f} ({int(getattr(api, '_s1_short_rts', 0))} RTs)"
                 payload = {
                     "ts": int(loop_ts * 1000),
                     "startEquityUsd": start_equity_usd,
@@ -2183,11 +2339,20 @@ def main():
                             else (
                                 f"PAUSED AT <=$495.00 — ALL TRADING STOPPED UNTIL USER REPLY (Eq ${cached_total_usd:.4f})"
                                 if getattr(api, "_paused_495", False)
-                                else f"v8.3 PURE STABLECOIN $0-DEBT SNIPER (BTC STOPPED • 5-Pair 0%-Fee Compounder) • 1h {'+$' if equity_changes.get('1h', 0)>=0 else '-$'}{abs(equity_changes.get('1h', 0)):.4f}"
+                                else f"v8.5 LIVE #1 S1 BI-DIRECTIONAL STABLECOIN SNIPER ({s1_st_lbl}) • 1h {'+$' if equity_changes.get('1h', 0)>=0 else '-$'}{abs(equity_changes.get('1h', 0)):.4f}"
                             )
                         ),
                         "paused": bool(getattr(api, "_paused_495", False) or getattr(api, "_user_paused", False)),
                         "userPaused": bool(getattr(api, "_user_paused", False)),
+                        "s1BiDirPilot": {
+                            "active": not bool(getattr(api, "_s1_cb_tripped", False)),
+                            "cbTripped": bool(getattr(api, "_s1_cb_tripped", False)),
+                            "cbReason": getattr(api, "_s1_cb_reason", ""),
+                            "realizedUsd": round(float(getattr(api, "_s1_short_realized", 0.0)), 4),
+                            "netUsd": s1_net_v,
+                            "rts": int(getattr(api, "_s1_short_rts", 0)),
+                            "openShortLegs": len([t for t in active_tranches if t["state"] in ("SHORT_SELL_OPEN", "SHORT_BUY_OPEN")]),
+                        },
                         "btcuMicroPilot": {
                             "active": not bool(getattr(api, "_btcu_cb_tripped", False)),
                             "cbTripped": bool(getattr(api, "_btcu_cb_tripped", False)),
