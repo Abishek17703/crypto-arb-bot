@@ -2443,15 +2443,14 @@ def main():
                                 # ZERO NEGATIVE SELLS EVER on 100% Stablecoins (USD1USDT / FDUSDUSDT / USDCUSDT): Never scratch at a loss; hold maker SELL at >= buy_px + 1 tick!
                                 pass
                     elif t_s["state"] == "BUY_OPEN":
-                        # Preserve #1 FIFO queue priority at Bid! Only cancel BUY if Bid moved away from our resting price or Bid wall collapsed (<0.60x)!
+                        # True Max-Volume FIFO Hold: NEVER cancel our #1 FIFO queue spot just because BidQty shrank! Only cancel if Bid moved UP away from our resting price (so we step up to the new top Bid)!
                         q_b_now = bbos.get(sym_ts, {})
                         bid_now_b = float(q_b_now.get("bid", 0.0))
-                        min_hold_wall = 1.05 if sym_ts == "FDUSDUSDT" else 0.55
                         disloc_gone = (
-                            float(q_b_now.get("bidQty", 0)) < float(q_b_now.get("askQty", 999999)) * min_hold_wall
-                            or (bid_now_b > 0 and abs(bid_now_b - t_s["buy_px"]) >= PAIRS[sym_ts]["tick"] * 0.5)
+                            (sym_ts == "FDUSDUSDT" and float(q_b_now.get("bidQty", 0)) < float(q_b_now.get("askQty", 999999)) * 0.90)
+                            or (bid_now_b > t_s["buy_px"] + PAIRS[sym_ts]["tick"] * 0.5)
                         )
-                        if (loop_ts - float(t_s.get("ts", loop_ts))) >= 90.0 or disloc_gone:
+                        if (loop_ts - float(t_s.get("ts", loop_ts))) >= 180.0 or disloc_gone:
                             cr_b_sc = api.request("DELETE", "/sapi/v1/margin/order", {"symbol": sym_ts, "orderId": t_s["buy_oid"]}, signed=True)
                             if cr_b_sc.get("status") == "CANCELED":
                                 free_map[q_key_ts] += max(0.0, t_s["qty"] - float(cr_b_sc.get("executedQty", 0))) * t_s["buy_px"]
@@ -2518,13 +2517,11 @@ def main():
                                 and q_bbo["askQty"] < 35000.0
                             )
                         else:
-                            # USD1USDT (694 flips/hr, 32K Bid / 8K Ask): Max-Volume mode enters whenever Bid >= 0.70x Ask so $100 stays continuously compounding!
+                            # USD1USDT (694 flips/hr): True Max-Volume mode keeps $100 posted at the Bid 100% of the time so we catch every single seller!
                             impulse_ok = (
                                 rem_100_budget >= 25.0
                                 and free_map[f_key] >= 95.0
                                 and not cons_guards.get(sym_p, {}).get("falling", False)
-                                and q_bbo["bidQty"] >= q_bbo["askQty"] * 0.70
-                                and q_bbo["askQty"] < 140000.0
                             )
                         bpx_entry = round(q_bbo["bid"], spec["dec"])
                         spx_target = round(bpx_entry + spec["tick"] * (1 if sym_p == "FDUSDUSDT" else (2 if q_bbo["askQty"] < 7000.0 else 1)), spec["dec"])
