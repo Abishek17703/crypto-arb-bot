@@ -1795,7 +1795,7 @@ def main():
                                 free_map["CM_U"] += max(0.0, t_b["qty"] - float(cr_b.get("executedQty", 0))) * t_b["buy_px"]
                         active_tranches.remove(t_b)
 
-                # If BTCU circuit breaker tripped, drain any residual free CM_BTC via 0%-fee LIMIT_MAKER at live Ask!
+                # If BTCU circuit breaker tripped OR CM_BTC > 0.00030 ($20 cap), drain any excess free CM_BTC via 0%-fee LIMIT_MAKER at live Ask!
                 btc_drain_ord = getattr(api, "_btc_drain_oid", None)
                 if btc_drain_ord is not None:
                     if not any(o.get("orderId") == btc_drain_ord[0] for o in cached_open_orders):
@@ -1803,13 +1803,15 @@ def main():
                     elif "BTCU" in bbos and (bbos["BTCU"]["ask"] < btc_drain_ord[1] - 0.05 or loop_ts - btc_drain_ord[2] > 2.5):
                         api.request("DELETE", "/sapi/v1/margin/order", {"symbol": "BTCU", "orderId": btc_drain_ord[0]}, signed=True)
                         api._btc_drain_oid = None
-                elif getattr(api, "_btcu_cb_tripped", False) and "BTCU" in bbos and free_map["CM_BTC"] * bbos["BTCU"]["ask"] >= 5.2:
-                    sq_btc = math.floor(free_map["CM_BTC"] * 100000.0) / 100000.0
-                    spx_btc = bbos["BTCU"]["ask"]
-                    sr_btc = api.request("POST", "/sapi/v1/margin/order", {"symbol": "BTCU", "side": "SELL", "type": "LIMIT_MAKER", "quantity": f"{sq_btc:.5f}", "price": f"{spx_btc:.2f}"}, signed=True)
-                    if "orderId" in sr_btc:
-                        free_map["CM_BTC"] = 0.0
-                        api._btc_drain_oid = (sr_btc["orderId"], spx_btc, loop_ts)
+                elif "BTCU" in bbos and (getattr(api, "_btcu_cb_tripped", False) or free_map["CM_BTC"] >= 0.00031) and free_map["CM_BTC"] * bbos["BTCU"]["ask"] >= 5.2:
+                    excess_b = free_map["CM_BTC"] if getattr(api, "_btcu_cb_tripped", False) else max(0.0, free_map["CM_BTC"] - 0.00015)
+                    sq_btc = math.floor(excess_b * 100000.0) / 100000.0
+                    if sq_btc * bbos["BTCU"]["ask"] >= 5.2:
+                        spx_btc = bbos["BTCU"]["ask"]
+                        sr_btc = api.request("POST", "/sapi/v1/margin/order", {"symbol": "BTCU", "side": "SELL", "type": "LIMIT_MAKER", "quantity": f"{sq_btc:.5f}", "price": f"{spx_btc:.2f}"}, signed=True)
+                        if "orderId" in sr_btc:
+                            free_map["CM_BTC"] = max(0.0, free_map["CM_BTC"] - sq_btc)
+                            api._btc_drain_oid = (sr_btc["orderId"], spx_btc, loop_ts)
 
                 # Keep at least 22 U available for the $20 (2x $10) BTCU Micro-Pilot; drain excess U only above 76 U!
                 u_drain_ord = getattr(api, "_u_drain_oid", None)
@@ -1899,7 +1901,7 @@ def main():
                     is_crypto_u1 = sym_p in ("BTCU", "BTCUSD1", "BNBU", "ETHU", "BNBFDUSD", "SOLFDUSD")
 
                     # Immediately post maker SELL for any free non-hedged base inventory (keep at least 5 tranche slots free for live BUY flips!)
-                    while sym_p not in ("USD1USDC", "FDUSDUSDC", "USD1U") and free_map[b_key] * q_bbo["ask"] >= 5.6 and len(p_tr) < max(1, max_tr - 5):
+                    while sym_p not in ("USD1USDC", "FDUSDUSDC", "USD1U") and free_map[b_key] * q_bbo["ask"] >= 5.6 and len(p_tr) < (max_tr if is_crypto_u1 else max(1, max_tr - 5)):
                         if (sym_p == "USD1USDT" and cm_u1_debt >= 1.0) or (sym_p == "USDCUSDT" and cm_uc_debt >= 1.0):
                             break
                         max_base_s = free_map[b_key]
@@ -1915,7 +1917,7 @@ def main():
                         p_flr = max(pmap[0] if (loop_ts - pmap[1] < 60.0) else 0.0, lpx)
                         if is_crypto_u1 and p_flr <= 0:
                             p_flr = q_bbo["bid"]
-                        min_gain_flr = round(p_flr * 0.00005, spec["dec"]) if (is_crypto_u1 and p_flr > 0) else spec["tick"]
+                        min_gain_flr = 2.50 if (sym_p in ("BTCU", "BTCUSD1") and p_flr > 0) else (round(p_flr * 0.00005, spec["dec"]) if (is_crypto_u1 and p_flr > 0) else spec["tick"])
                         min_spx = round(max(q_bbo["ask"], (p_flr + max(spec["tick"], min_gain_flr)) if p_flr > 0 else q_bbo["ask"]), spec["dec"])
                         spx = min_spx
                         s_cap = 1
@@ -1950,7 +1952,7 @@ def main():
 
                     # Dip-to-Profit Sniper Grid ($12/tick): Top tick posts ONLY when BidWall >= 85% of AskWall; when BidWall weakens, sits at Bid-1 to catch dip wicks for instant +1/+2 tick bounce profit!
                     p_buying = [t for t in p_tr if t["state"] == "BUY_OPEN"]
-                    p_selling_qty = sum(t["qty"] for t in p_tr if t["state"] == "SELL_OPEN")
+                    p_selling_qty = sum(t["qty"] for t in p_tr if t["state"] == "SELL_OPEN") + (free_map[b_key] if is_crypto_u1 else 0.0)
                     near_ask_sells = sum(1 for t in p_tr if t["state"] == "SELL_OPEN" and abs(t["sell_px"] - q_bbo["ask"]) <= spec["tick"] * 1.5)
                     cg_p = cons_guards.get(sym_p, {})
                     bid_wall_ok = not (cg_p.get("falling", False) and q_bbo["bidQty"] < q_bbo["askQty"] * 0.45)
