@@ -2250,29 +2250,32 @@ def main():
                         free_map["CM_U"] = max(0.0, free_map["CM_U"] - rep_u_fast)
                         cm_u_debt = max(0.0, cm_u_debt - rep_u_fast)
 
-                # v9.9 1:100 SUB-SECOND DISLOCATION SNIPER: Only drain non-pilot orphan BTC above 0.00010 BTC when no active BTCU pilot tranche is open!
-                api._btcu_cb_tripped = bool(getattr(api, "_s1_cb_tripped", False))
-                api._btcu_cb_reason = getattr(api, "_s1_cb_reason", "v9.9 1:100 Sub-Second Dislocation Sniper Active")
+                # 100% ZERO-CRYPTO-DRAWDOWN LOCK: Drain any open BTC immediately at live Ask (0% maker fee) and lock $100 Micro-Test strictly to 100% Stablecoins ($50 USD1USDT + $50 USDCUSDT)!
+                api._btcu_cb_tripped = True
+                api._btcu_cb_reason = "STOPPED (Zero Crypto Drawdown Lock)"
                 btcu_net_pnl = float(getattr(api, "_btcu_realized_usd", 0.0))
-                has_btcu_pilot = any(t.get("symbol") == "BTCU" for t in active_tranches)
+                for tx_b in list([t for t in active_tranches if t.get("symbol") == "BTCU"]):
+                    oid_b = tx_b.get("sell_oid") or tx_b.get("buy_oid")
+                    if oid_b and oid_b not in ("INV", "HOLD"):
+                        api.request("DELETE", "/sapi/v1/margin/order", {"symbol": "BTCU", "orderId": oid_b}, signed=True)
+                    active_tranches.remove(tx_b)
                 btc_drain_ord = getattr(api, "_btc_drain_oid", None)
                 if btc_drain_ord is not None:
                     if not any(o.get("orderId") == btc_drain_ord[0] for o in cached_open_orders):
                         api._btc_drain_oid = None
-                    elif "BTCU" in bbos and (bbos["BTCU"]["ask"] < btc_drain_ord[1] - 0.05 or loop_ts - btc_drain_ord[2] > 2.5):
+                    elif "BTCU" in bbos and (bbos["BTCU"]["ask"] < btc_drain_ord[1] - 0.01 or loop_ts - btc_drain_ord[2] > 1.2):
                         api.request("DELETE", "/sapi/v1/margin/order", {"symbol": "BTCU", "orderId": btc_drain_ord[0]}, signed=True)
                         api._btc_drain_oid = None
-                elif (not has_btcu_pilot) and "BTCU" in bbos and free_map["CM_BTC"] * bbos["BTCU"]["ask"] >= 5.2:
+                elif "BTCU" in bbos and free_map["CM_BTC"] * bbos["BTCU"]["ask"] >= 5.2:
                     sq_btc = math.floor(free_map["CM_BTC"] * 100000.0) / 100000.0
                     if sq_btc * bbos["BTCU"]["ask"] >= 5.2:
-                        spx_btc = bbos["BTCU"]["ask"]
+                        spx_btc = round(max(bbos["BTCU"]["bid"] + 0.01, bbos["BTCU"]["ask"] - 0.01), 2)
                         sr_btc = api.request("POST", "/sapi/v1/margin/order", {"symbol": "BTCU", "side": "SELL", "type": "LIMIT_MAKER", "quantity": f"{sq_btc:.5f}", "price": f"{spx_btc:.2f}"}, signed=True)
                         if "orderId" in sr_btc:
                             free_map["CM_BTC"] = 0.0
                             api._btc_drain_oid = (sr_btc["orderId"], spx_btc, loop_ts)
 
-                # Maintain $40 U bridge (0 debt) ONLY for BTCU $100 Micro-Test (40 U + 30 USD1 + 30 USDC = $100 Test Pool, $399 USDT untouched reserve)!
-                tot_u_held = sum(float(b.get("free", 0)) + float(b.get("locked", 0)) for b in cached_balances if "U (5x Cross)" in b.get("asset", ""))
+                # Drain 100% of U back to USDT at 0% maker fee (no U bridge needed for pure USD1USDT + USDCUSDT $100 Micro-Test)!
                 u_drain_ord = getattr(api, "_u_drain_oid", None)
                 if u_drain_ord is not None:
                     if not any(o.get("orderId") == u_drain_ord[0] for o in cached_open_orders):
@@ -2280,22 +2283,14 @@ def main():
                     elif "UUSDT" in bbos and (bbos["UUSDT"]["ask"] < u_drain_ord[1] - 0.00005 or loop_ts - u_drain_ord[2] > 5.0):
                         api.request("DELETE", "/sapi/v1/margin/order", {"symbol": "UUSDT", "orderId": u_drain_ord[0]}, signed=True)
                         api._u_drain_oid = None
-                elif cm_u_debt < 1.0 and "UUSDT" in bbos and free_map["CM_U"] >= 48.0:
-                    sq_u_d = math.floor(free_map["CM_U"] - 42.0)
+                elif cm_u_debt < 1.0 and "UUSDT" in bbos and free_map["CM_U"] >= 6.0:
+                    sq_u_d = math.floor(free_map["CM_U"])
                     if sq_u_d >= 6:
                         spx_u_d = max(1.0001, bbos["UUSDT"]["ask"])
                         sr_u_d = api.request("POST", "/sapi/v1/margin/order", {"symbol": "UUSDT", "side": "SELL", "type": "LIMIT_MAKER", "quantity": str(sq_u_d), "price": f"{spx_u_d:.4f}"}, signed=True)
                         if "orderId" in sr_u_d:
                             free_map["CM_U"] = max(0.0, free_map["CM_U"] - sq_u_d)
                             api._u_drain_oid = (sr_u_d["orderId"], spx_u_d, loop_ts)
-                elif (not getattr(api, "_s1_cb_tripped", False)) and cm_u_debt < 1.0 and "UUSDT" in bbos and max(free_map["CM_U"], tot_u_held) < 38.0 and (loop_ts - getattr(api, "_last_u_seed_ts", 0.0)) >= 15.0 and free_map["CM_USDT"] >= 95.0 and not any(t.get("symbol") in ("BTCU", "ETHU") for t in active_tranches):
-                    api._last_u_seed_ts = loop_ts
-                    need_u = max(6, math.ceil(41.0 - max(free_map["CM_U"], tot_u_held)))
-                    u_bpx = bbos["UUSDT"]["bid"]
-                    br_u_seed = api.request("POST", "/sapi/v1/margin/order", {"symbol": "UUSDT", "side": "BUY", "type": "LIMIT_MAKER", "quantity": str(need_u), "price": f"{u_bpx:.4f}"}, signed=True)
-                    if "orderId" in br_u_seed:
-                        free_map["CM_USDT"] -= need_u * u_bpx
-                        api._u_drain_oid = (br_u_seed["orderId"], u_bpx, loop_ts)
 
                 # Cancel any UUSDT SELL order that trapped CM_U needed for ETHU Delta-Neutral Pilot (< 54 U available)!
                 for tx_uu in list([t for t in active_tranches if t["symbol"] == "UUSDT" and t["state"] == "SELL_OPEN"]):
@@ -2421,7 +2416,7 @@ def main():
                                                 t_s["sell_oid"] = sr_sc["orderId"]
                                                 t_s["sell_px"] = target_mkr_px
                                                 t_s["ts"] = loop_ts
-                            elif leg_mtm <= -0.00030 or (age_s_open >= 2.0 and ask_s_now <= t_s["buy_px"] + spec_s["tick"] * 0.5):
+                            elif leg_mtm <= -0.00050 or (age_s_open >= 2.0 and ask_s_now <= t_s["buy_px"] + spec_s["tick"] * 0.5):
                                 # On 0%-taker-fee USD1USDT / USDCUSDT ($0.00001 tick), step down to breakeven LIMIT_MAKER at buy_px first!
                                 cr_sc = api.request("DELETE", "/sapi/v1/margin/order", {"symbol": sym_ts, "orderId": t_s["sell_oid"]}, signed=True)
                                 if cr_sc.get("status") == "CANCELED":
@@ -2476,8 +2471,8 @@ def main():
                 api._v89_scaled = False
                 fd_bbo_now = bbos.get("FDUSDUSDT", {})
                 fd_thin_ok = bool(fd_bbo_now.get("askQty", 999999.0) < 25000.0 and fd_bbo_now.get("bidQty", 999999.0) < 75000.0)
-                # Hard Session -1 Cent REALIZED Loss Cap: Trip $100 Micro-Test CB if cumulative realized pilot loss ever reaches -$0.0100 (1 cent) or open MTM <= -$0.0200!
-                if (s1_short_real <= -0.0100 or s1_short_net <= -0.0250) and not getattr(api, "_s1_cb_tripped", False):
+                # Hard Session -1 Cent Loss Cap: Trip $100 Micro-Test CB if cumulative net pilot loss ever reaches -$0.0100 (1 cent)!
+                if s1_short_net <= -0.0100 and not getattr(api, "_s1_cb_tripped", False):
                     api._s1_cb_tripped = True
                     api._s1_cb_reason = "Hard -1 Cent Cap (-$0.0100) Hit"
                     for t_s in list([tx for tx in s1_short_list if tx["state"] == "BUY_OPEN"]):
@@ -2490,16 +2485,16 @@ def main():
 
                 cons_guards = compute_conservative_guard(api, bbos)
                 allow_buys = (not soft_delev)
-                main_t_sz = 30.0
+                main_t_sz = 50.0
                 fd_tri_edge_ok = False
                 for sym_p, is_iso, f_key, b_key, max_tr, max_buy, t_size, max_sell_cap, lbl_p in (
-                    ("BTCU",      False, "CM_U",     "CM_BTC",     1 if allow_buys else 0, 0, 40.0, 40.0, "v9.9.6 $100 TEST • BTCU $40"),
+                    ("BTCU",      False, "CM_U",     "CM_BTC",     0,                      0, 40.0,  0.0, "STOPPED"),
                     ("ETHU",      False, "CM_U",     "CM_ETH",     0,                      0, 30.0,  0.0, "STOPPED"),
                     ("FDUSDUSDC", False, "CM_USDC",  "CM_FDUSD",   0,                      0, 20.0,  0.0, "STOPPED"),
                     ("USD1U",     False, "CM_U",     "CM_USD1",    0,                      0, 14.0,  0.0, "STOPPED"),
                     ("FDUSDUSDT", False, "CM_USDT",  "CM_FDUSD",   0,                      0, 20.0,  0.0, "STOPPED"),
-                    ("USDCUSDT",  False, "CM_USDT",  "CM_USDC",    1 if allow_buys else 0, 0, 30.0, 30.0, "v9.9.6 $100 TEST • USDC $30"),
-                    ("USD1USDT",  False, "CM_USDT",  "CM_USD1",    1 if allow_buys else 0, 0, 30.0, 30.0, "v9.9.6 $100 TEST • USD1 $30"),
+                    ("USDCUSDT",  False, "CM_USDT",  "CM_USDC",    1 if allow_buys else 0, 0, 50.0, 50.0, "v9.9.8 $100 ZERO-DD • USDC $50"),
+                    ("USD1USDT",  False, "CM_USDT",  "CM_USD1",    1 if allow_buys else 0, 0, 50.0, 50.0, "v9.9.8 $100 ZERO-DD • USD1 $50"),
                     ("USD1USDC",  False, "CM_USDC",  "CM_USD1",    0,                      0, 14.1,  0.0, "STOPPED"),
                     ("UUSDT",     False, "CM_USDT",  "CM_U",       0,                      0, 14.1,  0.0, "STOPPED"),
                 ):
@@ -2511,33 +2506,19 @@ def main():
                     p_tr = [t for t in active_tranches if t["symbol"] == sym_p and t["iso"] == is_iso]
                     is_crypto_u1 = sym_p in ("BTCU", "BTCUSD1", "BNBU", "ETHU", "BNBFDUSD", "SOLFDUSD")
 
-                    # v9.9.6 $100 Micro-Test Parallel Sniper ($40 BTCU + $30 USD1 + $30 USDC = $100 Total Pool, $399 Idle USDT Reserve):
-                    if sym_p in ("BTCU", "USDCUSDT", "USD1USDT") and allow_buys and (not getattr(api, "_s1_cb_tripped", False)):
+                    # v9.9.8 Zero-Crypto-Drawdown $100 Micro-Test ($50 USD1USDT + $50 USDCUSDT = $100 Total Pool, $399 Idle USDT Reserve):
+                    if sym_p in ("USDCUSDT", "USD1USDT") and allow_buys and (not getattr(api, "_s1_cb_tripped", False)):
                         s1_lg_sym = [t for t in p_tr if t.get("pilot") and t["state"] in ("BUY_OPEN", "SELL_OPEN")]
-                        if sym_p == "BTCU":
-                            btc_ref_bbo = bbos.get("BTCUSDT", {})
-                            # Require BTCUSDT to jump >= +$2.80 (+280 ticks) ABOVE the 60s rolling basis vs BTCU, and post at Bid + $0.30 (#1 FIFO priority)!
-                            impulse_ok = (
-                                free_map["CM_U"] >= 35.0
-                                and btc_fair_u > 0
-                                and btc_true_jump >= 2.80
-                                and (q_bbo["ask"] - q_bbo["bid"]) >= 1.50
-                                and float(btc_ref_bbo.get("bidQty", 0)) >= float(btc_ref_bbo.get("askQty", 999999)) * 1.25
-                                and not cons_guards.get("BTCU", {}).get("falling", False)
-                            )
-                            bpx_entry = round(min(q_bbo["ask"] - 0.50, q_bbo["bid"] + 0.30), spec["dec"])
-                            spx_target = round(max(bpx_entry + 1.50, q_bbo["ask"], (btc_fair_u - btc_ema_basis) - 0.20), spec["dec"])
-                        else:
-                            impulse_ok = (
-                                free_map[f_key] >= 150.0
-                                and not cons_guards.get(sym_p, {}).get("falling", False)
-                                and q_bbo["bidQty"] >= q_bbo["askQty"] * 2.20
-                                and q_bbo["askQty"] < 35000.0
-                            )
-                            bpx_entry = round(q_bbo["bid"], spec["dec"])
-                            spx_target = round(bpx_entry + spec["tick"] * (3 if q_bbo["askQty"] < 3000.0 else (2 if q_bbo["askQty"] < 8000.0 else 1)), spec["dec"])
-                        if len(s1_lg_sym) < 1 and len(s1_short_list) < 3 and impulse_ok:
-                            pl_usd_sz = min(40.0 if sym_p == "BTCU" else 30.0, free_map[f_key] * 0.99)
+                        impulse_ok = (
+                            free_map[f_key] >= 120.0
+                            and not cons_guards.get(sym_p, {}).get("falling", False)
+                            and q_bbo["bidQty"] >= q_bbo["askQty"] * 2.20
+                            and q_bbo["askQty"] < 35000.0
+                        )
+                        bpx_entry = round(q_bbo["bid"], spec["dec"])
+                        spx_target = round(bpx_entry + spec["tick"] * (3 if q_bbo["askQty"] < 3000.0 else (2 if q_bbo["askQty"] < 8000.0 else 1)), spec["dec"])
+                        if len(s1_lg_sym) < 1 and len(s1_short_list) < 2 and impulse_ok:
+                            pl_usd_sz = min(50.0, free_map[f_key] * 0.99)
                             bq_pl = round(math.floor((pl_usd_sz / bpx_entry) / spec["step"] + 1e-9) * spec["step"], 6)
                             if bq_pl * bpx_entry >= 10.0:
                                 bpx_pl = bpx_entry
@@ -2549,8 +2530,8 @@ def main():
                                     free_map[f_key] -= bq_pl * bpx_pl
                                     daily_orders_placed += 1
                                     nt_pl = {
-                                        "tid": f"V992_{sym_p[:4]}", "symbol": sym_p, "iso": False,
-                                        "lbl": f"v9.9.2 $100 TEST • {sym_p[:4]} ${int(pl_usd_sz)}",
+                                        "tid": f"V998_{sym_p[:4]}", "symbol": sym_p, "iso": False,
+                                        "lbl": f"v9.9.8 $100 ZERO-DD • {sym_p[:4]} ${int(pl_usd_sz)}",
                                         "qty": bq_pl, "buy_px": bpx_pl, "sell_px": spx_target, "buy_oid": br_pl["orderId"], "sell_oid": None,
                                         "state": "BUY_OPEN", "ts": loop_ts, "pilot": True, "borrowed": False
                                     }
