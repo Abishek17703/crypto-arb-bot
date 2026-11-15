@@ -654,6 +654,7 @@
         try {
           await fetch(putUrl, {
             method: "PUT",
+            headers: { "Content-Type": "text/plain" },
             body: JSON.stringify({ paused: nextPaused, ts: Date.now() })
           });
         } catch (_) {}

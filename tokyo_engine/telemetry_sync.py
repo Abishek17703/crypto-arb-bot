@@ -1944,7 +1944,9 @@ def main():
                     except Exception:
                         pass
                     try:
-                        _p_url = s3.generate_presigned_url("put_object", Params={"Bucket": S3_BUCKET, "Key": "pause-control.json"}, ExpiresIn=604800)
+                        _p_url = s3.generate_presigned_url("put_object", Params={"Bucket": S3_BUCKET, "Key": "pause-control.json", "ContentType": "text/plain"}, ExpiresIn=604800)
+                        s3.put_object(Bucket=S3_BUCKET, Key="pause-control.json", Body=json.dumps({"paused": False, "ts": int(loop_ts * 1000)}), ContentType="text/plain")
+                        api._user_paused = False
                     except Exception:
                         _p_url = ""
                     api._pause_put_url = _p_url
