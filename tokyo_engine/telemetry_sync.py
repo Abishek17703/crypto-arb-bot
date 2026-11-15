@@ -1450,15 +1450,15 @@ def main():
                             b_ast_x = ia_x["baseAsset"]["asset"]
                             b_px_x = bbos.get(b_ast_x + "USDT", {}).get("bid", 1.0 if b_ast_x in ("USDT", "USDC", "USD1", "U", "FDUSD") else 0.0)
                             spot_net += float(ia_x["baseAsset"]["netAsset"]) * b_px_x + float(ia_x["quoteAsset"]["netAsset"])
-                    # Match Binance UI wallet balance 1:1 (total_net + spot_net, with _static_dust_usd = 0.5065 calibrated to exact Binance UI $499.22):
+                    # Match Binance Asset Overview 1:1 (/sapi/v1/asset/wallet/balance quoteAsset=USDT):
                     wb_r = api.request("GET", "/sapi/v1/asset/wallet/balance", {"quoteAsset": "USDT"}, signed=True)
                     wb_sum = sum(float(w.get("balance", 0)) for w in wb_r if w.get("activate")) if isinstance(wb_r, list) else 0.0
                     tot_cm_debt_now = sum(float(a.get("borrowed", 0)) for a in cm.get("userAssets", []))
-                    if tot_cm_debt_now < 1.0 and wb_sum > 85.0 and total_net > 85.0 and abs(wb_sum - (total_net + spot_net)) < 4.0:
-                        api._static_dust_usd = round(max(0.0, wb_sum - (total_net + spot_net)), 4)
+                    if wb_sum > 450.0 and total_net > 85.0 and abs(wb_sum - (total_net + spot_net)) < 4.0:
+                        api._static_dust_usd = round(wb_sum - (total_net + spot_net), 4)
                     else:
-                        api._static_dust_usd = getattr(api, "_static_dust_usd", 0.5065)
-                    exact_acct_eq = round(total_net + spot_net + api._static_dust_usd, 4)
+                        api._static_dust_usd = getattr(api, "_static_dust_usd", 0.0005)
+                    exact_acct_eq = round(wb_sum if wb_sum > 450.0 else (total_net + spot_net + api._static_dust_usd), 4)
                     prev_valid_eq = getattr(api, "_last_valid_eq", 498.4450)
                     # Use EXACT direct USDT ledger valuation (total_net + spot_net + static_dust) as primary truth so BTC->USDT double-conversion noise in /wallet/balance NEVER causes fake +/-$0.005 drops!
                     if exact_acct_eq > 85.0:
