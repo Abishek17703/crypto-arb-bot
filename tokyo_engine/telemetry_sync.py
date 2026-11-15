@@ -2396,12 +2396,17 @@ def main():
                         if bid_s_now > 0:
                             leg_mtm = (bid_s_now - t_s["buy_px"]) * t_s["qty"]
                             s1_short_mtm += leg_mtm
-                            # ZERO-TAKER-FEE MAKER-ONLY STEP-DOWN (NEVER fire IOC SELL on BTCU where 0.10% taker fee = -$0.04 and $5 spread = -$0.003!):
+                            # ZERO-TAKER-FEE MAKER-ONLY STEP-DOWN (NEVER fire IOC SELL on BTCU where 0.10% taker fee = -$0.04; follow Ask down to Bid+$0.01 so BTCU fills in <1s!):
                             if sym_ts in ("BTCU", "ETHU"):
-                                # Keep 0%-fee LIMIT_MAKER SELL at max(buy_px + $0.50, ask_s_now) so every BTCU exit is 100% 0%-fee maker profit!
-                                min_prof_px = round(t_s["buy_px"] + (0.50 if sym_ts == "BTCU" else 0.20), spec_s["dec"])
-                                target_mkr_px = round(max(min_prof_px, ask_s_now), spec_s["dec"])
-                                if age_s_open >= 0.80 and abs(t_s["sell_px"] - target_mkr_px) >= 0.30 and target_mkr_px < t_s["sell_px"]:
+                                # Within 0.8s target >= buy_px + $0.50; after 0.8s step down to max(buy_px, bid_s_now + 0.01, ask_s_now - 0.10); if fair cushion vanishes or MTM <= -$0.0020, step to bid_s_now + 0.01 (#1 Ask queue)!
+                                if age_s_open < 0.80 and leg_mtm > -0.0015:
+                                    min_prof_px = round(t_s["buy_px"] + (0.50 if sym_ts == "BTCU" else 0.20), spec_s["dec"])
+                                    target_mkr_px = round(max(min_prof_px, ask_s_now), spec_s["dec"])
+                                elif leg_mtm <= -0.0020 or age_s_open >= 2.00:
+                                    target_mkr_px = round(max(bid_s_now + spec_s["tick"], min(ask_s_now, ask_s_now - spec_s["tick"])), spec_s["dec"])
+                                else:
+                                    target_mkr_px = round(max(t_s["buy_px"], bid_s_now + spec_s["tick"], min(ask_s_now, ask_s_now - spec_s["tick"])), spec_s["dec"])
+                                if age_s_open >= 0.45 and abs(t_s["sell_px"] - target_mkr_px) >= 0.05 and target_mkr_px < t_s["sell_px"]:
                                     cr_sc = api.request("DELETE", "/sapi/v1/margin/order", {"symbol": sym_ts, "orderId": t_s["sell_oid"]}, signed=True)
                                     if cr_sc.get("status") == "CANCELED":
                                         rem_sc = round(math.floor((t_s["qty"] - float(cr_sc.get("executedQty", 0))) / spec_s["step"] + 1e-9) * spec_s["step"], 6)
@@ -2445,14 +2450,14 @@ def main():
                                             if t_s in s1_short_list:
                                                 s1_short_list.remove(t_s)
                     elif t_s["state"] == "BUY_OPEN":
-                        # Cancel any unfilled sniper BUY order in <= 0.6s if rolling-basis impulse narrowed (never sit on book!)
+                        # Cancel any unfilled sniper BUY order in <= 1.2s if rolling-basis impulse narrowed (never sit on book!)
                         q_b_now = bbos.get(sym_ts, {})
                         disloc_gone = (
-                            (sym_ts == "BTCU" and btc_true_jump < 1.80)
+                            (sym_ts == "BTCU" and btc_true_jump < 1.20)
                             or (sym_ts == "ETHU" and (eth_fair_u - t_s["buy_px"]) < 0.35)
-                            or (sym_ts in ("USDCUSDT", "USD1USDT") and float(q_b_now.get("bidQty", 0)) < float(q_b_now.get("askQty", 999999)) * 2.00)
+                            or (sym_ts in ("USDCUSDT", "USD1USDT") and float(q_b_now.get("bidQty", 0)) < float(q_b_now.get("askQty", 999999)) * 1.60)
                         )
-                        if (loop_ts - float(t_s.get("ts", loop_ts))) >= 0.65 or disloc_gone:
+                        if (loop_ts - float(t_s.get("ts", loop_ts))) >= 1.20 or disloc_gone:
                             cr_b_sc = api.request("DELETE", "/sapi/v1/margin/order", {"symbol": sym_ts, "orderId": t_s["buy_oid"]}, signed=True)
                             if cr_b_sc.get("status") == "CANCELED":
                                 free_map[q_key_ts] += max(0.0, t_s["qty"] - float(cr_b_sc.get("executedQty", 0))) * t_s["buy_px"]
@@ -2469,8 +2474,8 @@ def main():
                 api._v89_scaled = False
                 fd_bbo_now = bbos.get("FDUSDUSDT", {})
                 fd_thin_ok = bool(fd_bbo_now.get("askQty", 999999.0) < 25000.0 and fd_bbo_now.get("bidQty", 999999.0) < 75000.0)
-                # Hard Session -1 Cent Loss Cap: Trip $100 Micro-Test CB if cumulative net pilot loss ever reaches -$0.0100 (1 cent)!
-                if s1_short_net <= -0.0100 and not getattr(api, "_s1_cb_tripped", False):
+                # Hard Session -1 Cent REALIZED Loss Cap: Trip $100 Micro-Test CB if cumulative realized pilot loss ever reaches -$0.0100 (1 cent) or open MTM <= -$0.0200!
+                if (s1_short_real <= -0.0100 or s1_short_net <= -0.0250) and not getattr(api, "_s1_cb_tripped", False):
                     api._s1_cb_tripped = True
                     api._s1_cb_reason = "Hard -1 Cent Cap (-$0.0100) Hit"
                     for t_s in list([tx for tx in s1_short_list if tx["state"] == "BUY_OPEN"]):
@@ -2486,13 +2491,13 @@ def main():
                 main_t_sz = 30.0
                 fd_tri_edge_ok = False
                 for sym_p, is_iso, f_key, b_key, max_tr, max_buy, t_size, max_sell_cap, lbl_p in (
-                    ("BTCU",      False, "CM_U",     "CM_BTC",     1 if allow_buys else 0, 0, 40.0, 40.0, "v9.9.2 $100 TEST • BTCU $40"),
+                    ("BTCU",      False, "CM_U",     "CM_BTC",     1 if allow_buys else 0, 0, 40.0, 40.0, "v9.9.6 $100 TEST • BTCU $40"),
                     ("ETHU",      False, "CM_U",     "CM_ETH",     0,                      0, 30.0,  0.0, "STOPPED"),
                     ("FDUSDUSDC", False, "CM_USDC",  "CM_FDUSD",   0,                      0, 20.0,  0.0, "STOPPED"),
                     ("USD1U",     False, "CM_U",     "CM_USD1",    0,                      0, 14.0,  0.0, "STOPPED"),
                     ("FDUSDUSDT", False, "CM_USDT",  "CM_FDUSD",   0,                      0, 20.0,  0.0, "STOPPED"),
-                    ("USDCUSDT",  False, "CM_USDT",  "CM_USDC",    1 if allow_buys else 0, 0, 30.0, 30.0, "v9.9.2 $100 TEST • USDC $30"),
-                    ("USD1USDT",  False, "CM_USDT",  "CM_USD1",    1 if allow_buys else 0, 0, 30.0, 30.0, "v9.9.2 $100 TEST • USD1 $30"),
+                    ("USDCUSDT",  False, "CM_USDT",  "CM_USDC",    1 if allow_buys else 0, 0, 30.0, 30.0, "v9.9.6 $100 TEST • USDC $30"),
+                    ("USD1USDT",  False, "CM_USDT",  "CM_USD1",    1 if allow_buys else 0, 0, 30.0, 30.0, "v9.9.6 $100 TEST • USD1 $30"),
                     ("USD1USDC",  False, "CM_USDC",  "CM_USD1",    0,                      0, 14.1,  0.0, "STOPPED"),
                     ("UUSDT",     False, "CM_USDT",  "CM_U",       0,                      0, 14.1,  0.0, "STOPPED"),
                 ):
@@ -2504,34 +2509,36 @@ def main():
                     p_tr = [t for t in active_tranches if t["symbol"] == sym_p and t["iso"] == is_iso]
                     is_crypto_u1 = sym_p in ("BTCU", "BTCUSD1", "BNBU", "ETHU", "BNBFDUSD", "SOLFDUSD")
 
-                    # v9.9.2 $100 Micro-Test Parallel Sniper ($40 BTCU + $30 USD1 + $30 USDC = $100 Total Pool, $399 Idle USDT Reserve):
+                    # v9.9.6 $100 Micro-Test Parallel Sniper ($40 BTCU + $30 USD1 + $30 USDC = $100 Total Pool, $399 Idle USDT Reserve):
                     if sym_p in ("BTCU", "USDCUSDT", "USD1USDT") and allow_buys and (not getattr(api, "_s1_cb_tripped", False)):
                         s1_lg_sym = [t for t in p_tr if t.get("pilot") and t["state"] in ("BUY_OPEN", "SELL_OPEN")]
                         if sym_p == "BTCU":
                             btc_ref_bbo = bbos.get("BTCUSDT", {})
-                            # Require BTCUSDT to jump >= +$3.50 (+350 ticks) ABOVE the 60s rolling basis vs BTCU!
+                            # Require BTCUSDT to jump >= +$2.80 (+280 ticks) ABOVE the 60s rolling basis vs BTCU, and post at Bid + $0.30 (#1 FIFO priority)!
                             impulse_ok = (
                                 free_map["CM_U"] >= 35.0
                                 and btc_fair_u > 0
-                                and btc_true_jump >= 3.50
+                                and btc_true_jump >= 2.80
                                 and (q_bbo["ask"] - q_bbo["bid"]) >= 1.50
-                                and float(btc_ref_bbo.get("bidQty", 0)) >= float(btc_ref_bbo.get("askQty", 999999)) * 1.35
+                                and float(btc_ref_bbo.get("bidQty", 0)) >= float(btc_ref_bbo.get("askQty", 999999)) * 1.25
                                 and not cons_guards.get("BTCU", {}).get("falling", False)
                             )
-                            spx_target = round(max(q_bbo["bid"] + 1.50, q_bbo["ask"], (btc_fair_u - btc_ema_basis) - 0.20), spec["dec"])
+                            bpx_entry = round(min(q_bbo["ask"] - 0.50, q_bbo["bid"] + 0.30), spec["dec"])
+                            spx_target = round(max(bpx_entry + 1.50, q_bbo["ask"], (btc_fair_u - btc_ema_basis) - 0.20), spec["dec"])
                         else:
                             impulse_ok = (
-                                free_map[f_key] >= 220.0
+                                free_map[f_key] >= 150.0
                                 and not cons_guards.get(sym_p, {}).get("falling", False)
-                                and q_bbo["bidQty"] >= q_bbo["askQty"] * 3.00
-                                and q_bbo["askQty"] < 15000.0
+                                and q_bbo["bidQty"] >= q_bbo["askQty"] * 2.20
+                                and q_bbo["askQty"] < 35000.0
                             )
-                            spx_target = round(q_bbo["bid"] + spec["tick"] * (3 if q_bbo["askQty"] < 3000.0 else (2 if q_bbo["askQty"] < 8000.0 else 1)), spec["dec"])
+                            bpx_entry = round(q_bbo["bid"], spec["dec"])
+                            spx_target = round(bpx_entry + spec["tick"] * (3 if q_bbo["askQty"] < 3000.0 else (2 if q_bbo["askQty"] < 8000.0 else 1)), spec["dec"])
                         if len(s1_lg_sym) < 1 and len(s1_short_list) < 3 and impulse_ok:
                             pl_usd_sz = min(40.0 if sym_p == "BTCU" else 30.0, free_map[f_key] * 0.99)
-                            bq_pl = round(math.floor((pl_usd_sz / q_bbo["bid"]) / spec["step"] + 1e-9) * spec["step"], 6)
-                            if bq_pl * q_bbo["bid"] >= 10.0:
-                                bpx_pl = round(q_bbo["bid"], spec["dec"])
+                            bq_pl = round(math.floor((pl_usd_sz / bpx_entry) / spec["step"] + 1e-9) * spec["step"], 6)
+                            if bq_pl * bpx_entry >= 10.0:
+                                bpx_pl = bpx_entry
                                 br_pl = api.request("POST", "/sapi/v1/margin/order", {
                                     "symbol": sym_p, "side": "BUY", "type": "LIMIT_MAKER",
                                     "quantity": spec["q_fmt"].format(bq_pl), "price": f"{bpx_pl:.{spec['dec']}f}"
