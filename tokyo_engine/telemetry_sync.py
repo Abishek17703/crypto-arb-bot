@@ -62,8 +62,8 @@ SHADOW_STATE = {
 def init_shadow_arena():
     now_s = time.time()
     try:
-        if os.path.exists("/tmp/shadow_arena_v84.json"):
-            with open("/tmp/shadow_arena_v84.json") as _sf:
+        if os.path.exists("/tmp/shadow_arena_v85.json"):
+            with open("/tmp/shadow_arena_v85.json") as _sf:
                 saved_s = json.load(_sf)
                 if isinstance(saved_s, dict) and saved_s.get("strategies"):
                     SHADOW_STATE.update(saved_s)
@@ -72,17 +72,14 @@ def init_shadow_arena():
         pass
     SHADOW_STATE["startedTs"] = now_s
     SHADOW_STATE["strategies"] = {
-        "S1_TRI_STABLE_5USD": {
-            "id": "S1_TRI_STABLE_5USD",
-            "name": "S1 • $2K 8-Pair Triangular + 1bps Stablecoin Compounder (USD1USDC+UUSDT+FDUSDUSDT+FDUSDUSDC+USD1U+USD1USDT+USDCUSDT)",
+        "S1_BIDIR_IMBALANCE_2K": {
+            "id": "S1_BIDIR_IMBALANCE_2K",
+            "name": "S1 • $2K Bi-Directional BUY-Long / SELL-Short Imbalance Sniper (USD1USDC+UUSDT+USD1USDT+USDCUSDT)",
             "capital": 2000.0,
+            "mode": "BIDIR",
             "pairs": {
                 "USD1USDC": (10, 120.0, 0.00010),
-                "UUSDT": (10, 120.0, 0.00010),
-                "FDUSDUSDT": (8, 120.0, 0.00010),
-                "FDUSDUSDC": (6, 110.0, 0.00010),
-                "USD1U": (6, 110.0, 0.00010),
-                "UUSDC": (6, 110.0, 0.00010),
+                "UUSDT": (8, 120.0, 0.00010),
                 "USD1USDT": (12, 120.0, 0.00001),
                 "USDCUSDT": (12, 120.0, 0.00001),
             },
@@ -95,15 +92,17 @@ def init_shadow_arena():
             "wins": [],
             "slots": {},
         },
-        "S2_HIGH_YIELD_1BPS_STABLES": {
-            "id": "S2_HIGH_YIELD_1BPS_STABLES",
-            "name": "S2 • $2K Pure 1.0-bps Stablecoin Heavy-Bid Sniper (UUSDT + USD1USDC + FDUSDUSDT + FDUSDUSDC)",
+        "S2_SIMULTANEOUS_DUAL_2K": {
+            "id": "S2_SIMULTANEOUS_DUAL_2K",
+            "name": "S2 • $2K Simultaneous 50/50 Long+Short Dual-Sided Stablecoin Grid (Zero Directional MTM Drift)",
             "capital": 2000.0,
+            "mode": "DUAL_50_50",
             "pairs": {
-                "UUSDT": (12, 140.0, 0.00010),
-                "USD1USDC": (12, 140.0, 0.00010),
-                "FDUSDUSDT": (10, 140.0, 0.00010),
-                "FDUSDUSDC": (8, 120.0, 0.00010),
+                "USD1USDC": (10, 120.0, 0.00010),
+                "UUSDT": (8, 120.0, 0.00010),
+                "FDUSDUSDT": (6, 110.0, 0.00010),
+                "USD1USDT": (12, 120.0, 0.00001),
+                "USDCUSDT": (12, 120.0, 0.00001),
             },
             "realizedUsd": 0.0,
             "mtmUsd": 0.0,
@@ -114,15 +113,16 @@ def init_shadow_arena():
             "wins": [],
             "slots": {},
         },
-        "S3_BALANCED_4PAIR_STABLES": {
-            "id": "S3_BALANCED_4PAIR_STABLES",
-            "name": "S3 • $2K Conservative 4-Pair $0-Debt Stablecoin Sniper (UUSDT + USD1USDC + USD1USDT + USDCUSDT)",
+        "S3_STRICT_HEAVY_WALL_2K": {
+            "id": "S3_STRICT_HEAVY_WALL_2K",
+            "name": "S3 • $2K Strict >=2.0x Heavy-Wall Guarded Long/Short Stablecoin Sniper ($0-Debt Style)",
             "capital": 2000.0,
+            "mode": "HEAVY_WALL",
             "pairs": {
-                "UUSDT": (10, 110.0, 0.00010),
-                "USD1USDC": (10, 110.0, 0.00010),
-                "USD1USDT": (14, 110.0, 0.00001),
-                "USDCUSDT": (14, 110.0, 0.00001),
+                "USD1USDC": (10, 120.0, 0.00010),
+                "UUSDT": (8, 120.0, 0.00010),
+                "USD1USDT": (12, 120.0, 0.00001),
+                "USDCUSDT": (12, 120.0, 0.00001),
             },
             "realizedUsd": 0.0,
             "mtmUsd": 0.0,
@@ -133,17 +133,16 @@ def init_shadow_arena():
             "wins": [],
             "slots": {},
         },
-        "S4_500USD_SCALED_PREVIEW": {
-            "id": "S4_500USD_SCALED_PREVIEW",
-            "name": "S4 • $500 Exact Live-Capital 8-Pair Stablecoin Compounder ($0-Debt Mirror)",
+        "S4_500USD_BIDIR_MIRROR": {
+            "id": "S4_500USD_BIDIR_MIRROR",
+            "name": "S4 • $500 Live-Capital Bi-Directional + Dual-Sided Stablecoin Compounder",
             "capital": 500.0,
+            "mode": "BIDIR",
             "pairs": {
-                "USD1USDC": (6, 45.0, 0.00010),
-                "UUSDT": (6, 45.0, 0.00010),
-                "FDUSDUSDT": (5, 45.0, 0.00010),
-                "FDUSDUSDC": (4, 40.0, 0.00010),
-                "USD1USDT": (10, 45.0, 0.00001),
-                "USDCUSDT": (10, 45.0, 0.00001),
+                "USD1USDC": (6, 55.0, 0.00010),
+                "UUSDT": (5, 55.0, 0.00010),
+                "USD1USDT": (8, 55.0, 0.00001),
+                "USDCUSDT": (8, 55.0, 0.00001),
             },
             "realizedUsd": 0.0,
             "mtmUsd": 0.0,
@@ -163,86 +162,161 @@ def on_shadow_agg_trade(sym, px, qty, is_buyer_maker, now_s):
     if not bbo or bbo.get("bid", 0) <= 0:
         return
     spec = PAIRS.get(sym, {"tick": 0.00001, "dec": 5, "step": 1.0})
+    bid_q_now = float(bbo.get("bidQty", 5000.0))
+    ask_q_now = float(bbo.get("askQty", 5000.0))
+    imb_ratio = bid_q_now / max(1.0, ask_q_now)
     with SHADOW_LOCK:
         for st_id, st in SHADOW_STATE["strategies"].items():
             if sym not in st["pairs"]:
                 continue
             n_slots, usd_sz, prof_tick = st["pairs"][sym]
+            mode_s = st.get("mode", "BIDIR")
             sym_slots = st["slots"].setdefault(sym, [])
             while len(sym_slots) < n_slots:
                 idx = len(sym_slots)
-                lvl_off = (idx // 3) * spec["tick"]
-                bpx0 = round(bbo["bid"] - lvl_off, spec["dec"])
-                q_Order = round(usd_sz / max(0.1, bpx0), 0)
-                # Real exchange FIFO queue ahead: front-mid queue placement (30%–55% of actual live bidQty wall)
-                q_ahead0 = max(q_Order, float(bbo.get("bidQty", 5000.0)) * (0.28 + 0.12 * (idx % 3)))
-                sym_slots.append({
-                    "side": "BUY",
-                    "px": bpx0,
-                    "buy_px": bpx0,
-                    "qty": q_Order,
-                    "q_ahead": q_ahead0,
-                    "ts": now_s,
-                })
+                q_Order = round(usd_sz / max(0.1, bbo["bid"]), 0)
+                if mode_s == "DUAL_50_50":
+                    is_short_slot = (idx % 2 == 1)
+                elif mode_s == "HEAVY_WALL":
+                    is_short_slot = (imb_ratio < 0.65)
+                else:
+                    is_short_slot = (imb_ratio < 0.90) if (idx % 2 == 0) else (imb_ratio < 1.15)
+                if not is_short_slot:
+                    bpx0 = round(bbo["bid"], spec["dec"])
+                    q_ahead0 = max(q_Order, min(q_Order * 6.0, bid_q_now * (0.04 + 0.02 * (idx % 3))))
+                    sym_slots.append({
+                        "dir": "LONG",
+                        "side": "BUY",
+                        "px": bpx0,
+                        "entry_px": bpx0,
+                        "qty": q_Order,
+                        "q_ahead": q_ahead0,
+                        "ts": now_s,
+                    })
+                else:
+                    spx0 = round(bbo["ask"], spec["dec"])
+                    q_ahead0 = max(q_Order, min(q_Order * 6.0, ask_q_now * (0.04 + 0.02 * (idx % 3))))
+                    sym_slots.append({
+                        "dir": "SHORT",
+                        "side": "SELL",
+                        "px": spx0,
+                        "entry_px": spx0,
+                        "qty": q_Order,
+                        "q_ahead": q_ahead0,
+                        "ts": now_s,
+                    })
             for sl in sym_slots:
-                if sl["side"] == "BUY":
-                    # Heavy-Bid Pre-Fill Shield: if bid wall weakens (< 0.45x ask wall), step BUY down 1 tick to catch dip wick!
-                    if float(bbo.get("bidQty", 1.0)) < float(bbo.get("askQty", 1.0)) * 0.45 and sl["px"] >= bbo["bid"] - 1e-9:
-                        sl["px"] = round(bbo["bid"] - spec["tick"], spec["dec"])
-                        sl["buy_px"] = sl["px"]
-                        sl["q_ahead"] = max(sl["qty"], float(bbo.get("bidQty", 5000.0)) * 0.30)
-                        sl["ts"] = now_s
-                    if bbo["bid"] > sl["px"] + spec["tick"] * 1.5 and (now_s - sl["ts"]) >= 1.2:
-                        sl["px"] = round(bbo["bid"], spec["dec"])
-                        sl["buy_px"] = sl["px"]
-                        sl["q_ahead"] = max(sl["qty"], float(bbo.get("bidQty", 5000.0)) * 0.35)
-                        sl["ts"] = now_s
-                    if is_buyer_maker and px <= sl["px"] + 1e-9:
-                        mult = 2.0 if px < sl["px"] - 1e-9 else 1.0
-                        sl["q_ahead"] -= qty * mult
-                        if sl["q_ahead"] <= 0.0:
-                            st["fills"] += 1
-                            spx = round(max(sl["buy_px"] + prof_tick, bbo["ask"]), spec["dec"])
+                dir_s = sl.get("dir", "LONG")
+                if dir_s == "LONG":
+                    if sl["side"] == "BUY":
+                        # Pre-Fill Shield: if Bid wall collapses (<0.65x Ask wall), flip unfilled BUY slot into SHORT_OPEN at live Ask (or step down 1 tick)!
+                        if imb_ratio < 0.65 and mode_s in ("BIDIR", "HEAVY_WALL"):
+                            sl["dir"] = "SHORT"
                             sl["side"] = "SELL"
-                            sl["px"] = spx
-                            sl["q_ahead"] = max(sl["qty"], float(bbo.get("askQty", 5000.0)) * 0.28)
+                            sl["px"] = round(bbo["ask"], spec["dec"])
+                            sl["entry_px"] = sl["px"]
+                            sl["q_ahead"] = max(sl["qty"], min(sl["qty"] * 5.0, ask_q_now * 0.04))
                             sl["ts"] = now_s
-                elif sl["side"] == "SELL":
-                    # Strict 100%-Win-Rate Profit Step-Down: NEVER sell below buy_px + 1 tick!
-                    if bbo["ask"] < sl["px"] - spec["tick"] * 0.5 and (now_s - sl["ts"]) >= 2.5:
-                        min_s = round(sl["buy_px"] + spec["tick"], spec["dec"])
-                        new_s = round(max(min_s, bbo["ask"]), spec["dec"])
-                        if new_s < sl["px"] - 1e-9:
-                            sl["px"] = new_s
-                            sl["q_ahead"] = max(sl["qty"], float(bbo.get("askQty", 5000.0)) * 0.30)
+                            continue
+                        if bbo["bid"] > sl["px"] + spec["tick"] * 0.8 and (now_s - sl["ts"]) >= 1.0:
+                            sl["px"] = round(bbo["bid"], spec["dec"])
+                            sl["entry_px"] = sl["px"]
+                            sl["q_ahead"] = max(sl["qty"], min(sl["qty"] * 5.0, bid_q_now * 0.05))
                             sl["ts"] = now_s
-                    # Strictly require real buyer-initiated aggTrade at >= sl["px"] to deplete the actual askQty FIFO queue!
-                    if (not is_buyer_maker) and px >= sl["px"] - 1e-9:
-                        mult = 2.0 if px > sl["px"] + 1e-9 else 1.0
-                        sl["q_ahead"] -= qty * mult
-                        if sl["q_ahead"] <= 0.0:
-                            pnl_rt = max(sl["qty"] * spec["tick"], (sl["px"] - sl["buy_px"]) * sl["qty"])
-                            st["fills"] += 1
-                            st["roundTrips"] += 1
-                            st["realizedUsd"] = round(st["realizedUsd"] + pnl_rt, 4)
-                            st["wins"].append([round(now_s, 1), round(pnl_rt, 5)])
-                            st["wins"] = [w for w in st["wins"] if now_s - w[0] <= 3600.0][-600:]
-                            SHADOW_STATE["recentFills"].insert(0, {
-                                "strat": st_id,
-                                "symbol": sym,
-                                "qty": sl["qty"],
-                                "buyPx": sl["buy_px"],
-                                "sellPx": sl["px"],
-                                "pnl": round(pnl_rt, 5),
-                                "time": int(now_s * 1000),
-                            })
-                            SHADOW_STATE["recentFills"] = SHADOW_STATE["recentFills"][:24]
-                            bpx_n = round(bbo["bid"], spec["dec"])
+                        if is_buyer_maker and px <= sl["px"] + 1e-9 and (mode_s != "HEAVY_WALL" or imb_ratio >= 1.50):
+                            mult = 2.0 if px < sl["px"] - 1e-9 else 1.0
+                            sl["q_ahead"] -= qty * mult
+                            if sl["q_ahead"] <= 0.0:
+                                st["fills"] += 1
+                                spx = round(max(sl["entry_px"] + prof_tick, bbo["ask"]), spec["dec"])
+                                sl["side"] = "SELL"
+                                sl["px"] = spx
+                                sl["q_ahead"] = max(sl["qty"], min(sl["qty"] * 5.0, ask_q_now * 0.04))
+                                sl["ts"] = now_s
+                    elif sl["side"] == "SELL":
+                        if bbo["ask"] < sl["px"] - spec["tick"] * 0.5 and (now_s - sl["ts"]) >= 2.0:
+                            min_s = round(sl["entry_px"] + spec["tick"], spec["dec"])
+                            new_s = round(max(min_s, bbo["ask"]), spec["dec"])
+                            if new_s < sl["px"] - 1e-9:
+                                sl["px"] = new_s
+                                sl["q_ahead"] = max(sl["qty"], min(sl["qty"] * 5.0, ask_q_now * 0.04))
+                                sl["ts"] = now_s
+                        if (not is_buyer_maker) and px >= sl["px"] - 1e-9:
+                            mult = 2.0 if px > sl["px"] + 1e-9 else 1.0
+                            sl["q_ahead"] -= qty * mult
+                            if sl["q_ahead"] <= 0.0:
+                                pnl_rt = max(sl["qty"] * spec["tick"], (sl["px"] - sl["entry_px"]) * sl["qty"])
+                                st["fills"] += 1
+                                st["roundTrips"] += 1
+                                st["realizedUsd"] = round(st["realizedUsd"] + pnl_rt, 4)
+                                st["wins"].append([round(now_s, 1), round(pnl_rt, 5)])
+                                st["wins"] = [w for w in st["wins"] if now_s - w[0] <= 3600.0][-600:]
+                                SHADOW_STATE["recentFills"].insert(0, {
+                                    "strat": st_id, "symbol": sym, "qty": sl["qty"],
+                                    "buyPx": sl["entry_px"], "sellPx": sl["px"], "pnl": round(pnl_rt, 5), "time": int(now_s * 1000),
+                                })
+                                SHADOW_STATE["recentFills"] = SHADOW_STATE["recentFills"][:24]
+                                bpx_n = round(bbo["bid"], spec["dec"])
+                                sl["side"] = "BUY"
+                                sl["px"] = bpx_n
+                                sl["entry_px"] = bpx_n
+                                sl["q_ahead"] = max(sl["qty"], min(sl["qty"] * 5.0, bid_q_now * 0.04))
+                                sl["ts"] = now_s
+                else:
+                    # SHORT-FIRST SLOT: Sells @ Ask first (when Ask wall is heavy / coin dropping), then Buys back @ Bid (-1 tick) for instant profit on coin drops!
+                    if sl["side"] == "SELL":
+                        if imb_ratio > 1.55 and mode_s in ("BIDIR", "HEAVY_WALL"):
+                            sl["dir"] = "LONG"
                             sl["side"] = "BUY"
-                            sl["px"] = bpx_n
-                            sl["buy_px"] = bpx_n
-                            sl["q_ahead"] = max(sl["qty"], float(bbo.get("bidQty", 5000.0)) * 0.30)
+                            sl["px"] = round(bbo["bid"], spec["dec"])
+                            sl["entry_px"] = sl["px"]
+                            sl["q_ahead"] = max(sl["qty"], min(sl["qty"] * 5.0, bid_q_now * 0.04))
                             sl["ts"] = now_s
+                            continue
+                        if bbo["ask"] < sl["px"] - spec["tick"] * 0.8 and (now_s - sl["ts"]) >= 1.0:
+                            sl["px"] = round(bbo["ask"], spec["dec"])
+                            sl["entry_px"] = sl["px"]
+                            sl["q_ahead"] = max(sl["qty"], min(sl["qty"] * 5.0, ask_q_now * 0.05))
+                            sl["ts"] = now_s
+                        if (not is_buyer_maker) and px >= sl["px"] - 1e-9 and (mode_s != "HEAVY_WALL" or imb_ratio <= 0.65):
+                            mult = 2.0 if px > sl["px"] + 1e-9 else 1.0
+                            sl["q_ahead"] -= qty * mult
+                            if sl["q_ahead"] <= 0.0:
+                                st["fills"] += 1
+                                bpx_c = round(min(sl["entry_px"] - prof_tick, bbo["bid"]), spec["dec"])
+                                sl["side"] = "BUY"
+                                sl["px"] = bpx_c
+                                sl["q_ahead"] = max(sl["qty"], min(sl["qty"] * 5.0, bid_q_now * 0.04))
+                                sl["ts"] = now_s
+                    elif sl["side"] == "BUY":
+                        if bbo["bid"] > sl["px"] + spec["tick"] * 0.5 and (now_s - sl["ts"]) >= 2.0:
+                            max_b = round(sl["entry_px"] - spec["tick"], spec["dec"])
+                            new_b = round(min(max_b, bbo["bid"]), spec["dec"])
+                            if new_b > sl["px"] + 1e-9:
+                                sl["px"] = new_b
+                                sl["q_ahead"] = max(sl["qty"], min(sl["qty"] * 5.0, bid_q_now * 0.04))
+                                sl["ts"] = now_s
+                        if is_buyer_maker and px <= sl["px"] + 1e-9:
+                            mult = 2.0 if px < sl["px"] - 1e-9 else 1.0
+                            sl["q_ahead"] -= qty * mult
+                            if sl["q_ahead"] <= 0.0:
+                                pnl_rt = max(sl["qty"] * spec["tick"], (sl["entry_px"] - sl["px"]) * sl["qty"])
+                                st["fills"] += 1
+                                st["roundTrips"] += 1
+                                st["realizedUsd"] = round(st["realizedUsd"] + pnl_rt, 4)
+                                st["wins"].append([round(now_s, 1), round(pnl_rt, 5)])
+                                st["wins"] = [w for w in st["wins"] if now_s - w[0] <= 3600.0][-600:]
+                                SHADOW_STATE["recentFills"].insert(0, {
+                                    "strat": st_id, "symbol": sym, "qty": sl["qty"],
+                                    "buyPx": sl["px"], "sellPx": sl["entry_px"], "pnl": round(pnl_rt, 5), "time": int(now_s * 1000),
+                                })
+                                SHADOW_STATE["recentFills"] = SHADOW_STATE["recentFills"][:24]
+                                spx_n = round(bbo["ask"], spec["dec"])
+                                sl["side"] = "SELL"
+                                sl["px"] = spx_n
+                                sl["entry_px"] = spx_n
+                                sl["q_ahead"] = max(sl["qty"], min(sl["qty"] * 5.0, ask_q_now * 0.04))
+                                sl["ts"] = now_s
 
 
 def get_shadow_summary(bbos, now_s):
@@ -255,15 +329,26 @@ def get_shadow_summary(bbos, now_s):
             for sym, s_list in st.get("slots", {}).items():
                 bbo = bbos.get(sym, {})
                 bid_now = float(bbo.get("bid", 0))
+                ask_now = float(bbo.get("ask", 0))
                 for sl in s_list:
-                    if sl["side"] == "BUY":
-                        open_buys += 1
+                    dir_s = sl.get("dir", "LONG")
+                    entry_p = float(sl.get("entry_px", sl.get("buy_px", 0)))
+                    if dir_s == "LONG":
+                        if sl["side"] == "BUY":
+                            open_buys += 1
+                        else:
+                            open_sells += 1
+                            if bid_now > 0:
+                                # 100% honest LONG MTM: if coin Bid drops below entry_px, subtract full drop; if Bid rises above entry_px, add gain!
+                                mtm += (bid_now - entry_p) * sl["qty"]
                     else:
-                        open_sells += 1
-                        if bid_now > 0:
-                            # Exact 100% unhedged coin price drop deduction: subtract full (bid_now - buy_px) * qty!
-                            raw_m = (bid_now - sl["buy_px"]) * sl["qty"]
-                            mtm += raw_m
+                        if sl["side"] == "SELL":
+                            open_sells += 1
+                        else:
+                            open_buys += 1
+                            if ask_now > 0:
+                                # 100% honest SHORT MTM: if coin Ask drops below entry_px, add gain; if Ask rises above entry_px, subtract full rise!
+                                mtm += (entry_p - ask_now) * sl["qty"]
             w_1h = sum(w[1] for w in st.get("wins", []) if now_s - w[0] <= 3600.0)
             w_15m = sum(w[1] for w in st.get("wins", []) if now_s - w[0] <= 900.0) * 4.0
             net_now = round(st["realizedUsd"] + mtm, 4)
@@ -289,7 +374,7 @@ def get_shadow_summary(bbos, now_s):
         if now_s - getattr(init_shadow_arena, "_last_save", 0.0) >= 15.0:
             init_shadow_arena._last_save = now_s
             try:
-                with open("/tmp/shadow_arena_v84.json", "w") as _sf:
+                with open("/tmp/shadow_arena_v85.json", "w") as _sf:
                     json.dump(SHADOW_STATE, _sf)
             except Exception:
                 pass
