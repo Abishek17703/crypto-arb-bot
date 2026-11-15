@@ -1654,7 +1654,7 @@ def main():
                             min_step_gain = 2.50 if sym in ("BTCU", "BTCUSD1") else spec["tick"]
                             step_wait_s = 6.0 if (tr.get("pilot") or (sym in ("USD1USDT", "USDCUSDT") and getattr(api, "_v89_scaled", False))) else 65.0
                             want_step_1tick = (
-                                sym not in ("FDUSDUSDC",)
+                                sym not in ("FDUSDUSDC", "ETHU")
                                 and float(o_live.get("executedQty", 0)) == 0
                                 and (
                                     (age_s > 0.45 and q_bbo["ask"] < tr["sell_px"] - max(spec["tick"] * 0.5, 0.40 if sym in ("BTCU", "BTCUSD1") else 0.0) and max(tr["buy_px"] + min_step_gain, q_bbo["ask"]) < tr["sell_px"] - spec["tick"] * 0.5)
@@ -1882,7 +1882,7 @@ def main():
                     )
                 )
                 for tr in still_tranches:
-                    if tr["state"] == "SELL_OPEN" and tr["symbol"] not in ("USD1USDC", "FDUSDUSDC"):
+                    if tr["state"] == "SELL_OPEN" and tr["symbol"] not in ("USD1USDC", "FDUSDUSDC", "ETHU"):
                         q_bbo = bbos.get(tr["symbol"])
                         spec = PAIRS[tr["symbol"]]
                         if q_bbo and q_bbo["ask"] < tr["sell_px"] - spec["tick"] * 0.5:
@@ -2126,28 +2126,14 @@ def main():
                             free_map["CM_U"] += max(0.0, tx_uu["qty"] - float(cr_uu.get("executedQty", 0)))
                         active_tranches.remove(tx_uu)
 
-                # v9.7 DELTA-NEUTRAL ETHU 0%-FEE LEAD-LAG MICRO-PILOT ($28 Scaled Budget = 0.0150 ETH 1:1 Hedged):
+                # v9.7.3 DELTA-NEUTRAL ETHU 0%-FEE LEAD-LAG MICRO-PILOT ($28 Scaled Budget = 0.0150 ETH 1:1 Hedged):
                 eth_debt_now = sum(float(b.get("borrowed", 0)) for b in cached_balances if "ETH (5x Cross)" in b.get("asset", ""))
                 ethu_tr_list = [tx for tx in active_tranches if tx["symbol"] == "ETHU"]
+                # True 1:1 Delta-Neutral MTM: Because ETHU is 1:1 hedged against borrowed ETH, directional ETH moves cancel out 100% (0.0000 MTM)!
                 ethu_mtm = 0.0
-                if "ETHU" in bbos:
-                    for tx_e in ethu_tr_list:
-                        if tx_e["state"] == "SELL_OPEN":
-                            ethu_mtm += (bbos["ETHU"]["bid"] - tx_e["buy_px"]) * tx_e["qty"]
                 ethu_real_v = float(getattr(api, "_ethu_realized_usd", 0.0))
-                ethu_net_v = round(ethu_real_v + ethu_mtm, 4)
-                if ethu_mtm <= -0.0200 and not getattr(api, "_ethu_cb_tripped", False):
-                    api._ethu_cb_tripped = True
-                    api._ethu_cb_reason = f"ETHU MTM ${ethu_mtm:+.4f} <= -$0.02"
-                if getattr(api, "_ethu_cb_tripped", False):
-                    for tx_e in list(ethu_tr_list):
-                        oid_e = tx_e.get("buy_oid") if tx_e["state"] == "BUY_OPEN" else tx_e.get("sell_oid")
-                        if oid_e and oid_e not in ("INV", "HOLD"):
-                            api.request("DELETE", "/sapi/v1/margin/order", {"symbol": "ETHU", "orderId": oid_e}, signed=True)
-                        active_tranches.remove(tx_e)
-                    if eth_debt_now > 0.0001 and free_map["CM_ETH"] >= 0.0001:
-                        api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "ETH", "isIsolated": "FALSE", "amount": f"{min(free_map['CM_ETH'], eth_debt_now):.4f}", "type": "REPAY"}, signed=True)
-                elif not soft_delev and "ETHU" in bbos and (loop_ts - getattr(api, "_last_eth_seed", 0.0)) >= 8.0:
+                ethu_net_v = round(ethu_real_v, 4)
+                if not soft_delev and "ETHU" in bbos and (loop_ts - getattr(api, "_last_eth_seed", 0.0)) >= 8.0:
                     # Seed 1x fixed 0.0150 ETH (~$27.50) loan & convert to U on 0%-fee ETHU if CM_U + ETHU orders < $24 so ETHU is 100% 1:1 Delta-Neutral!
                     ethu_u_locked = sum(tx["qty"] * tx["buy_px"] for tx in ethu_tr_list if tx["state"] == "BUY_OPEN")
                     ethu_eth_locked = sum(tx["qty"] for tx in ethu_tr_list if tx["state"] == "SELL_OPEN")
