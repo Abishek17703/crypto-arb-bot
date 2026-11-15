@@ -405,31 +405,10 @@ def halt_all_orders_and_repay(api):
                 if oid:
                     api.request("DELETE", "/sapi/v1/margin/order", {"symbol": iso_sym, "isIsolated": "TRUE", "orderId": oid}, signed=True)
     auto_compound_borrow(api, force_repay_all=True)
-    # Liquidate non-USDT stablecoins at 0%-fee LIMIT_MAKER Ask with AUTO_REPAY so 100% of USDT debt is repaid!
-    try:
-        cm_now = api.request("GET", "/sapi/v1/margin/account", signed=True)
-        ut_debt_now = 0.0
-        free_now = {}
-        for ua in cm_now.get("userAssets", []):
-            free_now[ua.get("asset", "")] = float(ua.get("free", 0))
-            if ua.get("asset") == "USDT":
-                ut_debt_now = float(ua.get("borrowed", 0)) + float(ua.get("interest", 0))
-                if free_now["USDT"] >= 0.50 and ut_debt_now > 0.01:
-                    api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "USDT", "isIsolated": "FALSE", "amount": f"{min(free_now['USDT'], ut_debt_now):.4f}", "type": "REPAY"}, signed=True)
-        if ut_debt_now > 1.0:
-            for s_ast, s_sym, s_dec in (("USDC", "USDCUSDT", 5), ("U", "UUSDT", 4), ("USD1", "USD1USDT", 5)):
-                sq = math.floor(free_now.get(s_ast, 0.0))
-                if sq >= 6:
-                    tk = api.request("GET", "/api/v3/ticker/bookTicker", {"symbol": s_sym})
-                    if isinstance(tk, dict) and "askPrice" in tk:
-                        apx = float(tk["askPrice"])
-                        api.request("POST", "/sapi/v1/margin/order", {"symbol": s_sym, "side": "SELL", "type": "LIMIT_MAKER", "sideEffectType": "AUTO_REPAY", "quantity": str(sq), "price": f"{apx:.{s_dec}f}"}, signed=True)
-    except Exception:
-        pass
 
 
 def adopt_existing_tranches(api):
-    if getattr(api, "_paused_495", False):
+    if getattr(api, "_paused_495", False) or getattr(api, "_user_paused", False):
         halt_all_orders_and_repay(api)
         return []
     tranches = []
@@ -545,19 +524,25 @@ def main():
     except Exception:
         pass
 
-    # Load hard latched $495.00 circuit breaker (persists across restarts until user replies)
+    # Load hard latched $495.00 circuit breaker & S3 user pause state BEFORE startup borrow/adopt!
     api._paused_495 = False
+    api._user_paused = False
     try:
         if os.path.exists("/tmp/pause_495_latch.json"):
             with open("/tmp/pause_495_latch.json") as _pf:
                 api._paused_495 = bool(json.load(_pf).get("paused", False))
     except Exception:
         pass
+    try:
+        _p_init = json.loads(s3.get_object(Bucket=S3_BUCKET, Key="pause-control.json")["Body"].read().decode())
+        api._user_paused = bool(_p_init.get("paused", False))
+    except Exception:
+        pass
 
     # Live 1:1 Delta-Lock Hedging: Base loans strictly match live inventory (0 static short overhang!)
     api._target_hedge_u1 = 0.0
     api._target_hedge_uc = 0.0
-    auto_compound_borrow(api, force_repay_all=api._paused_495)
+    auto_compound_borrow(api, force_repay_all=bool(api._paused_495 or api._user_paused))
 
     active_tranches = adopt_existing_tranches(api)
     trades_cache = {s: [] for s in ("USDCUSDT", "USDCUSDT_CM", "USD1USDT_CM", "USD1USDT_ISO", "USD1USDC_CM", "USD1U_CM", "UUSDT_CM", "FDUSDUSDT", "FDUSDUSDT_CM", "FDUSDUSDC", "FDUSDUSDC_CM", "BTCU_CM", "BTCUSD1_CM", "BNBU_CM", "ETHU_CM", "BNBFDUSD_CM", "SOLFDUSD_CM", "EURIUSDT", "BTCU", "ETHU")}
@@ -837,7 +822,7 @@ def main():
             # 2. Auto-Compound Borrow & Idle-Debt Trim every 12s
             if loop_ts - last_compound_ts >= 12.0:
                 last_compound_ts = loop_ts
-                auto_compound_borrow(api, force_repay_all=False)
+                auto_compound_borrow(api, force_repay_all=bool(getattr(api, "_paused_495", False) or getattr(api, "_user_paused", False)))
                 api._last_full_acct = 0.0
 
             # 3. Single-Call Bulk Open Orders Diff every 0.10s (1-Call Zero-Drop Guard + <100ms Flip Speed)
@@ -852,7 +837,7 @@ def main():
                 cached_open_orders = [o for o in _all_cm if o.get("symbol") in PAIRS]
 
                 # Orphan Adoption Self-Heal every 8.0s: adopt any live open order missing from active_tranches!
-                if not getattr(api, "_paused_495", False) and loop_ts - getattr(api, "_last_orphan_heal", 0.0) >= 8.0:
+                if not getattr(api, "_paused_495", False) and not getattr(api, "_user_paused", False) and loop_ts - getattr(api, "_last_orphan_heal", 0.0) >= 8.0:
                     api._last_orphan_heal = loop_ts
                     drain_oids = {
                         (getattr(api, "_sol_drain_oid", None) or (None,))[0],
@@ -1125,10 +1110,11 @@ def main():
             # Hard Stop Gate: If $495.00 circuit breaker OR dashboard red PAUSE button is active, stop 100% of trading!
             cm_ut_debt = sum(float(b.get("borrowed", 0)) for b in cached_balances if "USDT (5x Cross)" in b.get("asset", ""))
             if getattr(api, "_paused_495", False) or getattr(api, "_user_paused", False):
-                if loop_ts - getattr(api, "_last_halt_sweep", 0.0) >= 8.0:
+                if cached_open_orders or active_tranches or (loop_ts - getattr(api, "_last_halt_sweep", 0.0) >= 20.0):
                     api._last_halt_sweep = loop_ts
                     halt_all_orders_and_repay(api)
                 active_tranches = []
+                cached_open_orders = []
                 live_hourly_rate_usd = 0.0
                 live_daily_rate_usd = 0.0
             else:
