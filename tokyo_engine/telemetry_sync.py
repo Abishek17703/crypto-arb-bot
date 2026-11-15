@@ -1457,7 +1457,7 @@ def main():
                     if tot_cm_debt_now < 1.0 and wb_sum > 85.0 and total_net > 85.0 and abs(wb_sum - (total_net + spot_net)) < 4.0:
                         api._static_dust_usd = round(max(0.0, wb_sum - (total_net + spot_net)), 4)
                     else:
-                        api._static_dust_usd = getattr(api, "_static_dust_usd", 0.5065)
+                        api._static_dust_usd = getattr(api, "_static_dust_usd", 0.0885)
                     exact_acct_eq = round(total_net + spot_net + api._static_dust_usd, 4)
                     prev_valid_eq = getattr(api, "_last_valid_eq", 498.4450)
                     # Use EXACT direct USDT ledger valuation (total_net + spot_net + static_dust) as primary truth so BTC->USDT double-conversion noise in /wallet/balance NEVER causes fake +/-$0.005 drops!
@@ -2482,7 +2482,7 @@ def main():
                     ("FDUSDUSDC", False, "CM_USDC",  "CM_FDUSD",   0,                      0, 20.0,   0.0, "STOPPED"),
                     ("USD1U",     False, "CM_U",     "CM_USD1",    0,                      0, 14.0,   0.0, "STOPPED"),
                     ("FDUSDUSDT", False, "CM_USDT",  "CM_FDUSD",   1 if allow_buys else 0, 0, 250.0, 250.0, "v11.0 $2000 8x$250 • FDUSD $250"),
-                    ("USD1USDT",  False, "CM_USDT",  "CM_USD1",    5 if allow_buys else 0, 0, 250.0, 1250.0, "v11.0 $2000 8x$250 • USD1 $250"),
+                    ("USD1USDT",  False, "CM_USDT",  "CM_USD1",    6 if allow_buys else 0, 0, 250.0, 1500.0, "v11.0 $2000 8x$250 • USD1 $250"),
                     ("USDCUSDT",  False, "CM_USDT",  "CM_USDC",    2 if allow_buys else 0, 0, 250.0, 500.0, "v11.0 $2000 8x$250 • USDC $250"),
                     ("USD1USDC",  False, "CM_USDC",  "CM_USD1",    0,                      0, 14.1,   0.0, "STOPPED"),
                     ("UUSDT",     False, "CM_USDT",  "CM_U",       0,                      0, 14.1,   0.0, "STOPPED"),
@@ -2515,14 +2515,14 @@ def main():
                                 and free_map[f_key] >= 25.0
                                 and not cons_guards.get(sym_p, {}).get("falling", False)
                             )
-                            max_sym_legs = 5
+                            max_sym_legs = 6
                         else:
-                            # USDCUSDT (2,900 flips/hr, Ask wall frequently drops < 40,000!):
+                            # USDCUSDT (2,900 flips/hr, tight 1-tick spread):
                             impulse_ok = (
                                 rem_2k_budget >= 25.0
                                 and free_map[f_key] >= 25.0
                                 and not cons_guards.get(sym_p, {}).get("falling", False)
-                                and (q_bbo["askQty"] < 80000.0 or q_bbo["bidQty"] >= q_bbo["askQty"] * 1.20)
+                                and q_bbo["bidQty"] >= q_bbo["askQty"] * 0.55
                             )
                             max_sym_legs = 2
                         while len(p_tr) < max_sym_legs and len(tot_active_legs) < 8 and rem_2k_budget >= 25.0 and free_map[f_key] >= 25.0 and impulse_ok:
@@ -2565,7 +2565,7 @@ def main():
                                 break
 
                     # Immediately post maker SELL for any free non-hedged base inventory (keep at least 28 USDC reserved for FDUSDUSDC latency arb when edge >= +0.70 bps!)
-                    while sym_p not in ("USD1USDC", "FDUSDUSDC", "USD1U", "UUSDT") and (free_map[b_key] - (28.5 if (sym_p == "USDCUSDT" and fd_tri_edge_ok) else 0.0)) * q_bbo["ask"] >= 5.6 and len(p_tr) < max_tr:
+                    while sym_p not in ("USD1USDC", "FDUSDUSDC", "USD1U", "UUSDT") and (free_map[b_key] - (28.5 if (sym_p == "USDCUSDT" and fd_tri_edge_ok) else 0.0)) * q_bbo["ask"] >= 5.6 and len(p_tr) < (max_tr + 2):
                         if (sym_p == "USD1USDT" and cm_u1_debt >= 1.0) or (sym_p == "USDCUSDT" and cm_uc_debt >= 1.0):
                             break
                         max_base_s = max(0.0, free_map[b_key] - (28.5 if (sym_p == "USDCUSDT" and fd_tri_edge_ok) else 0.0))
