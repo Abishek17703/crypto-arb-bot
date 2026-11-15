@@ -236,20 +236,17 @@ def auto_compound_borrow(api, force_repay_all=False):
                         if "tranId" in br_c_r:
                             api._last_uc_borrow_ts = time.time()
             elif ast_u == "USD1":
-                tot_u1 = fv_u + lv_u
-                if bv_u > 1.0 and fv_u > 55.0:
-                    api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "USD1", "isIsolated": "FALSE", "amount": f"{min(fv_u - 30.0, bv_u):.2f}", "type": "REPAY"}, signed=True)
-                elif ml > 1.55 and tot_u1 < 28.0 and bv_u < 35.0 and tot_net_btc > 0:
-                    api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "USD1", "isIsolated": "FALSE", "amount": "32.00", "type": "BORROW"}, signed=True)
+                if bv_u > 0.01 and fv_u >= 0.50:
+                    api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "USD1", "isIsolated": "FALSE", "amount": f"{min(fv_u, bv_u):.4f}", "type": "REPAY"}, signed=True)
             elif ast_u == "U":
                 tot_u = fv_u + lv_u
-                if bv_u > 1.0 and fv_u > 55.0:
-                    api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "U", "isIsolated": "FALSE", "amount": f"{min(fv_u - 30.0, bv_u):.2f}", "type": "REPAY"}, signed=True)
-                elif ml > 1.55 and tot_u < 28.0 and bv_u < 35.0 and tot_net_btc > 0:
-                    api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "U", "isIsolated": "FALSE", "amount": "32.00", "type": "BORROW"}, signed=True)
+                if bv_u > 1.0 and fv_u > 60.0:
+                    api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "U", "isIsolated": "FALSE", "amount": f"{min(fv_u - 40.0, bv_u):.2f}", "type": "REPAY"}, signed=True)
+                elif ml > 1.55 and tot_u < 35.0 and bv_u < 45.0 and tot_net_btc > 0:
+                    api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "U", "isIsolated": "FALSE", "amount": "40.00", "type": "BORROW"}, signed=True)
             elif ast_u == "BTC":
-                # Keep 1:1 Cross-Margin BTC short hedge (~0.00050 BTC = ~$32.50) matching micro BTCU + BTCUSD1 inventory so net BTC delta stays ~0.00000!
-                target_btc_h = 0.00050 if (not force_repay_all and ml > 1.55 and tot_net_btc > 0) else 0.0
+                # Keep 1:1 Cross-Margin BTC short hedge (~0.00038 BTC = ~$25) matching 0%-fee BTCU inventory so net BTC delta stays ~0.00000!
+                target_btc_h = 0.00038 if (not force_repay_all and ml > 1.55 and tot_net_btc > 0) else 0.0
                 if target_btc_h > 0 and bv_u < target_btc_h * 0.75:
                     brw_btc = round(target_btc_h - bv_u, 5)
                     if brw_btc >= 0.00010:
@@ -390,12 +387,12 @@ def adopt_existing_tranches(api):
         pass
     # 1. Seamless Anti-Loop Startup: Cancel non-core symbols & BUY orders, while ADOPTING existing USD1USDT/USDCUSDT SELL orders with exact saved buy_px so zero over-price loss occurs!
     open_cm = []
-    for _old_sym in ("ETHUSD1", "BNBUSD1", "ETHU", "BNBU", "BNBFDUSD", "SOLFDUSD", "FDUSDUSDT", "FDUSDUSDC", "USD1U", "UUSDC"):
+    for _old_sym in ("BTCUSD1", "ETHUSD1", "BNBUSD1", "ETHU", "BNBU", "BNBFDUSD", "SOLFDUSD", "FDUSDUSDT", "FDUSDUSDC", "USD1U", "UUSDC"):
         _old_oc = api.request("GET", "/sapi/v1/margin/openOrders", {"symbol": _old_sym}, signed=True)
         if isinstance(_old_oc, list):
             for _oo in _old_oc:
                 api.request("DELETE", "/sapi/v1/margin/order", {"symbol": _old_sym, "orderId": _oo["orderId"]}, signed=True)
-    for _core_sym in ("USDCUSDT", "USD1USDT", "UUSDT", "USD1USDC", "BTCU", "BTCUSD1"):
+    for _core_sym in ("USDCUSDT", "USD1USDT", "UUSDT", "USD1USDC", "BTCU"):
         _core_oc = api.request("GET", "/sapi/v1/margin/openOrders", {"symbol": _core_sym}, signed=True)
         if isinstance(_core_oc, list):
             for _oo in _core_oc:
@@ -1011,9 +1008,9 @@ def main():
                         cached_leveraged_pool = round(total_pool, 2)
                         cached_balances = bals
 
-                    # Scrub any prior single-tick borrow/repay API lag outliers (including the $499.82-$499.91 BTC-borrow display glitch) from eq_series
+                    # Scrub any prior single-tick borrow/repay API lag outliers from eq_series
                     if 498.10 < cached_total_usd < 540.0 and eq_series:
-                        eq_series = [pt for pt in eq_series if (460.0 < float(pt[1]) < 545.0) and not (1794683450.0 <= float(pt[0]) <= 1794683750.0 and float(pt[1]) < 498.10) and not (float(pt[0]) >= loop_ts - 600.0 and float(pt[1]) > cached_total_usd + 0.25)]
+                        eq_series = [pt for pt in eq_series if (460.0 < float(pt[1]) < 545.0) and not (1794683450.0 <= float(pt[0]) <= 1794683750.0 and float(pt[1]) < 498.10) and not (float(pt[0]) >= loop_ts - 900.0 and float(pt[1]) > cached_total_usd + 0.06)]
 
                     # TRUE SIGNED WALLET EQUITY & 8-HORIZON DELTAS (No artificial floor/clamp — if equity went in minus over any window, shows exact negative minus!)
                     if cached_total_usd > 85.0:
@@ -1555,8 +1552,7 @@ def main():
                 cons_guards = compute_conservative_guard(api, bbos)
                 allow_buys = (not soft_delev)
                 for sym_p, is_iso, f_key, b_key, max_tr, max_buy, t_size, max_sell_cap, lbl_p in (
-                    ("BTCU",      False, "CM_U",     "CM_BTC",     3 if allow_buys else 0,  2 if allow_buys else 0, 12.5, 0.00045, "MICRO-HEDGE • BTC/U $12.5"),
-                    ("BTCUSD1",   False, "CM_USD1",  "CM_BTC",     3 if allow_buys else 0,  2 if allow_buys else 0, 12.5, 0.00045, "MICRO-HEDGE • BTC/USD1 $12.5"),
+                    ("BTCU",      False, "CM_U",     "CM_BTC",     4 if allow_buys else 0,  3 if allow_buys else 0, 12.5, 0.00055, "MICRO-HEDGE • BTC/U $12.5"),
                     ("USD1USDC",  False, "CM_USDC",  "CM_USD1",   22 if allow_buys else 0, 14 if allow_buys else 0, 42.1, 460.0, "10x-1BPS • USD1/USDC $42"),
                     ("UUSDT",     False, "CM_USDT",  "CM_U",      14 if allow_buys else 0,  8 if allow_buys else 0, 42.1, 240.0, "10x-1BPS • U/USDT $42"),
                     ("USD1USDT",  False, "CM_USDT",  "CM_USD1",   30 if allow_buys else 0, 18 if allow_buys else 0, 35.1, 560.0, "5x-POOL • USD1 $35"),
