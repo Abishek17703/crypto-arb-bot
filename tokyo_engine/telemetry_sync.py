@@ -1832,31 +1832,8 @@ def main():
                                 "eqAfter": cached_total_usd,
                             })
 
-                # 300s (5-MINUTE) INDIVIDUAL UNDERWATER TIMER + STRICT 5-PER-LEVEL LADDER:
-                # Plus Triangular Velocity Unstick: Reroute high-locked USDCUSDT SELL tranches -> active USD1USDC BUY (10x yield) & high-locked USD1USDT SELL tranches -> active S1-SHORT at live Ask + reset floor!
-                if not getattr(api, "_s1_cb_tripped", False) and (loop_ts - getattr(api, "_last_tri_reroute", 0.0)) >= 2.0:
-                    uc_sells_far = [tx for tx in still_tranches if tx["symbol"] == "USDCUSDT" and tx["state"] == "SELL_OPEN" and bbos.get("USDCUSDT") and tx["sell_px"] > bbos["USDCUSDT"]["ask"] + 0.00004]
-                    u1uc_active = [tx for tx in still_tranches if tx["symbol"] == "USD1USDC"]
-                    if uc_sells_far and len(u1uc_active) < 4 and free_map["CM_USDC"] < 14.5:
-                        tx_uc = uc_sells_far[0]
-                        cr_uc = api.request("DELETE", "/sapi/v1/margin/order", {"symbol": "USDCUSDT", "orderId": tx_uc["sell_oid"]}, signed=True)
-                        if cr_uc.get("status") == "CANCELED":
-                            api._last_tri_reroute = loop_ts
-                            free_map["CM_USDC"] += max(0.0, tx_uc["qty"] - float(cr_uc.get("executedQty", 0)))
-                            api._last_buy_map = getattr(api, "_last_buy_map", {})
-                            api._last_buy_map["USDCUSDT"] = bbos["USDCUSDT"]["bid"]
-                            still_tranches.remove(tx_uc)
-                    u1_sells_far = [tx for tx in still_tranches if tx["symbol"] == "USD1USDT" and tx["state"] == "SELL_OPEN" and bbos.get("USD1USDT") and tx["sell_px"] > bbos["USD1USDT"]["ask"] + 0.00005]
-                    s1_sh_u1 = [tx for tx in still_tranches if tx["symbol"] == "USD1USDT" and tx["state"] in ("SHORT_SELL_OPEN", "SHORT_BUY_OPEN")]
-                    if u1_sells_far and len(s1_sh_u1) < 2 and bbos.get("USD1USDT", {}).get("bidQty", 1.0) < bbos.get("USD1USDT", {}).get("askQty", 1.0) * 1.45 and free_map["CM_USD1"] < 7.5:
-                        tx_u1 = u1_sells_far[0]
-                        cr_u1 = api.request("DELETE", "/sapi/v1/margin/order", {"symbol": "USD1USDT", "orderId": tx_u1["sell_oid"]}, signed=True)
-                        if cr_u1.get("status") == "CANCELED":
-                            api._last_tri_reroute = loop_ts
-                            free_map["CM_USD1"] += max(0.0, tx_u1["qty"] - float(cr_u1.get("executedQty", 0)))
-                            api._last_buy_map = getattr(api, "_last_buy_map", {})
-                            api._last_buy_map["USD1USDT"] = bbos["USD1USDT"]["bid"]
-                            still_tranches.remove(tx_u1)
+                # 300s (5-MINUTE) INDIVIDUAL UNDERWATER TIMER + STRICT ZERO-LOSS COST-BASIS LOCK:
+                # DISABLED Triangular Reroute & Vault Loss-Selling so we NEVER sell USDC/USD1 below buy_px cost basis!
                 stuck_sells = []
                 active_bbo_cnt = sum(
                     1 for tx in still_tranches
@@ -1887,8 +1864,8 @@ def main():
                         target_ask_px = round(live_ask_px if at_live_ask < 12 else live_ask_px + t_spec["tick"], t_spec["dec"])
                         eff_cost = max(0.0, (target_tr["buy_px"] - target_ask_px) * target_tr["qty"])
                         can_free_step = (eff_cost <= 1e-6 and target_ask_px >= target_tr["buy_px"] + t_spec["tick"] * 0.9)
-                        # Earned-Profit Vault Unstick: Recycle stuck inventory (>20s) using ONLY <=20% of already-banked session profit so capital NEVER stays stuck AND net equity strictly climbs!
-                        can_vault_unstick = (cached_total_usd >= 496.50 and target_tr["symbol"] not in ("BTCU", "BNBU", "ETHU", "BNBFDUSD", "SOLFDUSD") and eff_cost > 1e-6 and eff_cost <= min(unstick_vault_usd * 0.45, max(0.0, session_live_pnl * 0.20)) and eff_cost <= 0.0050 and (loop_ts - target_tr.get("ts", 0)) >= 20.0)
+                        # STRICT ZERO-LOSS RULE: Never sell below buy_px + 1 tick (can_vault_unstick = False) so 0% of earned profits are ever spent on dip sales!
+                        can_vault_unstick = False
                         if (can_free_step or can_vault_unstick) and target_ask_px < target_tr["sell_px"] - t_spec["tick"] * 0.5:
                             iso_p = {"isIsolated": "TRUE"} if target_tr["iso"] else {}
                             cr = api.request("DELETE", "/sapi/v1/margin/order", {"symbol": target_tr["symbol"], "orderId": target_tr["sell_oid"], **iso_p}, signed=True)
@@ -2148,8 +2125,8 @@ def main():
                 main_t_sz = 56.0 if s1_can_scale else 28.0
                 for sym_p, is_iso, f_key, b_key, max_tr, max_buy, t_size, max_sell_cap, lbl_p in (
                     ("FDUSDUSDT", False, "CM_USDT",  "CM_FDUSD",   (2 if fd_thin_ok else 1) if allow_buys else 0, (1 if fd_thin_ok else 0) if allow_buys else 0, 28.0,  56.0, "FDUSD-10x • SNIPER $28"),
-                    ("USDCUSDT",  False, "CM_USDT",  "CM_USDC",    (14 if s1_can_scale else 18) if allow_buys else 0, (6 if s1_can_scale else 8) if allow_buys else 0, main_t_sz, 280.0, "FIFO-2T • USDC"),
-                    ("USD1USDT",  False, "CM_USDT",  "CM_USD1",    (16 if s1_can_scale else 20) if allow_buys else 0, (6 if s1_can_scale else 8) if allow_buys else 0, main_t_sz, 280.0, "FIFO-2T • USD1"),
+                    ("USDCUSDT",  False, "CM_USDT",  "CM_USDC",    (6 if s1_can_scale else 10) if allow_buys else 0, (3 if s1_can_scale else 5) if allow_buys else 0, main_t_sz, 168.0, "FIFO-2T • USDC"),
+                    ("USD1USDT",  False, "CM_USDT",  "CM_USD1",    (8 if s1_can_scale else 12) if allow_buys else 0, (4 if s1_can_scale else 6) if allow_buys else 0, main_t_sz, 196.0, "FIFO-2T • USD1"),
                     ("USD1USDC",  False, "CM_USDC",  "CM_USD1",    0, 0, 14.1,  28.0, "TRI-MAKER • USD1/USDC"),
                     ("UUSDT",     False, "CM_USDT",  "CM_U",       1 if allow_buys else 0, 0, 14.1,  28.0, "FULL-10x • U/USDT $14"),
                 ):
@@ -2188,8 +2165,8 @@ def main():
                                     p_tr.append(nt_pl)
                                     s1_short_list.append(nt_pl)
 
-                    # Immediately post maker SELL for any free non-hedged base inventory (keep at least 5 tranche slots free for live BUY flips!)
-                    while sym_p not in ("USD1USDC", "FDUSDUSDC", "USD1U") and free_map[b_key] * q_bbo["ask"] >= 5.6 and len(p_tr) < (max_tr if is_crypto_u1 else max(1, max_tr - 5)):
+                    # Immediately post maker SELL for any free non-hedged base inventory (keep at least 2 tranche slots free for live BUY flips!)
+                    while sym_p not in ("USD1USDC", "FDUSDUSDC", "USD1U") and free_map[b_key] * q_bbo["ask"] >= 5.6 and len(p_tr) < (max_tr if is_crypto_u1 else max(1, max_tr - 2)):
                         if (sym_p == "USD1USDT" and cm_u1_debt >= 1.0) or (sym_p == "USDCUSDT" and cm_uc_debt >= 1.0):
                             break
                         max_base_s = free_map[b_key]
@@ -2383,7 +2360,7 @@ def main():
                 s1_eq2k_v = s1_equiv_2k_hr if "s1_equiv_2k_hr" in locals() else 0.0
                 s1_eq500_v = round(s1_raw_v * (500.0 / 56.0), 2)
                 s1_scale_v = bool(s1_can_scale) if "s1_can_scale" in locals() else False
-                s1_st_lbl = ("PILOT CB: " + getattr(api, "_s1_cb_reason", "")) if getattr(api, "_s1_cb_tripped", False) else (f"SCALED TO $56 + 6s VELOCITY + $0 DEBT • Net ${s1_net_v:+.4f} ({int(getattr(api, '_s1_short_rts', 0))} RTs)" if s1_scale_v else f"v9.3 6s VELOCITY + $0 DEBT PILOT • Net ${s1_net_v:+.4f} ({int(getattr(api, '_s1_short_rts', 0))}/4 RTs to Scale)")
+                s1_st_lbl = ("PILOT CB: " + getattr(api, "_s1_cb_reason", "")) if getattr(api, "_s1_cb_tripped", False) else (f"SCALED TO $56 ZERO-LOSS LOCK • Net ${s1_net_v:+.4f} ({int(getattr(api, '_s1_short_rts', 0))} RTs)" if s1_scale_v else f"v9.4 ZERO-LOSS COST-BASIS LOCK PILOT • Net ${s1_net_v:+.4f} ({int(getattr(api, '_s1_short_rts', 0))}/4 RTs to Scale)")
                 payload = {
                     "ts": int(loop_ts * 1000),
                     "startEquityUsd": start_equity_usd,
@@ -2414,7 +2391,7 @@ def main():
                             else (
                                 f"PAUSED AT <=$495.00 — ALL TRADING STOPPED UNTIL USER REPLY (Eq ${cached_total_usd:.4f})"
                                 if getattr(api, "_paused_495", False)
-                                else f"v9.3 6s VELOCITY + $0 DEBT ({s1_st_lbl}) • 1h {'+$' if equity_changes.get('1h', 0)>=0 else '-$'}{abs(equity_changes.get('1h', 0)):.4f}"
+                                else f"v9.4 ZERO-LOSS COST-BASIS LOCK ({s1_st_lbl}) • 1h {'+$' if equity_changes.get('1h', 0)>=0 else '-$'}{abs(equity_changes.get('1h', 0)):.4f}"
                             )
                         ),
                         "paused": bool(getattr(api, "_paused_495", False) or getattr(api, "_user_paused", False)),
@@ -2423,7 +2400,7 @@ def main():
                             "active": not bool(getattr(api, "_s1_cb_tripped", False)),
                             "cbTripped": bool(getattr(api, "_s1_cb_tripped", False)),
                             "cbReason": getattr(api, "_s1_cb_reason", ""),
-                            "strategy": "v9.3_ZERO_DEBT_6S_VELOCITY",
+                            "strategy": "v9.4_ZERO_LOSS_COST_BASIS_LOCK",
                             "budgetUsd": 56.0,
                             "trancheUsd": 56.0 if s1_scale_v else 28.0,
                             "realizedUsd": round(float(getattr(api, "_s1_short_realized", 0.0)), 4),
