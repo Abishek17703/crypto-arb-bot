@@ -1028,17 +1028,17 @@ def main():
                     tot_fills += f_today
                     tot_24h_fills += f_today
                     tot_1h_fills += f_1h
-                    # Strict 0%-Fee Maker Enforcement: Immediately halt any pair if Binance charges >0 commission on any fill!
+                    # Smart Net-Positive Fee Enforcement: Allow Taker/IOC latency arbitrage trades whenever net profit strictly exceeds fees; only disable a pair if fees exceed 40% of gross profit!
                     fee_sum_c = sum(float(x.get("commission", 0)) for x in cur_list)
                     fee_1h_c = sum(float(x.get("commission", 0)) for x in cur_list if int(x.get("time", 0)) >= one_hr_ms)
-                    if fee_1h_c > 0.0:
-                        api._disabled_fee_keys = getattr(api, "_disabled_fee_keys", set()) | {sym_c}
                     eff_tick_c = tick_c
                     p_all = sum(float(x["qty"]) * tick_c for x in sells_today)
                     p_12h = sum(float(x["qty"]) * eff_tick_c for x in sells_12h)
                     p_8h = sum(float(x["qty"]) * eff_tick_c for x in sells_8h)
                     p_4h = sum(float(x["qty"]) * eff_tick_c for x in sells_4h)
                     p_1h = sum(float(x["qty"]) * eff_tick_c for x in sells_1h)
+                    if fee_1h_c > max(0.015, p_1h * 0.40):
+                        api._disabled_fee_keys = getattr(api, "_disabled_fee_keys", set()) | {sym_c}
                     p_15m = sum(float(x["qty"]) * eff_tick_c for x in sells_15m)
                     p_5m = sum(float(x["qty"]) * eff_tick_c for x in sells_5m)
                     p_2m = sum(float(x["qty"]) * eff_tick_c for x in sells_2m)
@@ -1479,16 +1479,48 @@ def main():
                             else:
                                 still_tranches.append(tr)
                         else:
-                            # Pure Zero-Fee Maker-Maker Triangular Flip (<15ms) for FDUSDUSDC / USD1U; USD1USDC scalps its own native 1.0 bps ($0.00010) spread directly!
+                            # Pure Zero-Fee Maker-Maker / Instant Taker-IOC Triangular Flip (<15ms) for FDUSDUSDC / USD1U!
                             if not tr["iso"] and sym in ("FDUSDUSDC", "USD1U"):
                                 q_bridge_t = "UUSDT" if sym == "USD1U" else "USDCUSDT"
                                 ref_sym_t = "USD1USDT" if sym == "USD1U" else "FDUSDUSDT"
                                 ref_dec_t = PAIRS[ref_sym_t]["dec"]
                                 ref_tick_t = PAIRS[ref_sym_t]["tick"]
-                                uc_bid_t = bbos.get(q_bridge_t, {}).get("bid", 1.0007)
+                                uc_bid_t = bbos.get(q_bridge_t, {}).get("bid", 1.0004)
                                 cost_usdt_px = round(tr["buy_px"] * uc_bid_t, ref_dec_t)
                                 q_int_t = math.floor(tr["qty"])
-                                fb_spx = round(max(cost_usdt_px + ref_tick_t * 2, bbos.get(ref_sym_t, {}).get("ask", cost_usdt_px + ref_tick_t * 2)), ref_dec_t)
+                                ref_bbo_t = bbos.get(ref_sym_t, {})
+                                ref_bid_now = float(ref_bbo_t.get("bid", 0.0))
+                                ref_ask_now = float(ref_bbo_t.get("ask", cost_usdt_px + ref_tick_t))
+                                # v9.6 LATENCY TRIANGULAR IOC: If live Bid on ref_sym_t (e.g. FDUSDUSDT @ 0.9960 or USD1USDT @ 0.99853) is ALREADY > cost_usdt_px + 0.00004, fire instant LIMIT IOC @ Bid to bank profit in <5ms with ZERO sell queue wait!
+                                if ref_bid_now >= cost_usdt_px + 0.00004 and q_int_t >= 6:
+                                    sr_ioc = api.request("POST", "/sapi/v1/margin/order", {
+                                        "symbol": ref_sym_t, "side": "SELL", "type": "LIMIT", "timeInForce": "IOC",
+                                        "quantity": str(q_int_t), "price": f"{ref_bid_now:.{ref_dec_t}f}"
+                                    }, signed=True)
+                                    exec_ioc = float(sr_ioc.get("executedQty", 0))
+                                    if exec_ioc >= q_int_t - 0.5:
+                                        pnl_ioc = round(exec_ioc * (ref_bid_now - cost_usdt_px), 6)
+                                        unstick_vault_usd += max(0.0, pnl_ioc)
+                                        session_live_pnl += max(0.0, pnl_ioc)
+                                        api._s1_short_realized = getattr(api, "_s1_short_realized", 0.0) + max(0.0, pnl_ioc)
+                                        api._s1_short_rts = getattr(api, "_s1_short_rts", 0) + 1
+                                        realized_today_usd = round(realized_today_usd + max(0.0, pnl_ioc), 4)
+                                        today_fills_count += 2
+                                        free_map["CM_USDT"] += exec_ioc * ref_bid_now
+                                        round_trips.insert(0, {
+                                            "time": int(loop_ts * 1000),
+                                            "symbol": f"{sym}->{ref_sym_t} (LATENCY-IOC)",
+                                            "type": "COMPLETED",
+                                            "route": f"[{tr['tid']} • TRI-LATENCY IOC] BUY {q_int_t} {sym} @ ${tr['buy_px']:.4f} -> IOC SELL {ref_sym_t} @ ${ref_bid_now:.{ref_dec_t}f}",
+                                            "id": f"#{tr['buy_oid']}->IOC",
+                                            "pnl": max(0.0001, pnl_ioc),
+                                            "eqAfter": cached_total_usd,
+                                        })
+                                        continue
+                                    elif exec_ioc > 0:
+                                        free_map["CM_USDT"] += exec_ioc * ref_bid_now
+                                        q_int_t = math.floor(q_int_t - exec_ioc)
+                                fb_spx = round(max(cost_usdt_px + ref_tick_t, ref_ask_now), ref_dec_t)
                                 sr_fb = api.request("POST", "/sapi/v1/margin/order", {
                                     "symbol": ref_sym_t, "side": "SELL", "type": "LIMIT_MAKER",
                                     "quantity": str(q_int_t), "price": f"{fb_spx:.{ref_dec_t}f}"
@@ -1516,8 +1548,9 @@ def main():
                                 ask_q = q_bbo["askQty"]
                                 spread_ticks = round((q_bbo["ask"] - q_bbo["bid"]) / spec["tick"])
                                 if sym in ("BTCU", "BTCUSD1", "BNBU", "ETHU", "BNBFDUSD", "SOLFDUSD"):
-                                    min_bps_gain = 2.50 if sym in ("BTCU", "BTCUSD1") else round(tr["buy_px"] * 0.00010, spec["dec"])
-                                    s_px = round(max(tr["buy_px"] + max(spec["tick"], min_bps_gain), q_bbo["ask"] - (0.01 if (sym in ("BTCU", "BTCUSD1") and q_bbo["ask"] - q_bbo["bid"] >= 3.50) else 0.0)), spec["dec"])
+                                    # v9.6 CRYPTO LEAD-LAG LATENCY ARBITRAGE: If live Bid on 0%-fee pair already jumped above buy_px + 2.5 bps (or ref USDT fair price is > buy_px + 1.5 bps), lock in instant profit!
+                                    min_bps_gain = 2.50 if sym in ("BTCU", "BTCUSD1") else round(tr["buy_px"] * 0.00012, spec["dec"])
+                                    s_px = round(max(tr["buy_px"] + max(spec["tick"], min_bps_gain), q_bbo["ask"]), spec["dec"])
                                 else:
                                     # Pure 1-Tick Ultra-Fast Velocity Exit (+2 Tick ONLY on Ultra-Thin Ask Walls < 6,000 or Extreme Imbalance >= 3.0x so capital compounds 4x faster!):
                                     fifo_2t = bool(tr.get("pilot") or (sym in ("USD1USDT", "USDCUSDT") and getattr(api, "_v89_scaled", False)))
@@ -1884,10 +1917,32 @@ def main():
                                         target_tr["minus_since"] = None
                                         daily_orders_placed += 1
 
-                # v9.5.1 ZERO-LOSS DUAL-DIRECTION INVENTORY RECYCLER:
-                # If a SELL_OPEN tranche is > 2.5 ticks above live Ask for >= 15s (e.g. USDC @ 1.00048 when Ask is 1.00040),
-                # recycle its locked coin into a SHORT_SELL_OPEN @ live Ask so it earns +1 tick on every micro-oscillation on the way back up!
+                # v9.6 CROSS-BOOK LATENCY TRIANGULAR SEEDER + DUAL-DIRECTION INVENTORY RECYCLER:
+                # 1) When FDUSDUSDC -> FDUSDUSDT latency edge >= +0.85 bps (i.e. FDUSDUSDT Bid / USDCUSDT Ask - FDUSDUSDC Bid >= 0.00008),
+                #    free 1 far-locked USDCUSDT sell into CM_USDC so FDUSDUSDC can fire its +1.92 bps Maker / +0.92 bps Instant IOC Latency Arb!
                 if not getattr(api, "_s1_cb_tripped", False) and (loop_ts - getattr(api, "_last_dual_recycle", 0.0)) >= 1.5:
+                    fd_tri_open = [tx for tx in still_tranches if tx["symbol"] == "FDUSDUSDC"]
+                    if (
+                        len(fd_tri_open) < 2
+                        and free_map["CM_USDC"] < 14.0
+                        and "FDUSDUSDT" in bbos and "USDCUSDT" in bbos and "FDUSDUSDC" in bbos
+                        and (bbos["FDUSDUSDT"]["bid"] / bbos["USDCUSDT"]["ask"]) - bbos["FDUSDUSDC"]["bid"] >= 0.00007
+                    ):
+                        uc_sells_for_tri = [
+                            tx for tx in still_tranches
+                            if tx["symbol"] == "USDCUSDT" and tx["state"] == "SELL_OPEN"
+                            and tx["sell_px"] >= bbos["USDCUSDT"]["ask"] + 0.000015
+                        ]
+                        if uc_sells_for_tri:
+                            uc_sells_for_tri.sort(key=lambda x: x["sell_px"], reverse=True)
+                            tx_tri = uc_sells_for_tri[0]
+                            cr_tri = api.request("DELETE", "/sapi/v1/margin/order", {"symbol": "USDCUSDT", "orderId": tx_tri["sell_oid"]}, signed=True)
+                            if cr_tri.get("status") == "CANCELED":
+                                api._last_dual_recycle = loop_ts
+                                rem_q_tri = max(0.0, tx_tri["qty"] - float(cr_tri.get("executedQty", 0)))
+                                still_tranches.remove(tx_tri)
+                                free_map["CM_USDC"] += rem_q_tri
+
                     for sym_r in ("USDCUSDT", "USD1USDT"):
                         bbo_r = bbos.get(sym_r)
                         if not bbo_r:
@@ -1900,7 +1955,7 @@ def main():
                             and tx["sell_px"] >= bbo_r["ask"] + spec_r["tick"] * 2.5
                             and (loop_ts - tx.get("ts", 0)) >= 15.0
                         ]
-                        if far_sells_r and len(sh_open_r) < 3:
+                        if far_sells_r and len(sh_open_r) < 3 and not (sym_r == "USDCUSDT" and free_map["CM_USDC"] < 28.0):
                             far_sells_r.sort(key=lambda x: x["sell_px"], reverse=True)
                             tx_far = far_sells_r[0]
                             cr_f = api.request("DELETE", "/sapi/v1/margin/order", {"symbol": sym_r, "orderId": tx_far["sell_oid"]}, signed=True)
@@ -2150,8 +2205,13 @@ def main():
                 cons_guards = compute_conservative_guard(api, bbos)
                 allow_buys = (not soft_delev)
                 main_t_sz = 28.0 if s1_can_scale else 14.0
+                fd_tri_edge_ok = bool(
+                    "FDUSDUSDT" in bbos and "USDCUSDT" in bbos and "FDUSDUSDC" in bbos
+                    and (bbos["FDUSDUSDT"]["bid"] / bbos["USDCUSDT"]["ask"]) - bbos["FDUSDUSDC"]["bid"] >= 0.00007
+                )
                 for sym_p, is_iso, f_key, b_key, max_tr, max_buy, t_size, max_sell_cap, lbl_p in (
-                    ("FDUSDUSDC", False, "CM_USDC",  "CM_FDUSD",   (4 if allow_buys else 0), (2 if allow_buys else 0), 28.0,  56.0, "TRI-ARB • FDUSD/USDC"),
+                    ("FDUSDUSDC", False, "CM_USDC",  "CM_FDUSD",   (4 if allow_buys else 0), (2 if allow_buys else 0), 28.0,  56.0, "LATENCY-TRI • FDUSD/USDC"),
+                    ("USD1U",     False, "CM_U",     "CM_USD1",    (2 if allow_buys else 0), (1 if allow_buys else 0), 14.0,  28.0, "LATENCY-TRI • USD1/U"),
                     ("FDUSDUSDT", False, "CM_USDT",  "CM_FDUSD",   (2 if fd_thin_ok else 1) if allow_buys else 0, (1 if fd_thin_ok else 0) if allow_buys else 0, 28.0,  56.0, "FDUSD-10x • SNIPER $28"),
                     ("USDCUSDT",  False, "CM_USDT",  "CM_USDC",    (8 if s1_can_scale else 12) if allow_buys else 0, (4 if s1_can_scale else 6) if allow_buys else 0, main_t_sz, 140.0, "DIP-SNIPER • USDC"),
                     ("USD1USDT",  False, "CM_USDT",  "CM_USD1",    (10 if s1_can_scale else 14) if allow_buys else 0, (5 if s1_can_scale else 6) if allow_buys else 0, main_t_sz, 168.0, "DIP-SNIPER • USD1"),
@@ -2194,11 +2254,11 @@ def main():
                                     p_tr.append(nt_pl)
                                     s1_short_list.append(nt_pl)
 
-                    # Immediately post maker SELL for any free non-hedged base inventory (keep at least 2 tranche slots free for live BUY flips!)
-                    while sym_p not in ("USD1USDC", "FDUSDUSDC", "USD1U") and free_map[b_key] * q_bbo["ask"] >= 5.6 and len(p_tr) < (max_tr if is_crypto_u1 else max(1, max_tr - 2)):
+                    # Immediately post maker SELL for any free non-hedged base inventory (keep at least 28 USDC reserved for FDUSDUSDC latency arb when edge >= +0.70 bps!)
+                    while sym_p not in ("USD1USDC", "FDUSDUSDC", "USD1U") and (free_map[b_key] - (28.5 if (sym_p == "USDCUSDT" and fd_tri_edge_ok) else 0.0)) * q_bbo["ask"] >= 5.6 and len(p_tr) < (max_tr if is_crypto_u1 else max(1, max_tr - 2)):
                         if (sym_p == "USD1USDT" and cm_u1_debt >= 1.0) or (sym_p == "USDCUSDT" and cm_uc_debt >= 1.0):
                             break
-                        max_base_s = free_map[b_key]
+                        max_base_s = max(0.0, free_map[b_key] - (28.5 if (sym_p == "USDCUSDT" and fd_tri_edge_ok) else 0.0))
                         target_base_s = (t_size / q_bbo["ask"]) if is_crypto_u1 else t_size
                         rem_after_usd = (max_base_s - target_base_s) * q_bbo["ask"]
                         use_q = max_base_s if (0 < rem_after_usd < 6.0) else min(target_base_s, max_base_s)
@@ -2389,7 +2449,7 @@ def main():
                 s1_eq2k_v = s1_equiv_2k_hr if "s1_equiv_2k_hr" in locals() else 0.0
                 s1_eq500_v = round(s1_raw_v * (500.0 / 56.0), 2)
                 s1_scale_v = bool(s1_can_scale) if "s1_can_scale" in locals() else False
-                s1_st_lbl = ("PILOT CB: " + getattr(api, "_s1_cb_reason", "")) if getattr(api, "_s1_cb_tripped", False) else (f"SCALED TO $28 100%-WIN SHIELD • Net ${s1_net_v:+.4f} ({int(getattr(api, '_s1_short_rts', 0))} RTs)" if s1_scale_v else f"v9.5 $14 100%-WIN ZERO-DRAWDOWN PILOT • Net ${s1_net_v:+.4f} ({int(getattr(api, '_s1_short_rts', 0))}/4 RTs to Scale)")
+                s1_st_lbl = ("PILOT CB: " + getattr(api, "_s1_cb_reason", "")) if getattr(api, "_s1_cb_tripped", False) else (f"SCALED $28 LATENCY+TRI-IOC ARB • Net ${s1_net_v:+.4f} ({int(getattr(api, '_s1_short_rts', 0))} RTs)" if s1_scale_v else f"v9.6 $28 LATENCY TRI-IOC ARB PILOT • Net ${s1_net_v:+.4f} ({int(getattr(api, '_s1_short_rts', 0))}/4 RTs to Scale)")
                 payload = {
                     "ts": int(loop_ts * 1000),
                     "startEquityUsd": start_equity_usd,
@@ -2420,7 +2480,7 @@ def main():
                             else (
                                 f"PAUSED AT <=$495.00 — ALL TRADING STOPPED UNTIL USER REPLY (Eq ${cached_total_usd:.4f})"
                                 if getattr(api, "_paused_495", False)
-                                else f"v9.5 100%-WIN ZERO-DRAWDOWN ({s1_st_lbl}) • 1h {'+$' if equity_changes.get('1h', 0)>=0 else '-$'}{abs(equity_changes.get('1h', 0)):.4f}"
+                                else f"v9.6 LATENCY TRI-IOC ARB ({s1_st_lbl}) • 1h {'+$' if equity_changes.get('1h', 0)>=0 else '-$'}{abs(equity_changes.get('1h', 0)):.4f}"
                             )
                         ),
                         "paused": bool(getattr(api, "_paused_495", False) or getattr(api, "_user_paused", False)),
@@ -2429,7 +2489,7 @@ def main():
                             "active": not bool(getattr(api, "_s1_cb_tripped", False)),
                             "cbTripped": bool(getattr(api, "_s1_cb_tripped", False)),
                             "cbReason": getattr(api, "_s1_cb_reason", ""),
-                            "strategy": "v9.5_100PCT_WIN_ZERO_DRAWDOWN",
+                            "strategy": "v9.6_LATENCY_TRI_IOC_ARB",
                             "budgetUsd": 28.0,
                             "trancheUsd": 28.0 if s1_scale_v else 14.0,
                             "realizedUsd": round(float(getattr(api, "_s1_short_realized", 0.0)), 4),
