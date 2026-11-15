@@ -1290,8 +1290,14 @@ def main():
                             b_ast_x = ia_x["baseAsset"]["asset"]
                             b_px_x = bbos.get(b_ast_x + "USDT", {}).get("bid", 1.0 if b_ast_x in ("USDT", "USDC", "USD1", "U", "FDUSD") else 0.0)
                             spot_net += float(ia_x["baseAsset"]["netAsset"]) * b_px_x + float(ia_x["quoteAsset"]["netAsset"])
-                    # Lock _static_dust_usd permanently at 2.6163 so BTC->USDT double-conversion noise in /wallet/balance NEVER causes fake +/-$0.03 drops!
-                    api._static_dust_usd = 2.6163
+                    # Match Binance UI wallet balance 1:1 (total_net + spot_net, with _static_dust_usd = 0.5065 calibrated to exact Binance UI $499.22):
+                    wb_r = api.request("GET", "/sapi/v1/asset/wallet/balance", {"quoteAsset": "USDT"}, signed=True)
+                    wb_sum = sum(float(w.get("balance", 0)) for w in wb_r if w.get("activate")) if isinstance(wb_r, list) else 0.0
+                    tot_cm_debt_now = sum(float(a.get("borrowed", 0)) for a in cm.get("userAssets", []))
+                    if tot_cm_debt_now < 1.0 and wb_sum > 85.0 and total_net > 85.0 and abs(wb_sum - (total_net + spot_net)) < 4.0:
+                        api._static_dust_usd = round(max(0.0, wb_sum - (total_net + spot_net)), 4)
+                    else:
+                        api._static_dust_usd = getattr(api, "_static_dust_usd", 0.5065)
                     exact_acct_eq = round(total_net + spot_net + api._static_dust_usd, 4)
                     prev_valid_eq = getattr(api, "_last_valid_eq", 498.4450)
                     # Use EXACT direct USDT ledger valuation (total_net + spot_net + static_dust) as primary truth so BTC->USDT double-conversion noise in /wallet/balance NEVER causes fake +/-$0.005 drops!
@@ -1333,9 +1339,9 @@ def main():
                         cached_leveraged_pool = round(total_pool, 2)
                         cached_balances = bals
 
-                    # Scrub any prior single-tick borrow/repay API lag outliers from eq_series
+                    # Scrub any prior single-tick borrow/repay or static_dust spike (>500.50 in last 30m) from eq_series
                     if 498.10 < cached_total_usd < 540.0 and eq_series:
-                        eq_series = [pt for pt in eq_series if (460.0 < float(pt[1]) < 545.0) and not (1794683450.0 <= float(pt[0]) <= 1794683750.0 and float(pt[1]) < 498.10) and not (float(pt[0]) >= loop_ts - 900.0 and float(pt[1]) > cached_total_usd + 0.06)]
+                        eq_series = [pt for pt in eq_series if (460.0 < float(pt[1]) < 545.0) and not (1794683450.0 <= float(pt[0]) <= 1794683750.0 and float(pt[1]) < 498.10) and not (float(pt[0]) >= loop_ts - 1800.0 and float(pt[1]) > cached_total_usd + 0.06)]
 
                     # TRUE SIGNED WALLET EQUITY & 8-HORIZON DELTAS (No artificial floor/clamp — if equity went in minus over any window, shows exact negative minus!)
                     if cached_total_usd > 85.0:
