@@ -2396,26 +2396,38 @@ def main():
                         if bid_s_now > 0:
                             leg_mtm = (bid_s_now - t_s["buy_px"]) * t_s["qty"]
                             s1_short_mtm += leg_mtm
-                            # UNREACHABLE BOTTOM-END GUARD + SUB-SECOND (0.8s) TIME-STOP + HARD -$0.00030 SUB-CENT LOSS CAP:
-                            fair_cushion_lost = (
-                                (sym_ts == "BTCU" and fair_now_ts > 0 and (fair_now_ts - t_s["buy_px"]) < 0.50)
-                                or (sym_ts == "ETHU" and fair_now_ts > 0 and (fair_now_ts - t_s["buy_px"]) < 0.10)
-                            )
-                            time_stop_s = 0.80 if sym_ts in ("BTCU", "ETHU") else 1.50
-                            if leg_mtm <= -0.00030 or fair_cushion_lost or (age_s_open >= time_stop_s and ask_s_now <= t_s["sell_px"]):
+                            # ZERO-TAKER-FEE MAKER-ONLY STEP-DOWN (NEVER fire IOC SELL on BTCU where 0.10% taker fee = -$0.04 and $5 spread = -$0.003!):
+                            if sym_ts in ("BTCU", "ETHU"):
+                                # Keep 0%-fee LIMIT_MAKER SELL at max(buy_px + $0.50, ask_s_now) so every BTCU exit is 100% 0%-fee maker profit!
+                                min_prof_px = round(t_s["buy_px"] + (0.50 if sym_ts == "BTCU" else 0.20), spec_s["dec"])
+                                target_mkr_px = round(max(min_prof_px, ask_s_now), spec_s["dec"])
+                                if age_s_open >= 0.80 and abs(t_s["sell_px"] - target_mkr_px) >= 0.30 and target_mkr_px < t_s["sell_px"]:
+                                    cr_sc = api.request("DELETE", "/sapi/v1/margin/order", {"symbol": sym_ts, "orderId": t_s["sell_oid"]}, signed=True)
+                                    if cr_sc.get("status") == "CANCELED":
+                                        rem_sc = round(math.floor((t_s["qty"] - float(cr_sc.get("executedQty", 0))) / spec_s["step"] + 1e-9) * spec_s["step"], 6)
+                                        if rem_sc * bid_s_now >= 5.2:
+                                            sr_sc = api.request("POST", "/sapi/v1/margin/order", {
+                                                "symbol": sym_ts, "side": "SELL", "type": "LIMIT_MAKER",
+                                                "quantity": spec_s["q_fmt"].format(rem_sc), "price": f"{target_mkr_px:.{spec_s['dec']}f}"
+                                            }, signed=True)
+                                            if "orderId" in sr_sc:
+                                                t_s["sell_oid"] = sr_sc["orderId"]
+                                                t_s["sell_px"] = target_mkr_px
+                                                t_s["ts"] = loop_ts
+                            elif leg_mtm <= -0.00030 or (age_s_open >= 2.0 and ask_s_now <= t_s["buy_px"] + spec_s["tick"] * 0.5):
+                                # On 0%-taker-fee USD1USDT / USDCUSDT ($0.00001 tick), step down to breakeven LIMIT_MAKER at buy_px first!
                                 cr_sc = api.request("DELETE", "/sapi/v1/margin/order", {"symbol": sym_ts, "orderId": t_s["sell_oid"]}, signed=True)
                                 if cr_sc.get("status") == "CANCELED":
                                     rem_sc = round(math.floor((t_s["qty"] - float(cr_sc.get("executedQty", 0))) / spec_s["step"] + 1e-9) * spec_s["step"], 6)
                                     if rem_sc * bid_s_now >= 5.2:
-                                        if leg_mtm > -0.00020 and not fair_cushion_lost and ask_s_now >= t_s["buy_px"] and age_s_open < 1.60:
-                                            step_spx = round(max(t_s["buy_px"] + spec_s["tick"], min(ask_s_now, fair_now_ts if fair_now_ts > t_s["buy_px"] else ask_s_now)), spec_s["dec"])
+                                        if ask_s_now <= t_s["buy_px"] + spec_s["tick"] * 0.2 and ask_s_now >= t_s["buy_px"] - spec_s["tick"] * 0.2:
                                             sr_sc = api.request("POST", "/sapi/v1/margin/order", {
                                                 "symbol": sym_ts, "side": "SELL", "type": "LIMIT_MAKER",
-                                                "quantity": spec_s["q_fmt"].format(rem_sc), "price": f"{step_spx:.{spec_s['dec']}f}"
+                                                "quantity": spec_s["q_fmt"].format(rem_sc), "price": f"{ask_s_now:.{spec_s['dec']}f}"
                                             }, signed=True)
                                             if "orderId" in sr_sc:
                                                 t_s["sell_oid"] = sr_sc["orderId"]
-                                                t_s["sell_px"] = step_spx
+                                                t_s["sell_px"] = ask_s_now
                                                 t_s["ts"] = loop_ts
                                                 continue
                                         sr_ioc_sc = api.request("POST", "/sapi/v1/margin/order", {
