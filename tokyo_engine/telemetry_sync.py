@@ -749,24 +749,85 @@ def halt_all_orders_and_repay(api):
                     "symbol": "ETHU", "side": "SELL", "type": "LIMIT_MAKER",
                     "quantity": f"{sq_e:.4f}", "price": f"{spx_e:.2f}", "newClientOrderId": f"UNWIND_ETHU_{int(time.time())}"
                 }, signed=True)
-        # 2. Unwind U, USDC, FDUSD, USD1 into pure USDT at >= cost basis (0 loss):
-        for u_ast, u_sym, min_flr_px, dec_u in (
-            ("USDC",  "USDCUSDT",  1.00031, 5),
-            ("FDUSD", "FDUSDUSDT", 0.9961,  4),
-            ("U",     "UUSDT",     1.0001,  4),
-            ("USD1",  "USD1USDT",  0.99850, 5),
-        ):
-            a_info = assets_map.get(u_ast, {})
-            fv_a = math.floor(float(a_info.get("free", 0)))
-            if fv_a >= 6:
-                tk_u = api.request("GET", "/api/v3/ticker/bookTicker", {"symbol": u_sym})
-                if isinstance(tk_u, dict) and "askPrice" in tk_u:
-                    spx_u = max(min_flr_px, float(tk_u["askPrice"]))
-                    api.request("POST", "/sapi/v1/margin/order", {
-                        "symbol": u_sym, "side": "SELL", "type": "LIMIT_MAKER",
-                        "quantity": str(fv_a), "price": f"{spx_u:.{dec_u}f}",
-                        "newClientOrderId": f"UNWIND_{u_ast}_{int(time.time())}"
-                    }, signed=True)
+        # 2. Unwind 100% of ALL non-USDT assets (even 0.00001 fractional dust) into pure USDT:
+        # First cancel any stale UNWIND orders so 100% of FDUSD/U/USDC/USD1 is unlocked:
+        if not getattr(api, "_all_dust_swept", False):
+            all_cm2 = api.request("GET", "/sapi/v1/margin/openOrders", signed=True)
+            if isinstance(all_cm2, list):
+                for oo2 in all_cm2:
+                    api.request("DELETE", "/sapi/v1/margin/order", {"symbol": oo2.get("symbol"), "orderId": oo2.get("orderId")}, signed=True)
+            # Reclaim ALL Isolated Margin assets (even 0.0001) to Spot -> Cross Margin USDT:
+            iso_acc2 = api.request("GET", "/sapi/v1/margin/isolated/account", signed=True)
+            for ia2 in iso_acc2.get("assets", []):
+                isym2 = ia2.get("symbol", "")
+                for sk2 in ("quoteAsset", "baseAsset"):
+                    qa2 = ia2.get(sk2, {})
+                    ast2 = qa2.get("asset", "")
+                    fv2 = float(qa2.get("free", 0))
+                    bv2 = float(qa2.get("borrowed", 0)) + float(qa2.get("interest", 0))
+                    if fv2 >= 0.0001 and bv2 < 0.0001:
+                        api.request("POST", "/sapi/v1/margin/isolated/transfer", {"asset": ast2, "symbol": isym2, "transFrom": "ISOLATED_MARGIN", "transTo": "SPOT", "amount": f"{fv2:.8f}".rstrip("0").rstrip(".")}, signed=True)
+                        if ast2 == "USDT":
+                            api.request("POST", "/sapi/v1/margin/transfer", {"asset": "USDT", "amount": f"{fv2:.8f}".rstrip("0").rstrip("."), "type": "1"}, signed=True)
+            # Sweep fractional sub-$5 dust (USDC, USD1, FDUSD, U, ETH, BTC, SOL, BNB) by topping up $6 with USDT, selling 100%, or transferring residual <1.0 to Spot -> Convert to USDT -> Cross Margin:
+            cm_acc2 = api.request("GET", "/sapi/v1/margin/account", signed=True)
+            amap2 = {a.get("asset"): a for a in cm_acc2.get("userAssets", [])}
+            for s_ast, s_sym, dec_p in (
+                ("FDUSD", "FDUSDUSDT", 4),
+                ("U",     "UUSDT",     4),
+                ("USDC",  "USDCUSDT",  5),
+                ("USD1",  "USD1USDT",  5),
+            ):
+                fv_s = float(amap2.get(s_ast, {}).get("free", 0))
+                if 0.01 <= fv_s < 5.5:
+                    # Top up 6 units via LIMIT/IOC so total >= 6, then sell integer total
+                    tk_s = api.request("GET", "/api/v3/ticker/bookTicker", {"symbol": s_sym})
+                    if isinstance(tk_s, dict) and "askPrice" in tk_s:
+                        ask_s = float(tk_s["askPrice"])
+                        need_top = math.ceil(6.0 - math.floor(fv_s))
+                        api.request("POST", "/sapi/v1/margin/order", {
+                            "symbol": s_sym, "side": "BUY", "type": "LIMIT", "timeInForce": "IOC",
+                            "quantity": str(int(need_top)), "price": f"{ask_s:.{dec_p}f}"
+                        }, signed=True)
+                        time.sleep(0.1)
+                cm_acc3 = api.request("GET", "/sapi/v1/margin/account", signed=True)
+                amap3 = {a.get("asset"): a for a in cm_acc3.get("userAssets", [])}
+                fv_now = float(amap3.get(s_ast, {}).get("free", 0))
+                q_int_s = math.floor(fv_now)
+                if q_int_s >= 6:
+                    tk_s2 = api.request("GET", "/api/v3/ticker/bookTicker", {"symbol": s_sym})
+                    if isinstance(tk_s2, dict) and "bidPrice" in tk_s2:
+                        bid_s2 = float(tk_s2["bidPrice"])
+                        api.request("POST", "/sapi/v1/margin/order", {
+                            "symbol": s_sym, "side": "SELL", "type": "LIMIT", "timeInForce": "IOC",
+                            "quantity": str(q_int_s), "price": f"{bid_s2:.{dec_p}f}"
+                        }, signed=True)
+                        time.sleep(0.1)
+            # Move any remaining <1.0 fractional dust (0.58 FDUSD, 0.26 U, 0.33 USD1, 0.83 USDC, 0.00002 ETH) out of Cross Margin to Spot and convert to USDT via Binance Convert / Dust Transfer:
+            cm_acc4 = api.request("GET", "/sapi/v1/margin/account", signed=True)
+            for a4 in cm_acc4.get("userAssets", []):
+                ast4 = a4.get("asset", "")
+                fv4 = float(a4.get("free", 0))
+                bv4 = float(a4.get("borrowed", 0)) + float(a4.get("interest", 0))
+                if ast4 != "USDT" and fv4 > 0.000001 and bv4 < 0.000001:
+                    amt_str = f"{fv4:.8f}".rstrip("0").rstrip(".")
+                    api.request("POST", "/sapi/v1/margin/transfer", {"asset": ast4, "amount": amt_str, "type": "2"}, signed=True)
+            # In Spot, convert any non-USDT balances via Binance Convert quote or sweep back any USDT to Cross Margin:
+            spot_a = api.request("GET", "/api/v3/account", signed=True)
+            for sb4 in spot_a.get("balances", []):
+                s_ast4 = sb4.get("asset", "")
+                s_fv4 = float(sb4.get("free", 0))
+                if s_ast4 != "USDT" and s_fv4 >= 0.01:
+                    q_res = api.request("POST", "/sapi/v1/convert/getQuote", {"fromAsset": s_ast4, "toAsset": "USDT", "fromAmount": f"{s_fv4:.8f}".rstrip("0").rstrip(".")}, signed=True)
+                    if isinstance(q_res, dict) and "quoteId" in q_res:
+                        api.request("POST", "/sapi/v1/convert/acceptQuote", {"quoteId": q_res["quoteId"]}, signed=True)
+                        time.sleep(0.1)
+            spot_a2 = api.request("GET", "/api/v3/account", signed=True)
+            for sb5 in spot_a2.get("balances", []):
+                if sb5.get("asset") == "USDT" and float(sb5.get("free", 0)) >= 0.01:
+                    ut_s5 = f"{float(sb5['free']):.8f}".rstrip("0").rstrip(".")
+                    api.request("POST", "/sapi/v1/margin/transfer", {"asset": "USDT", "amount": ut_s5, "type": "1"}, signed=True)
+            api._all_dust_swept = True
     except Exception:
         pass
 
@@ -890,7 +951,11 @@ def main():
 
     # Load hard latched $495.00 circuit breaker & S3 user pause state BEFORE startup borrow/adopt!
     api._paused_495 = False
-    api._user_paused = False
+    api._user_paused = True
+    try:
+        s3.put_object(Bucket=S3_BUCKET, Key="pause-control.json", Body=json.dumps({"paused": True, "ts": int(time.time() * 1000)}).encode("utf-8"), ContentType="application/json")
+    except Exception:
+        pass
     try:
         if os.path.exists("/tmp/pause_495_latch.json"):
             with open("/tmp/pause_495_latch.json") as _pf:
@@ -899,7 +964,7 @@ def main():
         pass
     try:
         _p_init = json.loads(s3.get_object(Bucket=S3_BUCKET, Key="pause-control.json")["Body"].read().decode())
-        api._user_paused = bool(_p_init.get("paused", False))
+        api._user_paused = bool(_p_init.get("paused", True))
     except Exception:
         pass
 
