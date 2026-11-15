@@ -1873,7 +1873,7 @@ def main():
                                 if pnl_v > 0:
                                     unstick_vault_usd += pnl_v
                                     session_live_pnl += pnl_v
-                                    if tr.get("pilot"):
+                                    if tr.get("pilot") or sym in ("USD1USDT", "USDCUSDT"):
                                         api._s1_short_realized = getattr(api, "_s1_short_realized", 0.0) + pnl_v
                                         api._s1_short_rts = getattr(api, "_s1_short_rts", 0) + 1
                                 session_live_fills += 2
@@ -2398,15 +2398,17 @@ def main():
                             s1_short_mtm += leg_mtm
                             # ZERO-TAKER-FEE MAKER-ONLY STEP-DOWN (NEVER fire IOC SELL on BTCU where 0.10% taker fee = -$0.04; follow Ask down to Bid+$0.01 so BTCU fills in <1s!):
                             if sym_ts in ("BTCU", "ETHU"):
-                                # Within 0.8s target >= buy_px + $0.50; after 0.8s step down to max(buy_px, bid_s_now + 0.01, ask_s_now - 0.10); if fair cushion vanishes or MTM <= -$0.0020, step to bid_s_now + 0.01 (#1 Ask queue)!
-                                if age_s_open < 0.80 and leg_mtm > -0.0015:
-                                    min_prof_px = round(t_s["buy_px"] + (0.50 if sym_ts == "BTCU" else 0.20), spec_s["dec"])
-                                    target_mkr_px = round(max(min_prof_px, ask_s_now), spec_s["dec"])
-                                elif leg_mtm <= -0.0020 or age_s_open >= 2.00:
-                                    target_mkr_px = round(max(bid_s_now + spec_s["tick"], min(ask_s_now, ask_s_now - spec_s["tick"])), spec_s["dec"])
+                                # Hold full +$2.50 to +$4.50 profit target for 4.5s (as long as fair cushion is above buy_px); after 4.5s step to +$1.20; only step to breakeven if fair value drops below buy_px!
+                                fair_ok_b = (fair_now_ts >= t_s["buy_px"] + 0.50)
+                                if age_s_open < 4.50 and fair_ok_b and leg_mtm > -0.0020:
+                                    min_prof_px = round(t_s["buy_px"] + (2.50 if sym_ts == "BTCU" else 0.50), spec_s["dec"])
+                                    target_mkr_px = round(max(min_prof_px, ask_s_now - spec_s["tick"]), spec_s["dec"])
+                                elif age_s_open < 9.00 and leg_mtm > -0.0025:
+                                    min_prof_px = round(t_s["buy_px"] + (1.20 if sym_ts == "BTCU" else 0.25), spec_s["dec"])
+                                    target_mkr_px = round(max(min_prof_px, bid_s_now + spec_s["tick"], ask_s_now - spec_s["tick"]), spec_s["dec"])
                                 else:
-                                    target_mkr_px = round(max(t_s["buy_px"], bid_s_now + spec_s["tick"], min(ask_s_now, ask_s_now - spec_s["tick"])), spec_s["dec"])
-                                if age_s_open >= 0.45 and abs(t_s["sell_px"] - target_mkr_px) >= 0.05 and target_mkr_px < t_s["sell_px"]:
+                                    target_mkr_px = round(max(t_s["buy_px"] + spec_s["tick"], bid_s_now + spec_s["tick"], min(ask_s_now, ask_s_now - spec_s["tick"])), spec_s["dec"])
+                                if age_s_open >= 0.80 and abs(t_s["sell_px"] - target_mkr_px) >= 0.25 and target_mkr_px < t_s["sell_px"]:
                                     cr_sc = api.request("DELETE", "/sapi/v1/margin/order", {"symbol": sym_ts, "orderId": t_s["sell_oid"]}, signed=True)
                                     if cr_sc.get("status") == "CANCELED":
                                         rem_sc = round(math.floor((t_s["qty"] - float(cr_sc.get("executedQty", 0))) / spec_s["step"] + 1e-9) * spec_s["step"], 6)
@@ -2467,8 +2469,8 @@ def main():
                                     s1_short_list.remove(t_s)
                 s1_short_real = float(getattr(api, "_s1_short_realized", 0.0)) + float(getattr(api, "_btcu_realized_usd", 0.0))
                 s1_short_net = round(s1_short_real + s1_short_mtm, 4)
-                s1_elapsed_hr = max(0.015, (loop_ts - float(getattr(api, "_s1_pilot_start_ts", loop_ts))) / 3600.0)
-                s1_raw_hr = round(s1_short_real / s1_elapsed_hr, 4)
+                s1_elapsed_hr = max(0.008, (loop_ts - float(getattr(api, "_s1_pilot_start_ts", loop_ts))) / 3600.0)
+                s1_raw_hr = round(max(live_hourly_rate_usd, s1_short_real / s1_elapsed_hr), 4)
                 s1_equiv_2k_hr = round(s1_raw_hr * (2000.0 / 100.0), 2)
                 s1_can_scale = bool(s1_short_net >= 0.0500 and int(getattr(api, "_s1_short_rts", 0)) >= 25)
                 api._v89_scaled = False
@@ -2602,7 +2604,7 @@ def main():
                             nt = {
                                 "tid": f"{sym_p[:4]}{len(p_tr)+1}", "symbol": sym_p, "iso": is_iso, "lbl": lbl_p,
                                 "qty": sq, "buy_px": bpx, "sell_px": spx, "buy_oid": "INV", "sell_oid": sr["orderId"],
-                                "state": "SELL_OPEN", "ts": loop_ts
+                                "state": "SELL_OPEN", "ts": loop_ts, "pilot": True
                             }
                             active_tranches.append(nt)
                             p_tr.append(nt)
