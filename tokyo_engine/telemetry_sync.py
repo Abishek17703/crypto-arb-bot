@@ -1449,13 +1449,14 @@ def main():
                                     if synth_exit_g < tr["buy_px"] + 0.000008:
                                         tri_edge_gone = True
                             can_reroute_deep = (sym in ("USD1USDT", "USDCUSDT", "UUSDT", "USD1USDC") and not tr["iso"] and (q_bbo["bid"] - tr["buy_px"]) >= spec["tick"] * 3.5 and (loop_ts - tr.get("ts", 0)) >= 8.0)
-                            # Heavy-Bid Pre-Fill Shield (v7.5 Conservative + v8.8 FIFO Queue Lock for Pilot):
+                            # Heavy-Bid Pre-Fill Shield (v8.9 FIFO Queue Lock: applies to Pilot first, then all USD1USDT/USDCUSDT once scaled!):
                             cg_live = compute_conservative_guard(api, bbos).get(sym, {})
-                            min_safe_wall = 0.25 if tr.get("pilot") else (1.25 if sym in ("UUSDT", "USD1USDC") else (0.90 if sym == "BTCU" else 0.42))
+                            fifo_lock_on = bool(tr.get("pilot") or (sym in ("USD1USDT", "USDCUSDT") and getattr(api, "_v89_scaled", False)))
+                            min_safe_wall = 0.25 if fifo_lock_on else (1.25 if sym in ("UUSDT", "USD1USDC") else (0.90 if sym == "BTCU" else 0.42))
                             weak_bid_wall = (
                                 sym in ("USD1USDT", "USDCUSDT", "UUSDT", "USD1USDC", "FDUSDUSDT", "BTCU")
                                 and abs(tr["buy_px"] - q_bbo["bid"]) < (0.80 if sym == "BTCU" else spec["tick"] * 0.4)
-                                and (q_bbo["bidQty"] < q_bbo["askQty"] * min_safe_wall or (not tr.get("pilot") and cg_live.get("falling", False) and q_bbo["bidQty"] < q_bbo["askQty"] * 1.10) or (cg_live.get("max_bid") and tr["buy_px"] > cg_live["max_bid"] + spec["tick"] * 0.8))
+                                and (q_bbo["bidQty"] < q_bbo["askQty"] * min_safe_wall or (not fifo_lock_on and cg_live.get("falling", False) and q_bbo["bidQty"] < q_bbo["askQty"] * 1.10) or (cg_live.get("max_bid") and tr["buy_px"] > cg_live["max_bid"] + spec["tick"] * 0.8))
                             )
                             if float(o_live.get("executedQty", 0)) == 0 and (weak_bid_wall or tri_edge_gone or (sym in ("BTCU", "BTCUSD1", "BNBU", "ETHU", "BNBFDUSD", "SOLFDUSD") and q_bbo["bid"] > tr["buy_px"] + max(spec["tick"] * 0.5, 0.50 if sym in ("BTCU", "BTCUSD1") else 0.0)) or ((loop_ts - tr.get("ts", 0)) >= 0.40 and (can_step_top or can_step_sub or can_reroute_deep))):
                                 cr = api.request("DELETE", "/sapi/v1/margin/order", {"symbol": sym, "orderId": tr["buy_oid"], **iso_param}, signed=True)
@@ -1516,9 +1517,10 @@ def main():
                                     min_bps_gain = 2.50 if sym in ("BTCU", "BTCUSD1") else round(tr["buy_px"] * 0.00010, spec["dec"])
                                     s_px = round(max(tr["buy_px"] + max(spec["tick"], min_bps_gain), q_bbo["ask"] - (0.01 if (sym in ("BTCU", "BTCUSD1") and q_bbo["ask"] - q_bbo["bid"] >= 3.50) else 0.0)), spec["dec"])
                                 else:
-                                    # Pure 1-Tick Ultra-Fast Velocity Exit (+2 Tick Dynamic on Thin Ask Walls < 15K for v8.8 Pilot!):
-                                    target_ticks = 2 if (spread_ticks >= 2 or (tr.get("pilot") and ask_q < 15000.0)) else 1
-                                    s_px = round(max(tr["buy_px"] + spec["tick"] * target_ticks, q_bbo["ask"] + (spec["tick"] if (tr.get("pilot") and ask_q < 15000.0 and spread_ticks == 1) else 0.0)), spec["dec"])
+                                    # Pure 1-Tick Ultra-Fast Velocity Exit (+2 Tick Dynamic on Thin Ask Walls < 15K for Pilot & Scaled Grid!):
+                                    fifo_2t = bool(tr.get("pilot") or (sym in ("USD1USDT", "USDCUSDT") and getattr(api, "_v89_scaled", False)))
+                                    target_ticks = 2 if (spread_ticks >= 2 or (fifo_2t and ask_q < 15000.0)) else 1
+                                    s_px = round(max(tr["buy_px"] + spec["tick"] * target_ticks, q_bbo["ask"] + (spec["tick"] if (fifo_2t and ask_q < 15000.0 and spread_ticks == 1) else 0.0)), spec["dec"])
                                 api._last_buy_map = getattr(api, "_last_buy_map", {})
                                 api._last_buy_map[sym] = tr["buy_px"]
                                 cm_bkey = "CM_BTC" if sym in ("BTCU", "BTCUSD1") else ("CM_ETH" if sym == "ETHU" else ("CM_BNB" if sym in ("BNBU", "BNBFDUSD") else ("CM_SOL" if sym == "SOLFDUSD" else ("CM_FDUSD" if sym == "FDUSDUSDT" else ("CM_USDC" if sym == "USDCUSDT" else ("CM_U" if sym in ("UUSDT", "UUSDC") else "CM_USD1"))))))
@@ -1609,9 +1611,9 @@ def main():
                                             tr["ts"] = loop_ts
                                             still_tranches.append(tr)
                                             continue
-                            # Smart +2 -> +1 Tick Profit Step-Down: Follow Ask down immediately if Ask drops, OR step +2 tick target down to +1 tick profit after 15s (pilot) / 65s so capital never idles!
+                            # Smart +2 -> +1 Tick Profit Step-Down: Follow Ask down immediately if Ask drops, OR step +2 tick target down to +1 tick profit after 15s (FIFO-2T) / 65s so capital never idles!
                             min_step_gain = 2.50 if sym in ("BTCU", "BTCUSD1") else spec["tick"]
-                            step_wait_s = 15.0 if tr.get("pilot") else 65.0
+                            step_wait_s = 15.0 if (tr.get("pilot") or (sym in ("USD1USDT", "USDCUSDT") and getattr(api, "_v89_scaled", False))) else 65.0
                             want_step_1tick = (
                                 sym not in ("FDUSDUSDC",)
                                 and float(o_live.get("executedQty", 0)) == 0
@@ -2105,6 +2107,16 @@ def main():
                 s1_raw_hr = round(s1_short_real / s1_elapsed_hr, 4)
                 s1_equiv_2k_hr = round(s1_raw_hr * (2000.0 / 28.0), 2)
                 s1_can_scale = bool(int(getattr(api, "_s1_short_rts", 0)) >= 6 and s1_short_net >= 0.0005 and not getattr(api, "_s1_cb_tripped", False))
+                api._v89_scaled = s1_can_scale
+                if s1_can_scale:
+                    # Reclaim idle BUY orders from thick-wall UUSDT / FDUSDUSDT / USD1USDC once scaled so 100% of cash feeds USD1USDT & USDCUSDT!
+                    for t_sl in list([t for t in active_tranches if t["symbol"] in ("UUSDT", "FDUSDUSDT", "USD1USDC") and t["state"] == "BUY_OPEN"]):
+                        if t_sl.get("buy_oid"):
+                            cr_sl = api.request("DELETE", "/sapi/v1/margin/order", {"symbol": t_sl["symbol"], "orderId": t_sl["buy_oid"]}, signed=True)
+                            if cr_sl.get("status") == "CANCELED":
+                                q_k_sl = "CM_USDC" if t_sl["symbol"] == "USD1USDC" else "CM_USDT"
+                                free_map[q_k_sl] += max(0.0, t_sl["qty"] - float(cr_sl.get("executedQty", 0))) * t_sl["buy_px"]
+                        active_tranches.remove(t_sl)
                 if s1_short_mtm <= -0.0120 and not getattr(api, "_s1_cb_tripped", False):
                     api._s1_cb_tripped = True
                     api._s1_cb_reason = "Pilot MTM <= -$0.012"
@@ -2119,11 +2131,11 @@ def main():
                 allow_buys = (not soft_delev)
                 main_t_sz = 28.0 if s1_can_scale else 14.1
                 for sym_p, is_iso, f_key, b_key, max_tr, max_buy, t_size, max_sell_cap, lbl_p in (
-                    ("USD1USDC",  False, "CM_USDC",  "CM_USD1",    4 if allow_buys else 0,  2 if allow_buys else 0, 14.1,  42.0, "TRI-MAKER • USD1/USDC"),
-                    ("UUSDT",     False, "CM_USDT",  "CM_U",       6 if allow_buys else 0,  3 if allow_buys else 0, 14.1,  42.0, "FULL-10x • U/USDT $14"),
-                    ("FDUSDUSDT", False, "CM_USDT",  "CM_FDUSD",   4 if allow_buys else 0,  2 if allow_buys else 0, 14.1,  28.0, "FULL-10x • FDUSD/USDT $14"),
-                    ("USD1USDT",  False, "CM_USDT",  "CM_USD1",   32 if allow_buys else 0, 22 if allow_buys else 0, main_t_sz, 224.0, "FIFO-LOCK • USD1"),
-                    ("USDCUSDT",  False, "CM_USDT",  "CM_USDC",   28 if allow_buys else 0, 18 if allow_buys else 0, main_t_sz, 196.0, "FIFO-LOCK • USDC"),
+                    ("USDCUSDT",  False, "CM_USDT",  "CM_USDC",   28 if allow_buys else 0, 12 if allow_buys else 0, main_t_sz, 224.0, "FIFO-2T • USDC"),
+                    ("USD1USDT",  False, "CM_USDT",  "CM_USD1",   32 if allow_buys else 0, 18 if allow_buys else 0, main_t_sz, 252.0, "FIFO-2T • USD1"),
+                    ("USD1USDC",  False, "CM_USDC",  "CM_USD1",    (0 if s1_can_scale else 2) if allow_buys else 0, (0 if s1_can_scale else 1) if allow_buys else 0, 14.1,  28.0, "TRI-MAKER • USD1/USDC"),
+                    ("UUSDT",     False, "CM_USDT",  "CM_U",       (2 if s1_can_scale else 4) if allow_buys else 0, (0 if s1_can_scale else 2) if allow_buys else 0, 14.1,  28.0, "FULL-10x • U/USDT $14"),
+                    ("FDUSDUSDT", False, "CM_USDT",  "CM_FDUSD",   (2 if s1_can_scale else 3) if allow_buys else 0, (0 if s1_can_scale else 1) if allow_buys else 0, 14.1,  28.0, "FULL-10x • FDUSD/USDT $14"),
                 ):
                     q_bbo = bbos.get(sym_p)
                     if not q_bbo or q_bbo["bid"] <= 0:
@@ -2249,10 +2261,10 @@ def main():
                             cap_top = 3 if q_bbo["bidQty"] >= q_bbo["askQty"] * 2.20 else (2 if q_bbo["bidQty"] >= q_bbo["askQty"] * 1.35 else 0)
                             cap_sub, max_lvls = 2, 3
                         elif sym_p == "USDCUSDT":
-                            cap_top = 7 if q_bbo["bidQty"] >= q_bbo["askQty"] * 2.50 else (5 if q_bbo["bidQty"] >= q_bbo["askQty"] * 1.15 else (2 if q_bbo["bidQty"] >= q_bbo["askQty"] * 0.45 else 0))
+                            cap_top = 7 if q_bbo["bidQty"] >= q_bbo["askQty"] * 2.50 else (5 if q_bbo["bidQty"] >= q_bbo["askQty"] * 1.15 else (3 if q_bbo["bidQty"] >= q_bbo["askQty"] * 0.25 else 0))
                             cap_sub, max_lvls = 4, 5
                         else:
-                            cap_top = 7 if q_bbo["bidQty"] >= q_bbo["askQty"] * 2.50 else (5 if q_bbo["bidQty"] >= q_bbo["askQty"] * 1.15 else (2 if q_bbo["bidQty"] >= q_bbo["askQty"] * 0.45 else 0))
+                            cap_top = 7 if q_bbo["bidQty"] >= q_bbo["askQty"] * 2.50 else (5 if q_bbo["bidQty"] >= q_bbo["askQty"] * 1.15 else (3 if q_bbo["bidQty"] >= q_bbo["askQty"] * 0.25 else 0))
                             cap_sub, max_lvls = 4, 5
                         base_bpx = round(q_bbo["bid"] + spec["tick"], spec["dec"]) if (q_bbo["ask"] - q_bbo["bid"] >= spec["tick"] * 1.9) else round(q_bbo["bid"], spec["dec"])
                         if cg_p.get("max_bid"):
