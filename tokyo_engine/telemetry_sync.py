@@ -2101,7 +2101,7 @@ def main():
                             free_map["CM_BTC"] = 0.0
                             api._btc_drain_oid = (sr_btc["orderId"], spx_btc, loop_ts)
 
-                # Drain excess U above 34 U via 0%-fee UUSDT LIMIT_MAKER @ live Ask!
+                # Drain excess U above 68 U via 0%-fee UUSDT LIMIT_MAKER @ live Ask!
                 u_drain_ord = getattr(api, "_u_drain_oid", None)
                 if u_drain_ord is not None:
                     if not any(o.get("orderId") == u_drain_ord[0] for o in cached_open_orders):
@@ -2109,8 +2109,8 @@ def main():
                     elif "UUSDT" in bbos and (bbos["UUSDT"]["ask"] < u_drain_ord[1] - 0.00005 or loop_ts - u_drain_ord[2] > 5.0):
                         api.request("DELETE", "/sapi/v1/margin/order", {"symbol": "UUSDT", "orderId": u_drain_ord[0]}, signed=True)
                         api._u_drain_oid = None
-                elif cm_u_debt < 1.0 and "UUSDT" in bbos and free_map["CM_U"] >= 45.0:
-                    sq_u_d = math.floor(free_map["CM_U"] - 32.0)
+                elif cm_u_debt < 1.0 and "UUSDT" in bbos and free_map["CM_U"] >= 72.0:
+                    sq_u_d = math.floor(free_map["CM_U"] - 58.0)
                     if sq_u_d >= 6:
                         spx_u_d = bbos["UUSDT"]["ask"]
                         sr_u_d = api.request("POST", "/sapi/v1/margin/order", {"symbol": "UUSDT", "side": "SELL", "type": "LIMIT_MAKER", "quantity": str(sq_u_d), "price": f"{spx_u_d:.4f}"}, signed=True)
@@ -2118,15 +2118,15 @@ def main():
                             free_map["CM_U"] = max(0.0, free_map["CM_U"] - sq_u_d)
                             api._u_drain_oid = (sr_u_d["orderId"], spx_u_d, loop_ts)
 
-                # Cancel any UUSDT SELL order that trapped CM_U needed for ETHU Delta-Neutral Pilot (< 26 U available)!
+                # Cancel any UUSDT SELL order that trapped CM_U needed for ETHU Delta-Neutral Pilot (< 54 U available)!
                 for tx_uu in list([t for t in active_tranches if t["symbol"] == "UUSDT" and t["state"] == "SELL_OPEN"]):
-                    if free_map["CM_U"] < 26.0 and tx_uu.get("sell_oid"):
+                    if free_map["CM_U"] < 54.0 and tx_uu.get("sell_oid"):
                         cr_uu = api.request("DELETE", "/sapi/v1/margin/order", {"symbol": "UUSDT", "orderId": tx_uu["sell_oid"]}, signed=True)
                         if cr_uu.get("status") == "CANCELED":
                             free_map["CM_U"] += max(0.0, tx_uu["qty"] - float(cr_uu.get("executedQty", 0)))
                         active_tranches.remove(tx_uu)
 
-                # v9.7.3 DELTA-NEUTRAL ETHU 0%-FEE LEAD-LAG MICRO-PILOT ($28 Scaled Budget = 0.0150 ETH 1:1 Hedged):
+                # v9.7.4 2x-TRANCHE DELTA-NEUTRAL ETHU 0%-FEE LEAD-LAG MICRO-PILOT ($56 Scaled Budget = 0.0300 ETH 1:1 Hedged):
                 eth_debt_now = sum(float(b.get("borrowed", 0)) for b in cached_balances if "ETH (5x Cross)" in b.get("asset", ""))
                 ethu_tr_list = [tx for tx in active_tranches if tx["symbol"] == "ETHU"]
                 # True 1:1 Delta-Neutral MTM: Because ETHU is 1:1 hedged against borrowed ETH, directional ETH moves cancel out 100% (0.0000 MTM)!
@@ -2134,12 +2134,12 @@ def main():
                 ethu_real_v = float(getattr(api, "_ethu_realized_usd", 0.0))
                 ethu_net_v = round(ethu_real_v, 4)
                 if not soft_delev and "ETHU" in bbos and (loop_ts - getattr(api, "_last_eth_seed", 0.0)) >= 8.0:
-                    # Seed 1x fixed 0.0150 ETH (~$27.50) loan & convert to U on 0%-fee ETHU if CM_U + ETHU orders < $24 so ETHU is 100% 1:1 Delta-Neutral!
+                    # Seed 2x fixed 0.0150 ETH (0.0300 ETH = ~$55.00 total) loan & convert to U on 0%-fee ETHU so 2 independent tranches trade across levels 100% 1:1 Delta-Neutral!
                     ethu_u_locked = sum(tx["qty"] * tx["buy_px"] for tx in ethu_tr_list if tx["state"] == "BUY_OPEN")
                     ethu_eth_locked = sum(tx["qty"] for tx in ethu_tr_list if tx["state"] == "SELL_OPEN")
-                    if eth_debt_now < 0.0080 and (free_map["CM_U"] + ethu_u_locked) < 24.0 and (free_map["CM_ETH"] + ethu_eth_locked) < 0.0080:
+                    if eth_debt_now < 0.0230 and (free_map["CM_U"] + ethu_u_locked) < 48.0 and free_map["CM_ETH"] < 0.0080:
                         api._last_eth_seed = loop_ts
-                        need_eth = round(max(0.0080, 0.0150 - eth_debt_now), 4)
+                        need_eth = round(max(0.0080, 0.0300 - eth_debt_now), 4)
                         br_eth = api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "ETH", "isIsolated": "FALSE", "amount": f"{need_eth:.4f}", "type": "BORROW"}, signed=True)
                         if "tranId" in br_eth:
                             free_map["CM_ETH"] += need_eth
@@ -2244,7 +2244,7 @@ def main():
                     and (bbos["FDUSDUSDT"]["bid"] / bbos["USDCUSDT"]["ask"]) - bbos["FDUSDUSDC"]["bid"] >= -0.00003
                 )
                 for sym_p, is_iso, f_key, b_key, max_tr, max_buy, t_size, max_sell_cap, lbl_p in (
-                    ("ETHU",      False, "CM_U",     "CM_ETH",     (2 if (allow_buys and not getattr(api, "_ethu_cb_tripped", False)) else 0), (1 if (allow_buys and not getattr(api, "_ethu_cb_tripped", False)) else 0), 27.5,  0.018, "DELTA-NEUTRAL • ETH/U $28"),
+                    ("ETHU",      False, "CM_U",     "CM_ETH",     (3 if (allow_buys and not getattr(api, "_ethu_cb_tripped", False)) else 0), (2 if (allow_buys and not getattr(api, "_ethu_cb_tripped", False)) else 0), 27.5,  0.036, "DELTA-NEUTRAL • ETH/U $56"),
                     ("FDUSDUSDC", False, "CM_USDC",  "CM_FDUSD",   (4 if allow_buys else 0), (2 if allow_buys else 0), 28.0,  56.0, "LATENCY-TRI • FDUSD/USDC"),
                     ("USD1U",     False, "CM_U",     "CM_USD1",    0, 0, 14.0,  28.0, "LATENCY-TRI • USD1/U"),
                     ("FDUSDUSDT", False, "CM_USDT",  "CM_FDUSD",   (2 if fd_thin_ok else 1) if allow_buys else 0, (1 if fd_thin_ok else 0) if allow_buys else 0, 28.0,  56.0, "FDUSD-10x • SNIPER $28"),
@@ -2304,7 +2304,10 @@ def main():
                         pmap = getattr(api, "_partial_buy_map", {}).get(sym_p, (0.0, 0.0))
                         lpx = getattr(api, "_last_buy_map", {}).get(sym_p, 0.0)
                         p_flr = max(pmap[0] if (loop_ts - pmap[1] < 60.0) else 0.0, lpx)
-                        if is_crypto_u1 and p_flr <= 0:
+                        if sym_p == "ETHU":
+                            # Newly borrowed 1:1 hedged ETH tranche converts at live Ask (independent of older tranche's cost basis)!
+                            p_flr = q_bbo["bid"]
+                        elif is_crypto_u1 and p_flr <= 0:
                             p_flr = q_bbo["bid"]
                         min_gain_flr = 2.50 if (sym_p in ("BTCU", "BTCUSD1") and p_flr > 0) else (round(p_flr * 0.00005, spec["dec"]) if (is_crypto_u1 and p_flr > 0) else spec["tick"])
                         min_spx = round(max(q_bbo["ask"], (p_flr + max(spec["tick"], min_gain_flr)) if p_flr > 0 else q_bbo["ask"]), spec["dec"])
@@ -2475,7 +2478,7 @@ def main():
                     bbo_o = bbos.get(s_o, {})
                     ask_o = float(bbo_o.get("ask", px_o))
                     tick_o = PAIRS.get(s_o, {}).get("tick", 0.00001)
-                    if side_o == "SELL" and age_o > 90.0 and px_o > ask_o + tick_o * 3.5:
+                    if side_o == "SELL" and s_o != "ETHU" and age_o > 90.0 and px_o > ask_o + tick_o * 3.5:
                         stuck_tr_cnt += 1
                     else:
                         active_tr_cnt += 1
