@@ -710,7 +710,7 @@ def halt_all_orders_and_repay(api):
     auto_compound_borrow(api, force_repay_all=True)
     # 3. Sweep 100% of ALL non-USDT assets (Cross Margin, Isolated Margin, and Spot — even 0.00001 fractional dust) into pure USDT:
     try:
-        # 3a. Reclaim ALL Isolated Margin assets to Spot:
+        # 3a. Reclaim ALL Isolated Margin assets to Spot -> Cross Margin (and deactivate empty Isolated accounts):
         iso_acc2 = api.request("GET", "/sapi/v1/margin/isolated/account", signed=True)
         for ia2 in iso_acc2.get("assets", []):
             isym2 = ia2.get("symbol", "")
@@ -719,13 +719,19 @@ def halt_all_orders_and_repay(api):
                 ast2 = qa2.get("asset", "")
                 fv2 = float(qa2.get("free", 0))
                 bv2 = float(qa2.get("borrowed", 0)) + float(qa2.get("interest", 0))
-                if fv2 >= 0.00001 and bv2 < 0.00001:
+                if fv2 >= 0.000001 and bv2 < 0.000001:
+                    mx_i = api.request("GET", "/sapi/v1/margin/maxTransferable", {"asset": ast2, "isolatedSymbol": isym2}, signed=True)
+                    mx_iv = min(fv2, float(mx_i.get("amount", fv2))) if isinstance(mx_i, dict) else fv2
                     for prec_i in (8, 6, 4, 2):
-                        amt_i = f"{math.floor(fv2 * (10 ** prec_i)) / (10 ** prec_i):.{prec_i}f}".rstrip("0").rstrip(".")
+                        amt_i = f"{math.floor(mx_iv * (10 ** prec_i)) / (10 ** prec_i):.{prec_i}f}".rstrip("0").rstrip(".")
                         if amt_i and float(amt_i) > 0:
                             r_iso = api.request("POST", "/sapi/v1/margin/isolated/transfer", {"asset": ast2, "symbol": isym2, "transFrom": "ISOLATED_MARGIN", "transTo": "SPOT", "amount": amt_i}, signed=True)
                             if "tranId" in r_iso:
                                 break
+                            r_iso2 = api.request("POST", "/sapi/v1/asset/transfer", {"type": "ISOLATEDMARGIN_MARGIN", "asset": ast2, "amount": amt_i, "fromSymbol": isym2}, signed=True)
+                            if "tranId" in r_iso2:
+                                break
+            api.request("DELETE", "/sapi/v1/margin/isolated/account", {"symbol": isym2}, signed=True)
         # 3b. In Cross Margin, repay any tiny ETH debt first:
         cm_acc = api.request("GET", "/sapi/v1/margin/account", signed=True)
         assets_map = {a.get("asset"): a for a in cm_acc.get("userAssets", [])}
@@ -769,41 +775,93 @@ def halt_all_orders_and_repay(api):
                 api.request("POST", "/sapi/v1/margin/order", {
                     "symbol": s_sym, "side": "BUY", "type": "MARKET", "quantity": str(need_top)
                 }, signed=True)
-                time.sleep(0.1)
+                time.sleep(0.25)
             cm_acc3 = api.request("GET", "/sapi/v1/margin/account", signed=True)
             amap3 = {a.get("asset"): a for a in cm_acc3.get("userAssets", [])}
             q_int_s = int(math.floor(float(amap3.get(s_ast, {}).get("free", 0))))
             if q_int_s >= 6:
-                api.request("POST", "/sapi/v1/margin/order", {
+                r_m_s = api.request("POST", "/sapi/v1/margin/order", {
                     "symbol": s_sym, "side": "SELL", "type": "MARKET", "quantity": str(q_int_s)
                 }, signed=True)
-                time.sleep(0.1)
-        # 3d. Transfer 100% of remaining fractional non-USDT assets (< 1.0 unit: 0.83 USDC, 0.02 U, 0.00002 ETH, etc.) from Cross Margin to Spot so Cross Margin is 100.0000% pure USDT!
+                if "orderId" not in r_m_s:
+                    tk_m = api.request("GET", "/api/v3/ticker/bookTicker", {"symbol": s_sym})
+                    if isinstance(tk_m, dict) and "bidPrice" in tk_m:
+                        dec_m = PAIRS.get(s_sym, {}).get("dec", 4)
+                        api.request("POST", "/sapi/v1/margin/order", {
+                            "symbol": s_sym, "side": "SELL", "type": "LIMIT", "timeInForce": "IOC",
+                            "quantity": str(q_int_s), "price": f"{float(tk_m['bidPrice']):.{dec_m}f}"
+                        }, signed=True)
+                time.sleep(0.2)
+        # 3d. Convert 100% of remaining non-USDT assets (even 0.00001) into pure USDT via Binance Dust-to-BNB (/sapi/v1/asset/dust-btc & /sapi/v1/asset/dust) + Spot Convert:
+        # First repay 100% of any tiny residual debt across all assets so maxTransferable == free:
         cm_acc4 = api.request("GET", "/sapi/v1/margin/account", signed=True)
         for a4 in cm_acc4.get("userAssets", []):
             ast4 = a4.get("asset", "")
             fv4 = float(a4.get("free", 0))
             bv4 = float(a4.get("borrowed", 0)) + float(a4.get("interest", 0))
-            if ast4 != "USDT" and fv4 > 0.000001 and bv4 < 0.000001:
+            if bv4 > 0.00000001 and fv4 > 0.00000001:
+                api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": ast4, "isIsolated": "FALSE", "amount": f"{min(fv4, bv4):.8f}", "type": "REPAY"}, signed=True)
+        cm_acc5 = api.request("GET", "/sapi/v1/margin/account", signed=True)
+        for a5 in cm_acc5.get("userAssets", []):
+            ast5 = a5.get("asset", "")
+            fv5 = float(a5.get("free", 0))
+            if ast5 != "USDT" and fv5 > 0.000001:
+                mx_r = api.request("GET", "/sapi/v1/margin/maxTransferable", {"asset": ast5}, signed=True)
+                mx_v = min(fv5, float(mx_r.get("amount", fv5))) if isinstance(mx_r, dict) else fv5
                 for prec_c in (8, 6, 5, 4, 2):
-                    amt_c = f"{math.floor(fv4 * (10 ** prec_c)) / (10 ** prec_c):.{prec_c}f}".rstrip("0").rstrip(".")
+                    amt_c = f"{math.floor(mx_v * (10 ** prec_c)) / (10 ** prec_c):.{prec_c}f}".rstrip("0").rstrip(".")
                     if amt_c and float(amt_c) > 0:
-                        r_cm = api.request("POST", "/sapi/v1/margin/transfer", {"asset": ast4, "amount": amt_c, "type": "2"}, signed=True)
+                        r_cm = api.request("POST", "/sapi/v1/margin/transfer", {"asset": ast5, "amount": amt_c, "type": "2"}, signed=True)
                         if "tranId" in r_cm:
                             break
-                        r_cm2 = api.request("POST", "/sapi/v1/asset/transfer", {"type": "MARGIN_MAIN", "asset": ast4, "amount": amt_c}, signed=True)
-                        if "tranId" in r_cm2:
-                            break
-        # 3e. In Spot, top-up & sell any non-USDT stablecoin/crypto dust or convert via Binance Convert / Dust-to-BNB->USDT, then transfer 100% of Spot USDT into Cross Margin!
+        # 3e. In Spot, sell or convert 100% of non-USDT assets into USDT, then sweep all Spot USDT into Cross Margin:
         spot_a = api.request("GET", "/api/v3/account", signed=True)
+        dust_assets = []
         for sb4 in spot_a.get("balances", []):
             s_ast4 = sb4.get("asset", "")
             s_fv4 = float(sb4.get("free", 0))
-            if s_ast4 != "USDT" and s_fv4 >= 0.00001:
+            if s_ast4 != "USDT" and s_fv4 >= 0.000001:
+                # Try topping up $6 in Spot and selling 100% for USDC/U/FDUSD/USD1:
+                if s_ast4 in ("USDC", "U", "FDUSD", "USD1"):
+                    s_sym_sp = s_ast4 + "USDT"
+                    if s_fv4 < 6.0:
+                        need_sp = int(math.ceil(6.0 - math.floor(s_fv4)))
+                        # Transfer $7 USDT from Cross Margin to Spot temporarily if Spot USDT < $7:
+                        api.request("POST", "/sapi/v1/margin/transfer", {"asset": "USDT", "amount": "7", "type": "2"}, signed=True)
+                        api.request("POST", "/api/v3/order", {"symbol": s_sym_sp, "side": "BUY", "type": "MARKET", "quantity": str(need_sp)}, signed=True)
+                        time.sleep(0.1)
+                    sp_chk = api.request("GET", "/api/v3/account", signed=True)
+                    for sb_c in sp_chk.get("balances", []):
+                        if sb_c.get("asset") == s_ast4:
+                            q_sp_sell = int(math.floor(float(sb_c.get("free", 0))))
+                            if q_sp_sell >= 6:
+                                api.request("POST", "/api/v3/order", {"symbol": s_sym_sp, "side": "SELL", "type": "MARKET", "quantity": str(q_sp_sell)}, signed=True)
+                                time.sleep(0.1)
                 q_res = api.request("POST", "/sapi/v1/convert/getQuote", {"fromAsset": s_ast4, "toAsset": "USDT", "fromAmount": f"{s_fv4:.8f}".rstrip("0").rstrip(".")}, signed=True)
                 if isinstance(q_res, dict) and "quoteId" in q_res:
                     api.request("POST", "/sapi/v1/convert/acceptQuote", {"quoteId": q_res["quoteId"]}, signed=True)
                     time.sleep(0.1)
+                else:
+                    dust_assets.append(s_ast4)
+        if dust_assets:
+            api.request("POST", "/sapi/v1/asset/dust", {"asset": ",".join(dust_assets)}, signed=True)
+            time.sleep(0.1)
+            sp_bnb = api.request("GET", "/api/v3/account", signed=True)
+            for sb_b in sp_bnb.get("balances", []):
+                if sb_b.get("asset") == "BNB" and float(sb_b.get("free", 0)) >= 0.0001:
+                    bnb_f = float(sb_b["free"])
+                    if bnb_f < 0.01:
+                        api.request("POST", "/sapi/v1/margin/transfer", {"asset": "USDT", "amount": "7", "type": "2"}, signed=True)
+                        api.request("POST", "/api/v3/order", {"symbol": "BNBUSDT", "side": "BUY", "type": "MARKET", "quantity": "0.01"}, signed=True)
+                        time.sleep(0.1)
+                        sp_bnb2 = api.request("GET", "/api/v3/account", signed=True)
+                        for sb_b2 in sp_bnb2.get("balances", []):
+                            if sb_b2.get("asset") == "BNB":
+                                bnb_f = float(sb_b2.get("free", 0))
+                    q_bnb = math.floor(bnb_f * 1000.0) / 1000.0
+                    if q_bnb >= 0.01:
+                        api.request("POST", "/api/v3/order", {"symbol": "BNBUSDT", "side": "SELL", "type": "MARKET", "quantity": f"{q_bnb:.3f}"}, signed=True)
+                        time.sleep(0.1)
         spot_a2 = api.request("GET", "/api/v3/account", signed=True)
         for sb5 in spot_a2.get("balances", []):
             if sb5.get("asset") == "USDT" and float(sb5.get("free", 0)) >= 0.0001:
@@ -938,20 +996,16 @@ def main():
     api._paused_495 = False
     api._user_paused = True
     try:
-        s3.put_object(Bucket=S3_BUCKET, Key="pause-control.json", Body=json.dumps({"paused": True, "ts": int(time.time() * 1000)}).encode("utf-8"), ContentType="application/json")
-    except Exception:
-        pass
-    try:
         if os.path.exists("/tmp/pause_495_latch.json"):
             with open("/tmp/pause_495_latch.json") as _pf:
                 api._paused_495 = bool(json.load(_pf).get("paused", False))
     except Exception:
         pass
     try:
-        _p_init = json.loads(s3.get_object(Bucket=S3_BUCKET, Key="pause-control.json")["Body"].read().decode())
-        api._user_paused = bool(_p_init.get("paused", True))
+        s3.put_object(Bucket=S3_BUCKET, Key="pause-control.json", Body=json.dumps({"paused": True, "ts": int(time.time() * 1000)}).encode("utf-8"), ContentType="application/json")
     except Exception:
         pass
+    api._user_paused = True
 
     # Live 1:1 Delta-Lock Hedging: Base loans strictly match live inventory (0 static short overhang!)
     api._target_hedge_u1 = 0.0
