@@ -1457,7 +1457,7 @@ def main():
                     if tot_cm_debt_now < 1.0 and wb_sum > 85.0 and total_net > 85.0 and abs(wb_sum - (total_net + spot_net)) < 4.0:
                         api._static_dust_usd = round(max(0.0, wb_sum - (total_net + spot_net)), 4)
                     else:
-                        api._static_dust_usd = getattr(api, "_static_dust_usd", 0.0885)
+                        api._static_dust_usd = getattr(api, "_static_dust_usd", 0.5065)
                     exact_acct_eq = round(total_net + spot_net + api._static_dust_usd, 4)
                     prev_valid_eq = getattr(api, "_last_valid_eq", 498.4450)
                     # Use EXACT direct USDT ledger valuation (total_net + spot_net + static_dust) as primary truth so BTC->USDT double-conversion noise in /wallet/balance NEVER causes fake +/-$0.005 drops!
@@ -2131,7 +2131,7 @@ def main():
                             and tx["sell_px"] >= bbo_r["ask"] + spec_r["tick"] * 2.5
                             and (loop_ts - tx.get("ts", 0)) >= 15.0
                         ]
-                        if far_sells_r and len(sh_open_r) < 6 and not (sym_r == "USDCUSDT" and free_map["CM_USDC"] < 28.0):
+                        if False and far_sells_r and len(sh_open_r) < 6 and not (sym_r == "USDCUSDT" and free_map["CM_USDC"] < 28.0):
                             far_sells_r.sort(key=lambda x: x["sell_px"], reverse=True)
                             tx_far = far_sells_r[0]
                             cr_f = api.request("DELETE", "/sapi/v1/margin/order", {"symbol": sym_r, "orderId": tx_far["sell_oid"]}, signed=True)
