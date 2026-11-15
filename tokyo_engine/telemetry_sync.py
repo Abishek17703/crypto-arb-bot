@@ -2109,8 +2109,8 @@ def main():
                     elif "UUSDT" in bbos and (bbos["UUSDT"]["ask"] < u_drain_ord[1] - 0.00005 or loop_ts - u_drain_ord[2] > 5.0):
                         api.request("DELETE", "/sapi/v1/margin/order", {"symbol": "UUSDT", "orderId": u_drain_ord[0]}, signed=True)
                         api._u_drain_oid = None
-                elif cm_u_debt < 1.0 and "UUSDT" in bbos and free_map["CM_U"] >= 28.0:
-                    sq_u_d = math.floor(free_map["CM_U"] - 20.0)
+                elif cm_u_debt < 1.0 and "UUSDT" in bbos and free_map["CM_U"] >= 45.0:
+                    sq_u_d = math.floor(free_map["CM_U"] - 32.0)
                     if sq_u_d >= 6:
                         spx_u_d = bbos["UUSDT"]["ask"]
                         sr_u_d = api.request("POST", "/sapi/v1/margin/order", {"symbol": "UUSDT", "side": "SELL", "type": "LIMIT_MAKER", "quantity": str(sq_u_d), "price": f"{spx_u_d:.4f}"}, signed=True)
@@ -2118,7 +2118,7 @@ def main():
                             free_map["CM_U"] = max(0.0, free_map["CM_U"] - sq_u_d)
                             api._u_drain_oid = (sr_u_d["orderId"], spx_u_d, loop_ts)
 
-                # v9.7 DELTA-NEUTRAL ETHU 0%-FEE LEAD-LAG MICRO-PILOT ($14 Budget = 0.0080 ETH 1:1 Hedged):
+                # v9.7 DELTA-NEUTRAL ETHU 0%-FEE LEAD-LAG MICRO-PILOT ($28 Scaled Budget = 0.0150 ETH 1:1 Hedged):
                 eth_debt_now = sum(float(b.get("borrowed", 0)) for b in cached_balances if "ETH (5x Cross)" in b.get("asset", ""))
                 ethu_tr_list = [tx for tx in active_tranches if tx["symbol"] == "ETHU"]
                 ethu_mtm = 0.0
@@ -2140,15 +2140,16 @@ def main():
                     if eth_debt_now > 0.0001 and free_map["CM_ETH"] >= 0.0001:
                         api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "ETH", "isIsolated": "FALSE", "amount": f"{min(free_map['CM_ETH'], eth_debt_now):.4f}", "type": "REPAY"}, signed=True)
                 elif not soft_delev and "ETHU" in bbos and (loop_ts - getattr(api, "_last_eth_seed", 0.0)) >= 8.0:
-                    # Seed 1x fixed 0.0080 ETH (~$14.65) loan & convert to U on 0%-fee ETHU if CM_U + ETHU orders < $12 so ETHU is 100% 1:1 Delta-Neutral!
+                    # Seed 1x fixed 0.0150 ETH (~$27.50) loan & convert to U on 0%-fee ETHU if CM_U + ETHU orders < $24 so ETHU is 100% 1:1 Delta-Neutral!
                     ethu_u_locked = sum(tx["qty"] * tx["buy_px"] for tx in ethu_tr_list if tx["state"] == "BUY_OPEN")
                     ethu_eth_locked = sum(tx["qty"] for tx in ethu_tr_list if tx["state"] == "SELL_OPEN")
-                    if eth_debt_now < 0.0040 and (free_map["CM_U"] + ethu_u_locked) < 12.0 and (free_map["CM_ETH"] + ethu_eth_locked) < 0.0040:
+                    if eth_debt_now < 0.0080 and (free_map["CM_U"] + ethu_u_locked) < 24.0 and (free_map["CM_ETH"] + ethu_eth_locked) < 0.0080:
                         api._last_eth_seed = loop_ts
-                        br_eth = api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "ETH", "isIsolated": "FALSE", "amount": "0.0080", "type": "BORROW"}, signed=True)
+                        need_eth = round(max(0.0080, 0.0150 - eth_debt_now), 4)
+                        br_eth = api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "ETH", "isIsolated": "FALSE", "amount": f"{need_eth:.4f}", "type": "BORROW"}, signed=True)
                         if "tranId" in br_eth:
-                            free_map["CM_ETH"] += 0.0080
-                            eth_debt_now += 0.0080
+                            free_map["CM_ETH"] += need_eth
+                            eth_debt_now += need_eth
 
                 # Drain excess FDUSD above 14 FDUSD via 0%-fee FDUSDUSDT LIMIT_MAKER @ live Ask!
                 fd_drain_ord = getattr(api, "_fd_drain_oid", None)
@@ -2249,7 +2250,7 @@ def main():
                     and (bbos["FDUSDUSDT"]["bid"] / bbos["USDCUSDT"]["ask"]) - bbos["FDUSDUSDC"]["bid"] >= -0.00003
                 )
                 for sym_p, is_iso, f_key, b_key, max_tr, max_buy, t_size, max_sell_cap, lbl_p in (
-                    ("ETHU",      False, "CM_U",     "CM_ETH",     (1 if (allow_buys and not getattr(api, "_ethu_cb_tripped", False)) else 0), (1 if (allow_buys and not getattr(api, "_ethu_cb_tripped", False)) else 0), 14.6,  0.010, "DELTA-NEUTRAL • ETH/U $14"),
+                    ("ETHU",      False, "CM_U",     "CM_ETH",     (2 if (allow_buys and not getattr(api, "_ethu_cb_tripped", False)) else 0), (1 if (allow_buys and not getattr(api, "_ethu_cb_tripped", False)) else 0), 27.5,  0.018, "DELTA-NEUTRAL • ETH/U $28"),
                     ("FDUSDUSDC", False, "CM_USDC",  "CM_FDUSD",   (4 if allow_buys else 0), (2 if allow_buys else 0), 28.0,  56.0, "LATENCY-TRI • FDUSD/USDC"),
                     ("USD1U",     False, "CM_U",     "CM_USD1",    0, 0, 14.0,  28.0, "LATENCY-TRI • USD1/U"),
                     ("FDUSDUSDT", False, "CM_USDT",  "CM_FDUSD",   (2 if fd_thin_ok else 1) if allow_buys else 0, (1 if fd_thin_ok else 0) if allow_buys else 0, 28.0,  56.0, "FDUSD-10x • SNIPER $28"),
