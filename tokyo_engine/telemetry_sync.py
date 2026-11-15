@@ -1661,6 +1661,9 @@ def main():
                                 if pnl_v > 0:
                                     unstick_vault_usd += pnl_v
                                     session_live_pnl += pnl_v
+                                    if tr.get("pilot"):
+                                        api._s1_short_realized = getattr(api, "_s1_short_realized", 0.0) + pnl_v
+                                        api._s1_short_rts = getattr(api, "_s1_short_rts", 0) + 1
                                 session_live_fills += 2
                                 rt_wins = getattr(api, "_rt_wins", [])
                                 rt_wins.append((loop_ts, pnl_v))
@@ -1718,14 +1721,13 @@ def main():
                                 still_tranches.append(tr)
 
                     elif tr["state"] == "SHORT_SELL_OPEN":
-                        # S1 Bi-Directional SELL-First (Own-Inventory Short — $0 Margin Debt!): Sells existing stablecoin @ Ask when Ask wall is heavy, then buys back @ Bid (-1 tick)!
+                        # S1 Thin-Wall Bi-Directional SELL-First ($7 Tranche — $0 Margin Debt!): Sells existing USD1/USDC @ Ask when Ask wall is thin/active, then buys back @ Bid (-1 tick)!
                         o_live = live_oid_map.get(tr["sell_oid"])
                         b_key_s = "CM_U" if sym == "UUSDT" else ("CM_USD1" if sym in ("USD1USDT", "USD1USDC") else ("CM_USDC" if sym == "USDCUSDT" else "CM_FDUSD"))
                         f_key_s = "CM_USDC" if sym == "USD1USDC" else "CM_USDT"
                         if o_live is not None:
-                            imb_s = q_bbo["bidQty"] / max(0.0001, q_bbo["askQty"])
-                            # Pre-Fill Shield: if Ask wall weakens (bidQty > 1.40x askQty) or Ask moved down > 0.5 tick, cancel & recycle!
-                            if float(o_live.get("executedQty", 0)) == 0 and (imb_s > 1.40 or q_bbo["ask"] < tr["sell_px"] - spec["tick"] * 0.5 or getattr(api, "_s1_cb_tripped", False)):
+                            # Pre-Fill Shield: only cancel if Ask moved down > 0.5 tick or CB tripped (preserve FIFO queue priority at live Ask!)
+                            if float(o_live.get("executedQty", 0)) == 0 and (q_bbo["ask"] < tr["sell_px"] - spec["tick"] * 0.5 or getattr(api, "_s1_cb_tripped", False)):
                                 cr = api.request("DELETE", "/sapi/v1/margin/order", {"symbol": sym, "orderId": tr["sell_oid"]}, signed=True)
                                 exec_s = float(cr.get("executedQty", 0))
                                 if exec_s > 0:
@@ -2073,10 +2075,23 @@ def main():
                             free_map["CM_USDC"] = max(0.0, free_map["CM_USDC"] - uc_s_mkr)
                             api._uc_seed_oid = ("SELL", s_res["orderId"], loop_ts, uc_ask_now)
 
-                # 4B. v8.6 ULTRA-MICRO $28 S1 SHORT PILOT (4x $7 Tranches • -$0.008 Hard Circuit Breaker • $2K Equivalent Hr Rate Tracker!)
+                # 4B. v8.7 ULTRA-MICRO $28 THIN-WALL DUAL SNIPER PILOT (4x $7 Tranches on USD1USDT & USDCUSDT • 2x BUY-Long + 2x SELL-Short • -$0.008 / 45s Hard Circuit Breaker!)
                 if not hasattr(api, "_s1_pilot_start_ts"):
                     api._s1_pilot_start_ts = loop_ts
-                s1_short_list = [t for t in active_tranches if t["state"] in ("SHORT_SELL_OPEN", "SHORT_BUY_OPEN")]
+                # Cancel any legacy USD1USDC / UUSDT $7 short legs from v8.6 so 100% of the $28 pilot runs on thin-wall USD1USDT & USDCUSDT!
+                for t_old in list([t for t in active_tranches if t["state"] in ("SHORT_SELL_OPEN", "SHORT_BUY_OPEN") and t["symbol"] not in ("USD1USDT", "USDCUSDT")]):
+                    oid_o = t_old["sell_oid"] if t_old["state"] == "SHORT_SELL_OPEN" else t_old["buy_oid"]
+                    b_k_o = "CM_U" if t_old["symbol"] == "UUSDT" else ("CM_USD1" if t_old["symbol"] in ("USD1USDT", "USD1USDC") else "CM_USDC")
+                    f_k_o = "CM_USDC" if t_old["symbol"] == "USD1USDC" else "CM_USDT"
+                    if oid_o:
+                        cr_o = api.request("DELETE", "/sapi/v1/margin/order", {"symbol": t_old["symbol"], "orderId": oid_o}, signed=True)
+                        if t_old["state"] == "SHORT_SELL_OPEN" and cr_o.get("status") == "CANCELED":
+                            free_map[b_k_o] += max(0.0, t_old["qty"] - float(cr_o.get("executedQty", 0)))
+                        elif t_old["state"] == "SHORT_BUY_OPEN" and cr_o.get("status") == "CANCELED":
+                            free_map[f_k_o] += max(0.0, t_old["qty"] - float(cr_o.get("executedQty", 0))) * t_old["buy_px"]
+                    active_tranches.remove(t_old)
+
+                s1_short_list = [t for t in active_tranches if t["state"] in ("SHORT_SELL_OPEN", "SHORT_BUY_OPEN") or t.get("pilot")]
                 s1_short_mtm = 0.0
                 s1_trig_35s = False
                 for t_s in s1_short_list:
@@ -2084,7 +2099,13 @@ def main():
                         ask_s_now = float(bbos.get(t_s["symbol"], {}).get("ask", 0.0))
                         if ask_s_now > 0:
                             s1_short_mtm += (t_s["sell_px"] - ask_s_now) * t_s["qty"]
-                        if (loop_ts - t_s.get("ts", loop_ts)) >= 35.0:
+                        if (loop_ts - t_s.get("ts", loop_ts)) >= 45.0 and ask_s_now > t_s["sell_px"] + PAIRS.get(t_s["symbol"], {}).get("tick", 0.00001) * 1.5:
+                            s1_trig_35s = True
+                    elif t_s.get("pilot") and t_s["state"] == "SELL_OPEN":
+                        bid_s_now = float(bbos.get(t_s["symbol"], {}).get("bid", 0.0))
+                        if bid_s_now > 0:
+                            s1_short_mtm += (bid_s_now - t_s["buy_px"]) * t_s["qty"]
+                        if (loop_ts - t_s.get("ts", loop_ts)) >= 45.0 and bid_s_now < t_s["buy_px"] - PAIRS.get(t_s["symbol"], {}).get("tick", 0.00001) * 1.5:
                             s1_trig_35s = True
                 s1_short_real = float(getattr(api, "_s1_short_realized", 0.0))
                 s1_short_net = round(s1_short_real + s1_short_mtm, 4)
@@ -2095,16 +2116,16 @@ def main():
                 s1_can_scale = bool(s1_equiv_2k_hr >= 5.00 and int(getattr(api, "_s1_short_rts", 0)) >= 2 and not getattr(api, "_s1_cb_tripped", False))
                 if (s1_short_net <= -0.0080 or s1_trig_35s) and not getattr(api, "_s1_cb_tripped", False):
                     api._s1_cb_tripped = True
-                    api._s1_cb_reason = "S1 MTM+Realized <= -$0.008" if s1_short_net <= -0.0080 else "S1 SHORT_BUY > 35s"
+                    api._s1_cb_reason = "S1 MTM+Realized <= -$0.008" if s1_short_net <= -0.0080 else "S1 Pilot Adverse > 45s"
                     for t_s in list(s1_short_list):
-                        oid_s = t_s["sell_oid"] if t_s["state"] == "SHORT_SELL_OPEN" else t_s["buy_oid"]
+                        oid_s = t_s["sell_oid"] if t_s["state"] in ("SHORT_SELL_OPEN", "SELL_OPEN") else t_s["buy_oid"]
                         b_k_s = "CM_U" if t_s["symbol"] == "UUSDT" else ("CM_USD1" if t_s["symbol"] in ("USD1USDT", "USD1USDC") else ("CM_USDC" if t_s["symbol"] == "USDCUSDT" else "CM_FDUSD"))
                         f_k_s = "CM_USDC" if t_s["symbol"] == "USD1USDC" else "CM_USDT"
                         if oid_s:
                             cr_s = api.request("DELETE", "/sapi/v1/margin/order", {"symbol": t_s["symbol"], "orderId": oid_s}, signed=True)
-                            if t_s["state"] == "SHORT_SELL_OPEN" and cr_s.get("status") == "CANCELED":
+                            if t_s["state"] in ("SHORT_SELL_OPEN", "SELL_OPEN") and cr_s.get("status") == "CANCELED":
                                 free_map[b_k_s] += max(0.0, t_s["qty"] - float(cr_s.get("executedQty", 0)))
-                            elif t_s["state"] == "SHORT_BUY_OPEN" and cr_s.get("status") == "CANCELED":
+                            elif t_s["state"] in ("SHORT_BUY_OPEN", "BUY_OPEN") and cr_s.get("status") == "CANCELED":
                                 free_map[f_k_s] += max(0.0, t_s["qty"] - float(cr_s.get("executedQty", 0))) * t_s["buy_px"]
                         active_tranches.remove(t_s)
 
@@ -2125,33 +2146,50 @@ def main():
                     p_tr = [t for t in active_tranches if t["symbol"] == sym_p and t["iso"] == is_iso]
                     is_crypto_u1 = sym_p in ("BTCU", "BTCUSD1", "BNBU", "ETHU", "BNBFDUSD", "SOLFDUSD")
 
-                    # S1 Ultra-Micro $7 SELL-First Entry ($28 Total Cap = 4x $7 Tranches • $0 Margin Debt!): Posts SHORT_SELL_OPEN @ live Ask when Ask wall is heavier or active (bidQty < 1.35x askQty)!
-                    s1_shorts_sym = [t for t in p_tr if t["state"] in ("SHORT_SELL_OPEN", "SHORT_BUY_OPEN")]
-                    imb_p = q_bbo["bidQty"] / max(0.0001, q_bbo["askQty"])
-                    while allow_buys and (not getattr(api, "_s1_cb_tripped", False)) and imb_p < 1.35 and len(s1_shorts_sym) < 2 and len(s1_short_list) < 4 and free_map[b_key] * q_bbo["ask"] >= 7.1:
-                        sq_sh = round(math.floor(min(7.0, free_map[b_key]) / spec["step"] + 1e-9) * spec["step"], 6)
-                        if sq_sh * q_bbo["ask"] < 6.0:
-                            break
-                        spx_sh = round(q_bbo["ask"], spec["dec"])
-                        bpx_sh = round(spx_sh - spec["tick"], spec["dec"])
-                        sr_sh = api.request("POST", "/sapi/v1/margin/order", {
-                            "symbol": sym_p, "side": "SELL", "type": "LIMIT_MAKER",
-                            "quantity": spec["q_fmt"].format(sq_sh), "price": f"{spx_sh:.{spec['dec']}f}"
-                        }, signed=True)
-                        if "orderId" in sr_sh:
-                            free_map[b_key] = max(0.0, free_map[b_key] - sq_sh)
-                            daily_orders_placed += 1
-                            nt_sh = {
-                                "tid": f"S1SH{len(s1_short_list)+1}", "symbol": sym_p, "iso": False, "lbl": "S1 MICRO-SHORT $7",
-                                "qty": sq_sh, "buy_px": bpx_sh, "sell_px": spx_sh, "buy_oid": None, "sell_oid": sr_sh["orderId"],
-                                "state": "SHORT_SELL_OPEN", "ts": loop_ts
-                            }
-                            active_tranches.append(nt_sh)
-                            p_tr.append(nt_sh)
-                            s1_shorts_sym.append(nt_sh)
-                            s1_short_list.append(nt_sh)
-                        else:
-                            break
+                    # v8.7 Thin-Wall Dual Sniper $28 Pilot (4x $7 Tranches ONLY on USD1USDT & USDCUSDT: 2x SHORT_SELL_OPEN @ Ask + 2x Pilot BUY_OPEN @ Bid!):
+                    if sym_p in ("USD1USDT", "USDCUSDT") and allow_buys and (not getattr(api, "_s1_cb_tripped", False)):
+                        s1_sh_sym = [t for t in p_tr if t["state"] in ("SHORT_SELL_OPEN", "SHORT_BUY_OPEN")]
+                        s1_lg_sym = [t for t in p_tr if t.get("pilot") and t["state"] in ("BUY_OPEN", "SELL_OPEN")]
+                        if len(s1_sh_sym) < 1 and len(s1_short_list) < 4 and free_map[b_key] * q_bbo["ask"] >= 7.1:
+                            sq_sh = round(math.floor(min(7.0, free_map[b_key]) / spec["step"] + 1e-9) * spec["step"], 6)
+                            if sq_sh * q_bbo["ask"] >= 6.0:
+                                spx_sh = round(q_bbo["ask"], spec["dec"])
+                                bpx_sh = round(spx_sh - spec["tick"], spec["dec"])
+                                sr_sh = api.request("POST", "/sapi/v1/margin/order", {
+                                    "symbol": sym_p, "side": "SELL", "type": "LIMIT_MAKER",
+                                    "quantity": spec["q_fmt"].format(sq_sh), "price": f"{spx_sh:.{spec['dec']}f}"
+                                }, signed=True)
+                                if "orderId" in sr_sh:
+                                    free_map[b_key] = max(0.0, free_map[b_key] - sq_sh)
+                                    daily_orders_placed += 1
+                                    nt_sh = {
+                                        "tid": f"S1SH_{sym_p[:4]}", "symbol": sym_p, "iso": False, "lbl": "TW-DUAL SHORT $7",
+                                        "qty": sq_sh, "buy_px": bpx_sh, "sell_px": spx_sh, "buy_oid": None, "sell_oid": sr_sh["orderId"],
+                                        "state": "SHORT_SELL_OPEN", "ts": loop_ts, "pilot": True
+                                    }
+                                    active_tranches.append(nt_sh)
+                                    p_tr.append(nt_sh)
+                                    s1_short_list.append(nt_sh)
+                        if len(s1_lg_sym) < 1 and len(s1_short_list) < 4 and free_map[f_key] >= 15.5:
+                            bq_pl = round(math.floor((7.0 / q_bbo["bid"]) / spec["step"] + 1e-9) * spec["step"], 6)
+                            if bq_pl * q_bbo["bid"] >= 6.0:
+                                bpx_pl = round(q_bbo["bid"], spec["dec"])
+                                spx_pl = round(bpx_pl + spec["tick"], spec["dec"])
+                                br_pl = api.request("POST", "/sapi/v1/margin/order", {
+                                    "symbol": sym_p, "side": "BUY", "type": "LIMIT_MAKER",
+                                    "quantity": spec["q_fmt"].format(bq_pl), "price": f"{bpx_pl:.{spec['dec']}f}"
+                                }, signed=True)
+                                if "orderId" in br_pl:
+                                    free_map[f_key] -= bq_pl * bpx_pl
+                                    daily_orders_placed += 1
+                                    nt_pl = {
+                                        "tid": f"S1LG_{sym_p[:4]}", "symbol": sym_p, "iso": False, "lbl": "TW-DUAL LONG $7",
+                                        "qty": bq_pl, "buy_px": bpx_pl, "sell_px": spx_pl, "buy_oid": br_pl["orderId"], "sell_oid": None,
+                                        "state": "BUY_OPEN", "ts": loop_ts, "pilot": True
+                                    }
+                                    active_tranches.append(nt_pl)
+                                    p_tr.append(nt_pl)
+                                    s1_short_list.append(nt_pl)
 
                     # Immediately post maker SELL for any free non-hedged base inventory (keep at least 5 tranche slots free for live BUY flips!)
                     while sym_p not in ("USD1USDC", "FDUSDUSDC", "USD1U") and free_map[b_key] * q_bbo["ask"] >= 5.6 and len(p_tr) < (max_tr if is_crypto_u1 else max(1, max_tr - 5)):
@@ -2345,7 +2383,7 @@ def main():
                 s1_eq2k_v = s1_equiv_2k_hr if "s1_equiv_2k_hr" in locals() else 0.0
                 s1_eq500_v = round(s1_raw_v * (500.0 / 28.0), 2)
                 s1_scale_v = bool(s1_can_scale) if "s1_can_scale" in locals() else False
-                s1_st_lbl = ("S1 CB TRIPPED: " + getattr(api, "_s1_cb_reason", "")) if getattr(api, "_s1_cb_tripped", False) else f"S1 $28 MICRO-SHORT ACTIVE • Net ${s1_net_v:+.4f} (${s1_eq2k_v:.2f}/hr 2K-Eq, {int(getattr(api, '_s1_short_rts', 0))} RTs)"
+                s1_st_lbl = ("S1 CB TRIPPED: " + getattr(api, "_s1_cb_reason", "")) if getattr(api, "_s1_cb_tripped", False) else f"TW-DUAL $28 PILOT ACTIVE • Net ${s1_net_v:+.4f} (${s1_eq2k_v:.2f}/hr 2K-Eq, {int(getattr(api, '_s1_short_rts', 0))} RTs)"
                 payload = {
                     "ts": int(loop_ts * 1000),
                     "startEquityUsd": start_equity_usd,
@@ -2376,7 +2414,7 @@ def main():
                             else (
                                 f"PAUSED AT <=$495.00 — ALL TRADING STOPPED UNTIL USER REPLY (Eq ${cached_total_usd:.4f})"
                                 if getattr(api, "_paused_495", False)
-                                else f"v8.6 LIVE #1 S1 BI-DIR + $28 MICRO-SHORT ({s1_st_lbl}) • 1h {'+$' if equity_changes.get('1h', 0)>=0 else '-$'}{abs(equity_changes.get('1h', 0)):.4f}"
+                                else f"v8.7 LIVE THIN-WALL DUAL $28 PILOT ({s1_st_lbl}) • 1h {'+$' if equity_changes.get('1h', 0)>=0 else '-$'}{abs(equity_changes.get('1h', 0)):.4f}"
                             )
                         ),
                         "paused": bool(getattr(api, "_paused_495", False) or getattr(api, "_user_paused", False)),
@@ -2385,6 +2423,7 @@ def main():
                             "active": not bool(getattr(api, "_s1_cb_tripped", False)),
                             "cbTripped": bool(getattr(api, "_s1_cb_tripped", False)),
                             "cbReason": getattr(api, "_s1_cb_reason", ""),
+                            "strategy": "TW_DUAL_USD1_USDC_28",
                             "budgetUsd": 28.0,
                             "trancheUsd": 7.0,
                             "realizedUsd": round(float(getattr(api, "_s1_short_realized", 0.0)), 4),
@@ -2394,7 +2433,7 @@ def main():
                             "equiv2kHrUsd": s1_eq2k_v,
                             "canScale": s1_scale_v,
                             "rts": int(getattr(api, "_s1_short_rts", 0)),
-                            "openShortLegs": len([t for t in active_tranches if t["state"] in ("SHORT_SELL_OPEN", "SHORT_BUY_OPEN")]),
+                            "openShortLegs": len([t for t in active_tranches if t["state"] in ("SHORT_SELL_OPEN", "SHORT_BUY_OPEN") or t.get("pilot")]),
                         },
                         "btcuMicroPilot": {
                             "active": not bool(getattr(api, "_btcu_cb_tripped", False)),
