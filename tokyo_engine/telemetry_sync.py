@@ -1430,8 +1430,8 @@ def main():
                                 top_cap_m = 3 if q_bbo["bidQty"] >= q_bbo["askQty"] * 2.2 else (2 if q_bbo["bidQty"] >= q_bbo["askQty"] * 1.35 else 0)
                                 sub_cap_m = 2
                             elif sym in ("USD1USDT", "USDCUSDT"):
-                                top_cap_m = 4 if q_bbo["bidQty"] >= q_bbo["askQty"] * 2.5 else (3 if q_bbo["bidQty"] >= q_bbo["askQty"] * 1.15 else (1 if q_bbo["bidQty"] >= q_bbo["askQty"] * 0.85 else 0))
-                                sub_cap_m = 3
+                                top_cap_m = 5 if q_bbo["bidQty"] >= q_bbo["askQty"] * 2.5 else (3 if q_bbo["bidQty"] >= q_bbo["askQty"] * 0.90 else 0)
+                                sub_cap_m = 4
                             else:
                                 top_cap_m = 2 if q_bbo["askQty"] < 25000.0 else 1
                                 sub_cap_m = 1
@@ -1446,8 +1446,8 @@ def main():
                                 q_bridge = "UUSDT" if sym == "USD1U" else "USDCUSDT"
                                 ref_sym_g = "USD1USDT" if sym == "USD1U" else "FDUSDUSDT"
                                 if ref_sym_g in bbos and q_bridge in bbos:
-                                    synth_exit_g = bbos[ref_sym_g]["bid"] / bbos[q_bridge]["ask"]
-                                    if synth_exit_g < tr["buy_px"] + 0.000008:
+                                    synth_exit_g = bbos[ref_sym_g]["ask"] / bbos[q_bridge]["ask"]
+                                    if synth_exit_g < tr["buy_px"] + 0.000030:
                                         tri_edge_gone = True
                             can_reroute_deep = (sym in ("USD1USDT", "USDCUSDT", "UUSDT", "USD1USDC") and not tr["iso"] and (q_bbo["bid"] - tr["buy_px"]) >= spec["tick"] * 3.5 and (loop_ts - tr.get("ts", 0)) >= 8.0)
                             # Heavy-Bid Pre-Fill Shield (v9.5 100%-Winrate Anti-Adverse-Selection Shield: steps back to Bid-1 before thin Bid walls get swept!):
@@ -1926,7 +1926,7 @@ def main():
                         len(fd_tri_open) < 2
                         and free_map["CM_USDC"] < 14.0
                         and "FDUSDUSDT" in bbos and "USDCUSDT" in bbos and "FDUSDUSDC" in bbos
-                        and (bbos["FDUSDUSDT"]["bid"] / bbos["USDCUSDT"]["ask"]) - bbos["FDUSDUSDC"]["bid"] >= 0.00007
+                        and (bbos["FDUSDUSDT"]["ask"] / bbos["USDCUSDT"]["ask"]) - bbos["FDUSDUSDC"]["bid"] >= 0.000050
                     ):
                         uc_sells_for_tri = [
                             tx for tx in still_tranches
@@ -2207,14 +2207,14 @@ def main():
                 main_t_sz = 28.0 if s1_can_scale else 14.0
                 fd_tri_edge_ok = bool(
                     "FDUSDUSDT" in bbos and "USDCUSDT" in bbos and "FDUSDUSDC" in bbos
-                    and (bbos["FDUSDUSDT"]["bid"] / bbos["USDCUSDT"]["ask"]) - bbos["FDUSDUSDC"]["bid"] >= 0.00007
+                    and (bbos["FDUSDUSDT"]["bid"] / bbos["USDCUSDT"]["ask"]) - bbos["FDUSDUSDC"]["bid"] >= -0.00003
                 )
                 for sym_p, is_iso, f_key, b_key, max_tr, max_buy, t_size, max_sell_cap, lbl_p in (
                     ("FDUSDUSDC", False, "CM_USDC",  "CM_FDUSD",   (4 if allow_buys else 0), (2 if allow_buys else 0), 28.0,  56.0, "LATENCY-TRI • FDUSD/USDC"),
                     ("USD1U",     False, "CM_U",     "CM_USD1",    (2 if allow_buys else 0), (1 if allow_buys else 0), 14.0,  28.0, "LATENCY-TRI • USD1/U"),
                     ("FDUSDUSDT", False, "CM_USDT",  "CM_FDUSD",   (2 if fd_thin_ok else 1) if allow_buys else 0, (1 if fd_thin_ok else 0) if allow_buys else 0, 28.0,  56.0, "FDUSD-10x • SNIPER $28"),
-                    ("USDCUSDT",  False, "CM_USDT",  "CM_USDC",    (8 if s1_can_scale else 12) if allow_buys else 0, (4 if s1_can_scale else 6) if allow_buys else 0, main_t_sz, 140.0, "DIP-SNIPER • USDC"),
-                    ("USD1USDT",  False, "CM_USDT",  "CM_USD1",    (10 if s1_can_scale else 14) if allow_buys else 0, (5 if s1_can_scale else 6) if allow_buys else 0, main_t_sz, 168.0, "DIP-SNIPER • USD1"),
+                    ("USDCUSDT",  False, "CM_USDT",  "CM_USDC",    12 if allow_buys else 0, 8 if allow_buys else 0, main_t_sz, 168.0, "DIP-SNIPER • USDC"),
+                    ("USD1USDT",  False, "CM_USDT",  "CM_USD1",    14 if allow_buys else 0, 10 if allow_buys else 0, main_t_sz, 196.0, "DIP-SNIPER • USD1"),
                     ("USD1USDC",  False, "CM_USDC",  "CM_USD1",    0, 0, 14.1,  28.0, "TRI-MAKER • USD1/USDC"),
                     ("UUSDT",     False, "CM_USDT",  "CM_U",       1 if allow_buys else 0, 0, 14.1,  28.0, "FULL-10x • U/USDT $14"),
                 ):
@@ -2338,7 +2338,7 @@ def main():
                             ref_chk_p = "USD1USDT" if sym_p == "USD1U" else "FDUSDUSDT"
                             if ref_chk_p not in bbos or q_bridge_p not in bbos:
                                 break
-                            if (bbos[ref_chk_p]["bid"] / bbos[q_bridge_p]["ask"]) - q_bbo["bid"] < 0.000018:
+                            if (bbos[ref_chk_p]["ask"] / bbos[q_bridge_p]["ask"]) - q_bbo["bid"] < 0.000050:
                                 break
                             cap_top, cap_sub, max_lvls = 1, 0, 1
                         elif sym_p in ("UUSDT", "USD1USDC"):
@@ -2349,15 +2349,15 @@ def main():
                             cap_top = 2 if q_bbo["askQty"] < 25000.0 and q_bbo["bidQty"] >= q_bbo["askQty"] * 0.40 else 0
                             cap_sub, max_lvls = 1, 2
                         elif sym_p == "USDCUSDT":
-                            cap_top = 3 if q_bbo["bidQty"] >= q_bbo["askQty"] * 2.50 else (2 if q_bbo["bidQty"] >= q_bbo["askQty"] * 0.90 else 0)
-                            cap_sub, max_lvls = 3, 2
+                            cap_top = 5 if q_bbo["bidQty"] >= q_bbo["askQty"] * 2.50 else (3 if q_bbo["bidQty"] >= q_bbo["askQty"] * 0.90 else 0)
+                            cap_sub, max_lvls = 4, 2
                         else:
-                            cap_top = 3 if q_bbo["bidQty"] >= q_bbo["askQty"] * 2.50 else (2 if q_bbo["bidQty"] >= q_bbo["askQty"] * 0.90 else 0)
-                            cap_sub, max_lvls = 3, 2
+                            cap_top = 5 if q_bbo["bidQty"] >= q_bbo["askQty"] * 2.50 else (3 if q_bbo["bidQty"] >= q_bbo["askQty"] * 0.90 else 0)
+                            cap_sub, max_lvls = 4, 2
                         base_bpx = round(q_bbo["bid"] + spec["tick"], spec["dec"]) if (q_bbo["ask"] - q_bbo["bid"] >= spec["tick"] * 1.9) else round(q_bbo["bid"], spec["dec"])
                         if cg_p.get("max_bid"):
                             base_bpx = round(min(base_bpx, cg_p["max_bid"]), spec["dec"])
-                            if q_bbo["bid"] - base_bpx > spec["tick"] * 2.5:
+                            if q_bbo["bid"] - base_bpx > spec["tick"] * 5.5:
                                 break
                         used_pxs = [round(t["buy_px"], spec["dec"]) for t in active_tranches if t["symbol"] == sym_p]
                         used_spxs_b = [round(t["sell_px"] if t["state"] == "SELL_OPEN" else (t["buy_px"] + spec["tick"]), spec["dec"]) for t in active_tranches if t["symbol"] == sym_p]
