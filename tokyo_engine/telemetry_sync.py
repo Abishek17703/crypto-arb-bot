@@ -201,7 +201,9 @@ def auto_compound_borrow(api, force_repay_all=False):
         cm_acc = api.request("GET", "/sapi/v1/margin/account", signed=True)
         ml = float(cm_acc.get("marginLevel", 999.0) or 999.0)
         tot_net_btc = float(cm_acc.get("totalNetAssetOfBtc", 1.0) or 0.0)
-        for ua in cm_acc.get("userAssets", []):
+        # Process BTC + U priority borrows FIRST before USDT/USDC so BTCU hedge & quote cash always fund cleanly!
+        _prio = {"BTC": 0, "U": 1, "USDC": 2, "USDT": 3, "USD1": 4}
+        for ua in sorted(cm_acc.get("userAssets", []), key=lambda x: _prio.get(x.get("asset", ""), 9)):
             ast_u = ua.get("asset")
             fv_u, lv_u = float(ua.get("free", 0)), float(ua.get("locked", 0))
             bv_u = float(ua.get("borrowed", 0)) + float(ua.get("interest", 0))
@@ -216,8 +218,8 @@ def auto_compound_borrow(api, force_repay_all=False):
                     if rep_amt >= 10.0:
                         api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "USDT", "isIsolated": "FALSE", "amount": f"{rep_amt:.2f}", "type": "REPAY"}, signed=True)
                         api._last_repay_tick = time.time()
-                elif ml > 1.55 and tot_ut < 1420.0 and bv_u < 1050.0 and tot_net_btc > 0:
-                    brw_ut = min(1480.0 - tot_ut, 1050.0 - bv_u, 450.0)
+                elif ml > 1.50 and tot_ut < 1150.0 and bv_u < 820.0 and tot_net_btc > 0:
+                    brw_ut = min(1200.0 - tot_ut, 820.0 - bv_u, 380.0)
                     if brw_ut >= 40.0:
                         br_u_r = api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "USDT", "isIsolated": "FALSE", "amount": f"{brw_ut:.2f}", "type": "BORROW"}, signed=True)
                         if "tranId" in br_u_r:
@@ -244,13 +246,13 @@ def auto_compound_borrow(api, force_repay_all=False):
                 u_free_for_btcu = fv_u
                 if bv_u > 1.0 and u_free_for_btcu > 210.0:
                     api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "U", "isIsolated": "FALSE", "amount": f"{min(u_free_for_btcu - 140.0, bv_u):.2f}", "type": "REPAY"}, signed=True)
-                elif ml > 1.55 and u_free_for_btcu < 135.0 and bv_u < 220.0 and tot_net_btc > 0:
+                elif ml > 1.50 and u_free_for_btcu < 135.0 and bv_u < 220.0 and tot_net_btc > 0:
                     brw_u_amt = min(175.0 - u_free_for_btcu, 220.0 - bv_u, 150.0)
                     if brw_u_amt >= 20.0:
                         api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "U", "isIsolated": "FALSE", "amount": f"{brw_u_amt:.2f}", "type": "BORROW"}, signed=True)
             elif ast_u == "BTC":
                 # Keep 1:1 Cross-Margin BTC short hedge (~0.00145 BTC = ~$94, midpoint of $185 max sleeve) so BTCU inventory stays delta-neutral!
-                target_btc_h = 0.00145 if (not force_repay_all and ml > 1.55 and tot_net_btc > 0) else 0.0
+                target_btc_h = 0.00145 if (not force_repay_all and ml > 1.50 and tot_net_btc > 0) else 0.0
                 if target_btc_h > 0 and bv_u < target_btc_h * 0.80:
                     brw_btc = round(target_btc_h - bv_u, 5)
                     if brw_btc >= 0.00010:
@@ -1141,7 +1143,7 @@ def main():
                                     cg_live.get("hi_vol", False)
                                     or cg_live.get("falling", False)
                                     or q_bbo["bidQty"] < q_bbo["askQty"] * 0.35
-                                    or (btc_ref_bbo.get("bid", 0) > 0 and (tr["buy_px"] - btc_ref_bbo["bid"]) > 32.0)
+                                    or (btc_ref_bbo.get("bid", 0) > 0 and (tr["buy_px"] - btc_ref_bbo["bid"]) > 95.0)
                                     or (q_bbo["ask"] - q_bbo["bid"]) > 28.0
                                 )
                             )
@@ -1679,7 +1681,7 @@ def main():
                                 or (q_bbo["ask"] - q_bbo["bid"]) < 3.20
                                 or (q_bbo["ask"] - q_bbo["bid"]) > 26.00
                                 or q_bbo["bidQty"] < q_bbo["askQty"] * 0.40
-                                or (btc_ref_p > 0 and (q_bbo["bid"] - btc_ref_p) > 30.0)
+                                or (btc_ref_p > 0 and (q_bbo["bid"] - btc_ref_p) > 90.0)
                             ):
                                 break
                             cap_top, cap_sub, max_lvls = 2, 2, 3
