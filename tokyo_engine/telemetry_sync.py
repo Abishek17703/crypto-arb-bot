@@ -240,14 +240,18 @@ def auto_compound_borrow(api, force_repay_all=False):
                     api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "USD1", "isIsolated": "FALSE", "amount": f"{min(fv_u, bv_u):.4f}", "type": "REPAY"}, signed=True)
             elif ast_u == "U":
                 tot_u = fv_u + lv_u
-                if bv_u > 1.0 and fv_u > 60.0:
-                    api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "U", "isIsolated": "FALSE", "amount": f"{min(fv_u - 40.0, bv_u):.2f}", "type": "REPAY"}, signed=True)
-                elif ml > 1.55 and tot_u < 35.0 and bv_u < 45.0 and tot_net_btc > 0:
-                    api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "U", "isIsolated": "FALSE", "amount": "40.00", "type": "BORROW"}, signed=True)
+                # Exclude UUSDT SELL orders from BTCU working U budget!
+                u_free_for_btcu = fv_u
+                if bv_u > 1.0 and u_free_for_btcu > 210.0:
+                    api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "U", "isIsolated": "FALSE", "amount": f"{min(u_free_for_btcu - 140.0, bv_u):.2f}", "type": "REPAY"}, signed=True)
+                elif ml > 1.55 and u_free_for_btcu < 135.0 and bv_u < 220.0 and tot_net_btc > 0:
+                    brw_u_amt = min(175.0 - u_free_for_btcu, 220.0 - bv_u, 150.0)
+                    if brw_u_amt >= 20.0:
+                        api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "U", "isIsolated": "FALSE", "amount": f"{brw_u_amt:.2f}", "type": "BORROW"}, signed=True)
             elif ast_u == "BTC":
-                # Keep 1:1 Cross-Margin BTC short hedge (~0.00038 BTC = ~$25) matching 0%-fee BTCU inventory so net BTC delta stays ~0.00000!
-                target_btc_h = 0.00038 if (not force_repay_all and ml > 1.55 and tot_net_btc > 0) else 0.0
-                if target_btc_h > 0 and bv_u < target_btc_h * 0.75:
+                # Keep 1:1 Cross-Margin BTC short hedge (~0.00145 BTC = ~$94, midpoint of $185 max sleeve) so BTCU inventory stays delta-neutral!
+                target_btc_h = 0.00145 if (not force_repay_all and ml > 1.55 and tot_net_btc > 0) else 0.0
+                if target_btc_h > 0 and bv_u < target_btc_h * 0.80:
                     brw_btc = round(target_btc_h - bv_u, 5)
                     if brw_btc >= 0.00010:
                         rr_b = api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "BTC", "isIsolated": "FALSE", "amount": f"{brw_btc:.5f}", "type": "BORROW"}, signed=True)
@@ -259,7 +263,7 @@ def auto_compound_borrow(api, force_repay_all=False):
                                 hr_o = api.request("POST", "/sapi/v1/margin/order", {"symbol": "BTCU", "side": "SELL", "type": "LIMIT_MAKER", "quantity": f"{brw_btc:.5f}", "price": f"{spx_h:.2f}"}, signed=True)
                                 if "orderId" in hr_o:
                                     api._btc_hedge_oid = hr_o["orderId"]
-                elif bv_u > target_btc_h + 0.00030 and fv_u >= 0.00010:
+                elif bv_u > target_btc_h + 0.00040 and fv_u >= 0.00010:
                     rep_btc = min(fv_u, bv_u - target_btc_h)
                     if rep_btc >= 0.00005:
                         api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "BTC", "isIsolated": "FALSE", "amount": f"{rep_btc:.5f}", "type": "REPAY"}, signed=True)
@@ -345,6 +349,29 @@ def compute_conservative_guard(api, bbos):
                 out[sym_g] = {"max_bid": max_safe_bid, "mid": round(c_now, dec_g), "hi": hi_3m, "lo": lo_2m, "falling": falling_fast}
         except Exception:
             pass
+    # Continuous Real-Time BTC Volatility Shield (1m + 3m range & impulse gate across BTCUSDT + BTCU):
+    try:
+        kl_b = api.request("GET", "/api/v3/klines", {"symbol": "BTCUSDT", "interval": "1m", "limit": 5})
+        if isinstance(kl_b, list) and len(kl_b) >= 4:
+            r3_b = kl_b[-3:]
+            c_b = max(1.0, float(r3_b[-1][4]))
+            rng_1m_bps = ((float(r3_b[-1][2]) - float(r3_b[-1][3])) / c_b) * 10000.0
+            rng_3m_bps = ((max(float(k[2]) for k in r3_b) - min(float(k[3]) for k in r3_b)) / c_b) * 10000.0
+            drop_2m_bps = ((float(r3_b[-2][1]) - c_b) / c_b) * 10000.0
+            jump_2m_bps = ((c_b - float(r3_b[-2][1])) / c_b) * 10000.0
+            hi_vol_b = (rng_1m_bps >= 20.0 or rng_3m_bps >= 35.0 or abs(drop_2m_bps) >= 18.0 or abs(jump_2m_bps) >= 22.0)
+            if hi_vol_b:
+                api._btc_vol_cooldown_until = max(getattr(api, "_btc_vol_cooldown_until", 0.0), now_t + 30.0)
+            in_cd_b = (now_t < getattr(api, "_btc_vol_cooldown_until", 0.0))
+            out["BTCU"] = {
+                "falling": (hi_vol_b or in_cd_b or drop_2m_bps >= 10.0),
+                "hi_vol": (hi_vol_b or in_cd_b),
+                "vol_1m_bps": round(rng_1m_bps, 2),
+                "vol_3m_bps": round(rng_3m_bps, 2),
+                "max_bid": round(max(float(k[2]) for k in r3_b) - 8.0, 2) if jump_2m_bps >= 14.0 else None,
+            }
+    except Exception:
+        pass
     api._cons_guard = {"ts": now_t, "pairs": out}
     return out
 
@@ -1107,8 +1134,19 @@ def main():
                             can_reroute_deep = (sym in ("USD1USDT", "USDCUSDT", "UUSDT", "USD1USDC") and not tr["iso"] and (q_bbo["bid"] - tr["buy_px"]) >= spec["tick"] * 3.5 and (loop_ts - tr.get("ts", 0)) >= 8.0)
                             # FIFO-Preserving Pre-Fill Shield: Never reset FIFO queue on normal book oscillation; cancel ONLY on severe <0.15x wall collapse or active dump!
                             cg_live = compute_conservative_guard(api, bbos).get(sym, {})
+                            btc_ref_bbo = bbos.get("BTCUSDT", {})
+                            btcu_vol_trip = (
+                                sym == "BTCU"
+                                and (
+                                    cg_live.get("hi_vol", False)
+                                    or cg_live.get("falling", False)
+                                    or q_bbo["bidQty"] < q_bbo["askQty"] * 0.35
+                                    or (btc_ref_bbo.get("bid", 0) > 0 and (tr["buy_px"] - btc_ref_bbo["bid"]) > 32.0)
+                                    or (q_bbo["ask"] - q_bbo["bid"]) > 28.0
+                                )
+                            )
                             min_safe_wall = 0.14 if sym in ("UUSDT", "USD1USDC") else 0.18
-                            weak_bid_wall = (
+                            weak_bid_wall = btcu_vol_trip or (
                                 sym in ("USD1USDT", "USDCUSDT", "UUSDT", "USD1USDC", "FDUSDUSDT")
                                 and abs(tr["buy_px"] - q_bbo["bid"]) < spec["tick"] * 0.4
                                 and (q_bbo["bidQty"] < q_bbo["askQty"] * min_safe_wall or (cg_live.get("falling", False) and q_bbo["bidQty"] < q_bbo["askQty"] * 0.45) or (cg_live.get("max_bid") and tr["buy_px"] > cg_live["max_bid"] + spec["tick"] * 1.2))
@@ -1548,11 +1586,12 @@ def main():
                             free_map["CM_USDC"] = max(0.0, free_map["CM_USDC"] - uc_s_mkr)
                             api._uc_seed_oid = ("SELL", s_res["orderId"], loop_ts, uc_ask_now)
 
-                # 4B. v7.7 FIFO-LOCKED $2K SNIPER + MICRO DELTA-HEDGED BTCU/BTCUSD1 TEST ($25 Micro Budget)
+                # 4B. v7.8 VOLATILITY-GUARDED BTCU STEP-1 ($180 DELTA-HEDGED) + FIFO-LOCKED $2K STABLECOIN SNIPER
                 cons_guards = compute_conservative_guard(api, bbos)
                 allow_buys = (not soft_delev)
+                btcu_vol_ok = not cons_guards.get("BTCU", {}).get("hi_vol", False)
                 for sym_p, is_iso, f_key, b_key, max_tr, max_buy, t_size, max_sell_cap, lbl_p in (
-                    ("BTCU",      False, "CM_U",     "CM_BTC",     4 if allow_buys else 0,  3 if allow_buys else 0, 12.5, 0.00055, "MICRO-HEDGE • BTC/U $12.5"),
+                    ("BTCU",      False, "CM_U",     "CM_BTC",    10 if (allow_buys and btcu_vol_ok) else 0,  6 if (allow_buys and btcu_vol_ok) else 0, 28.0, 0.00285, "VOL-GUARD • BTC/U $28"),
                     ("USD1USDC",  False, "CM_USDC",  "CM_USD1",   22 if allow_buys else 0, 14 if allow_buys else 0, 42.1, 460.0, "10x-1BPS • USD1/USDC $42"),
                     ("UUSDT",     False, "CM_USDT",  "CM_U",      14 if allow_buys else 0,  8 if allow_buys else 0, 42.1, 240.0, "10x-1BPS • U/USDT $42"),
                     ("USD1USDT",  False, "CM_USDT",  "CM_USD1",   30 if allow_buys else 0, 18 if allow_buys else 0, 35.1, 560.0, "5x-POOL • USD1 $35"),
@@ -1567,8 +1606,8 @@ def main():
                     is_crypto_u1 = sym_p in ("BTCU", "BTCUSD1", "BNBU", "ETHU", "BNBFDUSD", "SOLFDUSD")
 
                     # Immediately post maker SELL for any free non-hedged base inventory (keep at least 5 tranche slots free for live BUY flips!)
-                    while sym_p not in ("USD1USDC", "FDUSDUSDC", "USD1U") and free_map[b_key] * q_bbo["ask"] >= 5.6 and len(p_tr) < max(1, max_tr - (1 if is_crypto_u1 else 5)):
-                        if (sym_p == "USD1USDT" and cm_u1_debt >= 1.0 and free_map["CM_USD1"] <= 35.0) or (sym_p == "UUSDT" and free_map["CM_U"] <= 35.0) or (sym_p == "USDCUSDT" and cm_uc_debt >= 1.0 and free_map["CM_USDC"] <= 520.0):
+                    while sym_p not in ("USD1USDC", "FDUSDUSDC", "USD1U") and free_map[b_key] * q_bbo["ask"] >= 5.6 and len(p_tr) < max(1, max_tr - (2 if is_crypto_u1 else 5)):
+                        if (sym_p == "USD1USDT" and cm_u1_debt >= 1.0 and free_map["CM_USD1"] <= 35.0) or (sym_p == "UUSDT" and free_map["CM_U"] <= 185.0) or (sym_p == "USDCUSDT" and cm_uc_debt >= 1.0 and free_map["CM_USDC"] <= 520.0):
                             break
                         max_base_s = free_map[b_key]
                         target_base_s = (t_size / q_bbo["ask"]) if is_crypto_u1 else t_size
@@ -1632,10 +1671,18 @@ def main():
                         if bq * q_bbo["bid"] < 6.0:
                             break
                         if is_crypto_u1:
-                            # Micro Hedged BTC Scalper: Only post when spread >= $3.50 (>= 0.54 bps) so every fill clears +$3.25 to +$6.50/BTC cleanly!
-                            if sym_p in ("BTCU", "BTCUSD1") and (q_bbo["ask"] - q_bbo["bid"]) < 3.50:
+                            # Volatility-Guarded BTCU Scalper: Require calm BTC vol, spread between $3.20 and $26.00, BidWall >= 0.40x AskWall, and BTCU Bid within $30 of BTCUSDT!
+                            btc_ref_p = bbos.get("BTCUSDT", {}).get("bid", 0.0)
+                            if sym_p in ("BTCU", "BTCUSD1") and (
+                                cg_p.get("hi_vol", False)
+                                or cg_p.get("falling", False)
+                                or (q_bbo["ask"] - q_bbo["bid"]) < 3.20
+                                or (q_bbo["ask"] - q_bbo["bid"]) > 26.00
+                                or q_bbo["bidQty"] < q_bbo["askQty"] * 0.40
+                                or (btc_ref_p > 0 and (q_bbo["bid"] - btc_ref_p) > 30.0)
+                            ):
                                 break
-                            cap_top, cap_sub, max_lvls = 1, 1, 2
+                            cap_top, cap_sub, max_lvls = 2, 2, 3
                         elif sym_p in ("FDUSDUSDC", "USD1U"):
                             q_bridge_p = "UUSDT" if sym_p == "USD1U" else "USDCUSDT"
                             ref_chk_p = "USD1USDT" if sym_p == "USD1U" else "FDUSDUSDT"
@@ -1662,11 +1709,13 @@ def main():
                         used_pxs = [round(t["buy_px"], spec["dec"]) for t in active_tranches if t["symbol"] == sym_p]
                         used_spxs_b = [round(t["sell_px"] if t["state"] == "SELL_OPEN" else (t["buy_px"] + spec["tick"]), spec["dec"]) for t in active_tranches if t["symbol"] == sym_p]
                         bpx = base_bpx
+                        btc_lvl_step = 0.80 if sym_p in ("BTCU", "BTCUSD1") else spec["tick"]
+                        btc_match_tol = 0.35 if sym_p in ("BTCU", "BTCUSD1") else spec["tick"] * 0.3
                         placed_slot = False
                         for _lvl in range(max_lvls):
                             c_lim = cap_top if _lvl == 0 else cap_sub
-                            if sum(1 for ux in used_pxs if abs(ux - bpx) < spec["tick"] * 0.3) >= c_lim or sum(1 for sx in used_spxs_b if abs(sx - (bpx + spec["tick"])) < spec["tick"] * 0.3) >= c_lim:
-                                bpx = round(bpx - spec["tick"], spec["dec"])
+                            if sum(1 for ux in used_pxs if abs(ux - bpx) < btc_match_tol) >= c_lim or sum(1 for sx in used_spxs_b if abs(sx - (bpx + spec["tick"])) < btc_match_tol) >= c_lim:
+                                bpx = round(bpx - btc_lvl_step, spec["dec"])
                             else:
                                 placed_slot = True
                                 break
@@ -1683,8 +1732,8 @@ def main():
                             placed_fb = False
                             for _lvl in range(max_lvls):
                                 c_lim = cap_top if _lvl == 0 else cap_sub
-                                if sum(1 for ux in used_pxs if abs(ux - bpx) < spec["tick"] * 0.3) >= c_lim or sum(1 for sx in used_spxs_b if abs(sx - (bpx + spec["tick"])) < spec["tick"] * 0.3) >= c_lim:
-                                    bpx = round(bpx - spec["tick"], spec["dec"])
+                                if sum(1 for ux in used_pxs if abs(ux - bpx) < btc_match_tol) >= c_lim or sum(1 for sx in used_spxs_b if abs(sx - (bpx + spec["tick"])) < btc_match_tol) >= c_lim:
+                                    bpx = round(bpx - btc_lvl_step, spec["dec"])
                                 else:
                                     placed_fb = True
                                     break
@@ -1767,7 +1816,7 @@ def main():
                         "status": (
                             f"PAUSED AT <=$495.00 — ALL TRADING STOPPED UNTIL USER REPLY (Eq ${cached_total_usd:.4f})"
                             if getattr(api, "_paused_495", False)
-                            else f"v7.7 FIFO-LOCK $2K + MICRO BTC HEDGE • $495 GUARD (Pool ${cached_leveraged_pool:.0f} • 1h {'+$' if equity_changes.get('1h', 0)>=0 else '-$'}{abs(equity_changes.get('1h', 0)):.4f})"
+                            else f"v7.8 VOL-GUARDED BTCU ($180) + $2K FIFO SNIPER • $495 GUARD (Pool ${cached_leveraged_pool:.0f} • BTCVol {cons_guards.get('BTCU', {}).get('vol_1m_bps', 0):.1f}bps • 1h {'+$' if equity_changes.get('1h', 0)>=0 else '-$'}{abs(equity_changes.get('1h', 0)):.4f})"
                         ),
                         "paused": bool(getattr(api, "_paused_495", False)),
                         "pauseReason": (
