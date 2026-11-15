@@ -238,9 +238,27 @@ def auto_compound_borrow(api, force_repay_all=False):
                         if "tranId" in br_c_r:
                             api._last_uc_borrow_ts = time.time()
             elif ast_u == "USD1":
-                if bv_u > 0.01 and fv_u >= 0.50:
+                tot_u1 = fv_u + lv_u
+                # 1:1 Delta-Neutral USD1 Base Hedge (~360 USD1 borrowed vs ~360 USD1 inventory) so USD1USDT peg drops cause ZERO net equity loss!
+                target_u1_h = 360.0 if (not force_repay_all and ml > 1.38 and tot_net_btc > 0) else 0.0
+                if target_u1_h == 0.0 and bv_u > 0.01 and fv_u >= 0.50:
                     api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "USD1", "isIsolated": "FALSE", "amount": f"{min(fv_u, bv_u):.4f}", "type": "REPAY"}, signed=True)
+                elif target_u1_h > 0.0 and bv_u < target_u1_h - 45.0:
+                    brw_u1 = min(target_u1_h - bv_u, 220.0)
+                    if brw_u1 >= 25.0:
+                        api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "USD1", "isIsolated": "FALSE", "amount": f"{brw_u1:.2f}", "type": "BORROW"}, signed=True)
+                elif target_u1_h > 0.0 and bv_u > target_u1_h + 60.0 and fv_u >= 25.0:
+                    rep_u1_h = min(fv_u - 10.0, bv_u - target_u1_h)
+                    if rep_u1_h >= 15.0:
+                        api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "USD1", "isIsolated": "FALSE", "amount": f"{rep_u1_h:.2f}", "type": "REPAY"}, signed=True)
             elif ast_u == "U":
+                # Immediately unwind UUSDT SELL orders and repay 100% of leftover U debt (112 U) so UUSDT drop causes zero loss!
+                if bv_u > 0.50 and fv_u < bv_u:
+                    _u_oc = api.request("GET", "/sapi/v1/margin/openOrders", {"symbol": "UUSDT"}, signed=True)
+                    if isinstance(_u_oc, list):
+                        for _oo in _u_oc:
+                            api.request("DELETE", "/sapi/v1/margin/order", {"symbol": "UUSDT", "orderId": _oo["orderId"]}, signed=True)
+                            fv_u += max(0.0, float(_oo.get("origQty", 0)) - float(_oo.get("executedQty", 0))) if _oo.get("side") == "SELL" else 0.0
                 if bv_u > 0.01 and fv_u >= 0.50:
                     api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "U", "isIsolated": "FALSE", "amount": f"{min(fv_u, bv_u):.4f}", "type": "REPAY"}, signed=True)
             elif ast_u == "BTC":
@@ -402,12 +420,12 @@ def adopt_existing_tranches(api):
         pass
     # 1. Seamless Anti-Loop Startup: Cancel non-core symbols & BUY orders, while ADOPTING existing USD1USDT/USDCUSDT SELL orders with exact saved buy_px so zero over-price loss occurs!
     open_cm = []
-    for _old_sym in ("BTCU", "BTCUSD1", "ETHUSD1", "BNBUSD1", "ETHU", "BNBU", "BNBFDUSD", "SOLFDUSD", "FDUSDUSDT", "FDUSDUSDC", "USD1U", "UUSDC"):
+    for _old_sym in ("BTCU", "BTCUSD1", "ETHUSD1", "BNBUSD1", "ETHU", "BNBU", "BNBFDUSD", "SOLFDUSD", "FDUSDUSDT", "FDUSDUSDC", "USD1U", "UUSDC", "USD1USDC", "UUSDT"):
         _old_oc = api.request("GET", "/sapi/v1/margin/openOrders", {"symbol": _old_sym}, signed=True)
         if isinstance(_old_oc, list):
             for _oo in _old_oc:
                 api.request("DELETE", "/sapi/v1/margin/order", {"symbol": _old_sym, "orderId": _oo["orderId"]}, signed=True)
-    for _core_sym in ("USDCUSDT", "USD1USDT", "UUSDT", "USD1USDC"):
+    for _core_sym in ("USDCUSDT", "USD1USDT"):
         _core_oc = api.request("GET", "/sapi/v1/margin/openOrders", {"symbol": _core_sym}, signed=True)
         if isinstance(_core_oc, list):
             for _oo in _core_oc:
@@ -818,6 +836,7 @@ def main():
                     drain_oids = {
                         (getattr(api, "_sol_drain_oid", None) or (None,))[0],
                         (getattr(api, "_btc_drain_oid", None) or (None,))[0],
+                        (getattr(api, "_u_drain_oid", None) or (None,))[0],
                         (getattr(api, "_fd_drain_oid", None) or (None,))[0],
                         (getattr(api, "_u1_drain_oid", None) or (None,))[0],
                         (getattr(api, "_uc_seed_oid", None) or (None, None))[1],
@@ -1067,9 +1086,24 @@ def main():
                     elif chk_eq_495 > 495.0000:
                         api._below_495_hits = 0
 
-            # Hard Stop Gate: If $495.00 circuit breaker has latched, stop 100% of trading until user explicitly replies!
+            # Check remote S3 dashboard pause control (pause-control.json) every 2.0s so dashboard red PAUSE button stops trading immediately!
+            if loop_ts - getattr(api, "_last_s3_pause_chk", 0.0) >= 2.0:
+                api._last_s3_pause_chk = loop_ts
+                try:
+                    _p_obj = json.loads(s3.get_object(Bucket=S3_BUCKET, Key="pause-control.json")["Body"].read().decode())
+                    _want_p = bool(_p_obj.get("paused", False))
+                    if _want_p != bool(getattr(api, "_user_paused", False)):
+                        api._user_paused = _want_p
+                        if _want_p:
+                            halt_all_orders_and_repay(api)
+                            active_tranches = []
+                            cached_open_orders = []
+                except Exception:
+                    pass
+
+            # Hard Stop Gate: If $495.00 circuit breaker OR dashboard red PAUSE button is active, stop 100% of trading!
             cm_ut_debt = sum(float(b.get("borrowed", 0)) for b in cached_balances if "USDT (5x Cross)" in b.get("asset", ""))
-            if getattr(api, "_paused_495", False):
+            if getattr(api, "_paused_495", False) or getattr(api, "_user_paused", False):
                 if cached_open_orders or active_tranches or (loop_ts - getattr(api, "_last_halt_sweep", 0.0) >= 30.0):
                     api._last_halt_sweep = loop_ts
                     halt_all_orders_and_repay(api)
@@ -1491,9 +1525,9 @@ def main():
                         if "tranId" in rr_uc:
                             free_map["CM_USDC"] = max(0.0, free_map["CM_USDC"] - rep_uc)
                             cm_uc_debt = max(0.0, cm_uc_debt - rep_uc)
-                if cm_u1_debt > 0.01 and (soft_delev or free_map["CM_USD1"] >= 55.0) and (loop_ts - getattr(api, "_last_u1_rep", 0.0)) >= 4.0:
+                if cm_u1_debt > 0.01 and (soft_delev or (free_map["CM_USD1"] >= 420.0 and cm_u1_debt > 380.0)) and (loop_ts - getattr(api, "_last_u1_rep", 0.0)) >= 4.0:
                     api._last_u1_rep = loop_ts
-                    rep_u1 = min(free_map["CM_USD1"] if soft_delev else max(0.0, free_map["CM_USD1"] - 30.0), cm_u1_debt)
+                    rep_u1 = min(free_map["CM_USD1"] if soft_delev else max(0.0, free_map["CM_USD1"] - 360.0), cm_u1_debt - (0.0 if soft_delev else 360.0))
                     if rep_u1 >= 2.0:
                         rr_u1 = api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "USD1", "isIsolated": "FALSE", "amount": f"{rep_u1:.4f}", "type": "REPAY"}, signed=True)
                         if "tranId" in rr_u1:
@@ -1559,6 +1593,23 @@ def main():
                         free_map["CM_BTC"] = 0.0
                         api._btc_drain_oid = (sr_btc["orderId"], spx_btc, loop_ts)
 
+                # Drain 100% of remaining U down to 0 via 0%-fee UUSDT LIMIT_MAKER @ live Ask after U debt == 0!
+                u_drain_ord = getattr(api, "_u_drain_oid", None)
+                if u_drain_ord is not None:
+                    if not any(o.get("orderId") == u_drain_ord[0] for o in cached_open_orders):
+                        api._u_drain_oid = None
+                    elif "UUSDT" in bbos and (bbos["UUSDT"]["ask"] < u_drain_ord[1] - 0.00005 or loop_ts - u_drain_ord[2] > 5.0):
+                        api.request("DELETE", "/sapi/v1/margin/order", {"symbol": "UUSDT", "orderId": u_drain_ord[0]}, signed=True)
+                        api._u_drain_oid = None
+                elif cm_u_debt < 1.0 and "UUSDT" in bbos and free_map["CM_U"] >= 6.0:
+                    sq_u_d = math.floor(free_map["CM_U"])
+                    if sq_u_d >= 6:
+                        spx_u_d = bbos["UUSDT"]["ask"]
+                        sr_u_d = api.request("POST", "/sapi/v1/margin/order", {"symbol": "UUSDT", "side": "SELL", "type": "LIMIT_MAKER", "quantity": str(sq_u_d), "price": f"{spx_u_d:.4f}"}, signed=True)
+                        if "orderId" in sr_u_d:
+                            free_map["CM_U"] = max(0.0, free_map["CM_U"] - sq_u_d)
+                            api._u_drain_oid = (sr_u_d["orderId"], spx_u_d, loop_ts)
+
                 # Drain 100% of FDUSD down to 0 via 0%-fee FDUSDUSDT LIMIT_MAKER @ live Ask (eliminates coarse $0.00010 FDUSD unrealized drag completely!)
                 fd_drain_ord = getattr(api, "_fd_drain_oid", None)
                 if fd_drain_ord is not None:
@@ -1610,14 +1661,12 @@ def main():
                             free_map["CM_USDC"] = max(0.0, free_map["CM_USDC"] - uc_s_mkr)
                             api._uc_seed_oid = ("SELL", s_res["orderId"], loop_ts, uc_ask_now)
 
-                # 4B. v7.9 EMERGENCY BTC STOP & UNWIND + PURE STABLECOIN FIFO SNIPER
+                # 4B. v8.0 DELTA-NEUTRAL USD1USDT + USDCUSDT ONLY (UUSDT & USD1USDC REMOVED • 0% PEGGED DRIFT LOSS)
                 cons_guards = compute_conservative_guard(api, bbos)
                 allow_buys = (not soft_delev)
                 for sym_p, is_iso, f_key, b_key, max_tr, max_buy, t_size, max_sell_cap, lbl_p in (
-                    ("USD1USDC",  False, "CM_USDC",  "CM_USD1",   22 if allow_buys else 0, 14 if allow_buys else 0, 42.1, 460.0, "10x-1BPS • USD1/USDC $42"),
-                    ("UUSDT",     False, "CM_USDT",  "CM_U",      14 if allow_buys else 0,  8 if allow_buys else 0, 42.1, 240.0, "10x-1BPS • U/USDT $42"),
-                    ("USD1USDT",  False, "CM_USDT",  "CM_USD1",   30 if allow_buys else 0, 18 if allow_buys else 0, 35.1, 560.0, "5x-POOL • USD1 $35"),
-                    ("USDCUSDT",  False, "CM_USDT",  "CM_USDC",   24 if allow_buys else 0, 15 if allow_buys else 0, 35.1, 420.0, "5x-POOL • USDC $35"),
+                    ("USD1USDT",  False, "CM_USDT",  "CM_USD1",   32 if allow_buys else 0, 16 if allow_buys else 0, 35.1, 490.0, "DELTA-NEUTRAL • USD1 $35"),
+                    ("USDCUSDT",  False, "CM_USDT",  "CM_USDC",   28 if allow_buys else 0, 15 if allow_buys else 0, 35.1, 490.0, "DELTA-NEUTRAL • USDC $35"),
                 ):
                     q_bbo = bbos.get(sym_p)
                     if not q_bbo or q_bbo["bid"] <= 0:
@@ -1629,7 +1678,7 @@ def main():
 
                     # Immediately post maker SELL for any free non-hedged base inventory (keep at least 5 tranche slots free for live BUY flips!)
                     while sym_p not in ("USD1USDC", "FDUSDUSDC", "USD1U") and free_map[b_key] * q_bbo["ask"] >= 5.6 and len(p_tr) < max(1, max_tr - (2 if is_crypto_u1 else 5)):
-                        if (sym_p == "USD1USDT" and cm_u1_debt >= 1.0 and free_map["CM_USD1"] <= 35.0) or (sym_p == "UUSDT" and free_map["CM_U"] <= 185.0) or (sym_p == "USDCUSDT" and cm_uc_debt >= 1.0 and free_map["CM_USDC"] <= 520.0):
+                        if (sym_p == "USD1USDT" and cm_u1_debt >= 1.0 and free_map["CM_USD1"] <= 35.0) or (sym_p == "USDCUSDT" and cm_uc_debt >= 1.0 and free_map["CM_USDC"] <= 345.0):
                             break
                         max_base_s = free_map[b_key]
                         target_base_s = (t_size / q_bbo["ask"]) if is_crypto_u1 else t_size
@@ -1836,11 +1885,16 @@ def main():
                     },
                     "hftTest": {
                         "status": (
-                            f"PAUSED AT <=$495.00 — ALL TRADING STOPPED UNTIL USER REPLY (Eq ${cached_total_usd:.4f})"
-                            if getattr(api, "_paused_495", False)
-                            else f"v7.9 BTC HALTED & UNWOUND • PURE STABLECOIN FIFO SNIPER (Pool ${cached_leveraged_pool:.0f} • 1h {'+$' if equity_changes.get('1h', 0)>=0 else '-$'}{abs(equity_changes.get('1h', 0)):.4f})"
+                            f"PAUSED BY USER — ALL ORDERS CANCELED & LOANS REPAID (Eq ${cached_total_usd:.4f})"
+                            if getattr(api, "_user_paused", False)
+                            else (
+                                f"PAUSED AT <=$495.00 — ALL TRADING STOPPED UNTIL USER REPLY (Eq ${cached_total_usd:.4f})"
+                                if getattr(api, "_paused_495", False)
+                                else f"v8.0 DELTA-NEUTRAL USD1USDT + USDCUSDT ONLY • UUSDT & USD1USDC REMOVED (Pool ${cached_leveraged_pool:.0f} • 1h {'+$' if equity_changes.get('1h', 0)>=0 else '-$'}{abs(equity_changes.get('1h', 0)):.4f})"
+                            )
                         ),
-                        "paused": bool(getattr(api, "_paused_495", False)),
+                        "paused": bool(getattr(api, "_paused_495", False) or getattr(api, "_user_paused", False)),
+                        "userPaused": bool(getattr(api, "_user_paused", False)),
                         "pauseReason": (
                             f"Hard $495.00 equity circuit breaker latched at ${cached_total_usd:.4f} — all trading halted until user replies"
                             if getattr(api, "_paused_495", False)
@@ -1866,6 +1920,15 @@ def main():
                         json.dump({str(t.get("sell_oid") or t.get("buy_oid")): t.get("buy_px") for t in active_tranches}, _tf)
                 except Exception:
                     pass
+                # Upload dashboard html once on startup (with red PAUSE TRADING button + presigned S3 pause/resume URLs!)
+                if not getattr(api, "_dash_uploaded", False):
+                    api._dash_uploaded = True
+                    try:
+                        _p_url = s3.generate_presigned_url("put_object", Params={"Bucket": S3_BUCKET, "Key": "pause-control.json", "ContentType": "application/json"}, ExpiresIn=604800)
+                    except Exception:
+                        _p_url = ""
+                    api._pause_put_url = _p_url
+                payload["pauseControlUrl"] = getattr(api, "_pause_put_url", "")
                 s3.put_object(
                     Bucket=S3_BUCKET, Key=S3_KEY,
                     Body=json.dumps(payload, separators=(",", ":")).encode(),

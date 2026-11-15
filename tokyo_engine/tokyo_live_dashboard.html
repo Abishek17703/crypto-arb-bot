@@ -218,7 +218,8 @@
         <span class="font-bold text-sm tracking-tight" id="engineVersionTitle">Tokyo Production Engine v4.2 — 100% USD1 TURBO (5x Iso + 5x Cross • Waterfall Auto-Unstick)</span>
         <span class="text-xs px-2.5 py-0.5 rounded-md bg-emerald-500/15 text-emerald-400 font-semibold border border-emerald-500/25" id="syncStatus">Live • Tokyo ap-northeast-1a • Updated 12:56:07 (0.4s ago)</span>
       </div>
-      <div class="flex items-center gap-4 text-xs font-medium text-[var(--muted-foreground)] tabular-nums">
+      <div class="flex items-center gap-3 text-xs font-medium text-[var(--muted-foreground)] tabular-nums">
+        <button id="topPauseTradingBtn" onclick="toggleEnginePause()" style="background-color:#dc2626;color:#ffffff;border:1px solid #f87171;padding:0.4rem 0.9rem;border-radius:0.5rem;font-weight:800;font-size:0.75rem;letter-spacing:0.03em;cursor:pointer;box-shadow:0 0 12px rgba(220,38,38,0.55);">⏸ PAUSE TRADING</button>
         <span class="px-2.5 py-1 rounded-lg bg-purple-500/15 text-purple-300 border border-purple-500/30 font-bold" id="unstickVaultBadge">Rescue Vault: $0.9454</span>
         <span class="px-2.5 py-1 rounded-lg bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 font-bold" id="totalFillsBadge">36,306 Fills Today</span>
         <span>USD1: <strong class="text-[var(--foreground)]" id="pxUSD1">0.99908</strong></span>
@@ -630,6 +631,31 @@
 
       renderClosedTrades(data, refNowMs);
       renderOpenOrders(data, refNowMs);
+      const pBtn = document.getElementById("topPauseTradingBtn");
+      if (pBtn && data.hftTest) {
+        const isPaused = Boolean(data.hftTest.paused);
+        pBtn.textContent = isPaused ? "▶ RESUME TRADING (PAUSED)" : "⏸ PAUSE TRADING";
+        pBtn.style.backgroundColor = isPaused ? "#059669" : "#dc2626";
+        pBtn.style.borderColor = isPaused ? "#34d399" : "#f87171";
+      }
+    }
+
+    async function toggleEnginePause() {
+      const pBtn = document.getElementById("topPauseTradingBtn");
+      const curPaused = Boolean(currentData && currentData.hftTest && currentData.hftTest.paused);
+      const nextPaused = !curPaused;
+      if (pBtn) pBtn.textContent = nextPaused ? "⏳ PAUSING & CANCELING ALL..." : "⏳ RESUMING...";
+      const putUrl = currentData && currentData.pauseControlUrl;
+      if (putUrl) {
+        try {
+          await fetch(putUrl, {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ paused: nextPaused, ts: Date.now() })
+          });
+        } catch (_) {}
+      }
+      setTimeout(pollTelemetry, 1500);
     }
 
     async function fetchWithTimeout(url, ms) {
