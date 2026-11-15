@@ -62,8 +62,8 @@ SHADOW_STATE = {
 def init_shadow_arena():
     now_s = time.time()
     try:
-        if os.path.exists("/tmp/shadow_arena_v83.json"):
-            with open("/tmp/shadow_arena_v83.json") as _sf:
+        if os.path.exists("/tmp/shadow_arena_v84.json"):
+            with open("/tmp/shadow_arena_v84.json") as _sf:
                 saved_s = json.load(_sf)
                 if isinstance(saved_s, dict) and saved_s.get("strategies"):
                     SHADOW_STATE.update(saved_s)
@@ -174,7 +174,8 @@ def on_shadow_agg_trade(sym, px, qty, is_buyer_maker, now_s):
                 lvl_off = (idx // 3) * spec["tick"]
                 bpx0 = round(bbo["bid"] - lvl_off, spec["dec"])
                 q_Order = round(usd_sz / max(0.1, bpx0), 0)
-                q_ahead0 = max(q_Order * 0.35, min(q_Order * 4.5, float(bbo.get("bidQty", 100.0)) * (0.015 + 0.008 * (idx % 3))))
+                # Real exchange FIFO queue ahead: front-mid queue placement (30%–55% of actual live bidQty wall)
+                q_ahead0 = max(q_Order, float(bbo.get("bidQty", 5000.0)) * (0.28 + 0.12 * (idx % 3)))
                 sym_slots.append({
                     "side": "BUY",
                     "px": bpx0,
@@ -189,36 +190,35 @@ def on_shadow_agg_trade(sym, px, qty, is_buyer_maker, now_s):
                     if float(bbo.get("bidQty", 1.0)) < float(bbo.get("askQty", 1.0)) * 0.45 and sl["px"] >= bbo["bid"] - 1e-9:
                         sl["px"] = round(bbo["bid"] - spec["tick"], spec["dec"])
                         sl["buy_px"] = sl["px"]
-                        sl["q_ahead"] = max(sl["qty"] * 0.35, min(sl["qty"] * 4.0, float(bbo.get("bidQty", 100.0)) * 0.015))
+                        sl["q_ahead"] = max(sl["qty"], float(bbo.get("bidQty", 5000.0)) * 0.30)
                         sl["ts"] = now_s
                     if bbo["bid"] > sl["px"] + spec["tick"] * 1.5 and (now_s - sl["ts"]) >= 1.2:
                         sl["px"] = round(bbo["bid"], spec["dec"])
                         sl["buy_px"] = sl["px"]
-                        sl["q_ahead"] = max(sl["qty"] * 0.35, min(sl["qty"] * 4.0, float(bbo.get("bidQty", 100.0)) * 0.018))
+                        sl["q_ahead"] = max(sl["qty"], float(bbo.get("bidQty", 5000.0)) * 0.35)
                         sl["ts"] = now_s
                     if is_buyer_maker and px <= sl["px"] + 1e-9:
-                        mult = 2.5 if px < sl["px"] - 1e-9 else 1.0
+                        mult = 2.0 if px < sl["px"] - 1e-9 else 1.0
                         sl["q_ahead"] -= qty * mult
                         if sl["q_ahead"] <= 0.0:
                             st["fills"] += 1
                             spx = round(max(sl["buy_px"] + prof_tick, bbo["ask"]), spec["dec"])
                             sl["side"] = "SELL"
                             sl["px"] = spx
-                            sl["q_ahead"] = max(sl["qty"] * 0.35, min(sl["qty"] * 4.0, float(bbo.get("askQty", 100.0)) * 0.015))
+                            sl["q_ahead"] = max(sl["qty"], float(bbo.get("askQty", 5000.0)) * 0.28)
                             sl["ts"] = now_s
                 elif sl["side"] == "SELL":
-                    # Strict 100%-Win-Rate Profit Step-Down + Triangular Cross-Quote Exit (USD1USDC <-> USD1USDT/USDCUSDT, FDUSDUSDC <-> FDUSDUSDT):
+                    # Strict 100%-Win-Rate Profit Step-Down: NEVER sell below buy_px + 1 tick!
                     if bbo["ask"] < sl["px"] - spec["tick"] * 0.5 and (now_s - sl["ts"]) >= 2.5:
                         min_s = round(sl["buy_px"] + spec["tick"], spec["dec"])
                         new_s = round(max(min_s, bbo["ask"]), spec["dec"])
                         if new_s < sl["px"] - 1e-9:
                             sl["px"] = new_s
-                            sl["q_ahead"] = max(sl["qty"] * 0.35, min(sl["qty"] * 3.5, float(bbo.get("askQty", 100.0)) * 0.015))
+                            sl["q_ahead"] = max(sl["qty"], float(bbo.get("askQty", 5000.0)) * 0.30)
                             sl["ts"] = now_s
-                    # Triangular Cross-Book Stablecoin Exit: if holding USD1, USDC, FDUSD, or U > 12s, check if synthetic triangular exit is +1 tick profitable!
-                    tri_fill = ((now_s - sl["ts"]) >= 12.0 and px >= bbo["bid"])
-                    if ((not is_buyer_maker) and px >= sl["px"] - 1e-9) or tri_fill:
-                        mult = 2.5 if px > sl["px"] + 1e-9 else (1.5 if tri_fill else 1.0)
+                    # Strictly require real buyer-initiated aggTrade at >= sl["px"] to deplete the actual askQty FIFO queue!
+                    if (not is_buyer_maker) and px >= sl["px"] - 1e-9:
+                        mult = 2.0 if px > sl["px"] + 1e-9 else 1.0
                         sl["q_ahead"] -= qty * mult
                         if sl["q_ahead"] <= 0.0:
                             pnl_rt = max(sl["qty"] * spec["tick"], (sl["px"] - sl["buy_px"]) * sl["qty"])
@@ -241,7 +241,7 @@ def on_shadow_agg_trade(sym, px, qty, is_buyer_maker, now_s):
                             sl["side"] = "BUY"
                             sl["px"] = bpx_n
                             sl["buy_px"] = bpx_n
-                            sl["q_ahead"] = max(sl["qty"] * 0.35, min(sl["qty"] * 4.0, float(bbo.get("bidQty", 100.0)) * 0.016))
+                            sl["q_ahead"] = max(sl["qty"], float(bbo.get("bidQty", 5000.0)) * 0.30)
                             sl["ts"] = now_s
 
 
@@ -261,13 +261,15 @@ def get_shadow_summary(bbos, now_s):
                     else:
                         open_sells += 1
                         if bid_now > 0:
+                            # Exact 100% unhedged coin price drop deduction: subtract full (bid_now - buy_px) * qty!
                             raw_m = (bid_now - sl["buy_px"]) * sl["qty"]
-                            mtm += raw_m * 0.02 if raw_m < 0 else raw_m
+                            mtm += raw_m
             w_1h = sum(w[1] for w in st.get("wins", []) if now_s - w[0] <= 3600.0)
             w_15m = sum(w[1] for w in st.get("wins", []) if now_s - w[0] <= 900.0) * 4.0
-            hr_rate = round(max(w_1h, w_15m, st["realizedUsd"] / elapsed_hr), 4)
+            net_now = round(st["realizedUsd"] + mtm, 4)
+            hr_rate = round(max(w_1h + mtm, w_15m + mtm, net_now / elapsed_hr), 4)
             st["mtmUsd"] = round(mtm, 4)
-            st["netUsd"] = round(st["realizedUsd"] + mtm, 4)
+            st["netUsd"] = net_now
             st["hrRateUsd"] = hr_rate
             out_list.append({
                 "id": st_id,
@@ -283,11 +285,11 @@ def get_shadow_summary(bbos, now_s):
                 "openBuys": open_buys,
                 "openSells": open_sells,
             })
-        out_list.sort(key=lambda x: x["hrRateUsd"], reverse=True)
+        out_list.sort(key=lambda x: x["netUsd"], reverse=True)
         if now_s - getattr(init_shadow_arena, "_last_save", 0.0) >= 15.0:
             init_shadow_arena._last_save = now_s
             try:
-                with open("/tmp/shadow_arena_v83.json", "w") as _sf:
+                with open("/tmp/shadow_arena_v84.json", "w") as _sf:
                     json.dump(SHADOW_STATE, _sf)
             except Exception:
                 pass
