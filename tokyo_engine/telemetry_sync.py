@@ -536,6 +536,18 @@ def auto_compound_borrow(api, force_repay_all=False):
                 ut_free = math.floor(float(b["free"]) * 100) / 100.0
                 if ut_free >= 1.20:
                     api.request("POST", "/sapi/v1/margin/transfer", {"asset": "USDT", "amount": f"{ut_free:.2f}", "type": "1"}, signed=True)
+        # Reclaim any idle Isolated Margin USDT/USDC (>= $1.50) back to Spot -> Cross Margin so 100% of account cash compounds in the main sniper pool!
+        iso_acc = api.request("GET", "/sapi/v1/margin/isolated/account", signed=True)
+        for ia in iso_acc.get("assets", []):
+            isym = ia.get("symbol", "")
+            for side_k in ("quoteAsset", "baseAsset"):
+                qa_i = ia.get(side_k, {})
+                q_ast = qa_i.get("asset", "")
+                q_free = math.floor(float(qa_i.get("free", 0)) * 100.0) / 100.0
+                q_debt = float(qa_i.get("borrowed", 0)) + float(qa_i.get("interest", 0))
+                if q_ast in ("USDT", "USDC", "FDUSD", "USD1") and q_free >= 1.50 and q_debt < 0.01:
+                    api.request("POST", "/sapi/v1/margin/isolated/transfer", {"asset": q_ast, "symbol": isym, "transFrom": "ISOLATED_MARGIN", "transTo": "SPOT", "amount": f"{q_free:.2f}"}, signed=True)
+                    api.request("POST", "/sapi/v1/margin/transfer", {"asset": q_ast, "amount": f"{q_free:.2f}", "type": "1"}, signed=True)
     except Exception:
         pass
     # Repay 100% of any Cross-Margin debt (v7.5 $0-Debt Pure Conservative Mode) so zero leverage interest or borrow/repay settlement drift ever touches net equity!
@@ -1470,7 +1482,9 @@ def main():
                                         free_map[cm_bkey] += exec_b
                                 if cr.get("status") == "CANCELED":
                                     rem_b = max(0.0, tr["qty"] - exec_b)
-                                    if not tr["iso"]:
+                                    if tr.get("borrowed"):
+                                        api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "USDT", "isIsolated": "FALSE", "amount": f"{rem_b * tr['buy_px']:.4f}", "type": "REPAY"}, signed=True)
+                                    elif not tr["iso"]:
                                         free_map[cm_qkey] += rem_b * tr["buy_px"]
                                 elif cr.get("code") != -2011 and exec_b > 0:
                                     still_tranches.append(tr)
@@ -1517,9 +1531,9 @@ def main():
                                     min_bps_gain = 2.50 if sym in ("BTCU", "BTCUSD1") else round(tr["buy_px"] * 0.00010, spec["dec"])
                                     s_px = round(max(tr["buy_px"] + max(spec["tick"], min_bps_gain), q_bbo["ask"] - (0.01 if (sym in ("BTCU", "BTCUSD1") and q_bbo["ask"] - q_bbo["bid"] >= 3.50) else 0.0)), spec["dec"])
                                 else:
-                                    # Pure 1-Tick Ultra-Fast Velocity Exit (+2 Tick Dynamic on Thin Ask Walls < 25K or Strong Bid/Ask Imbalance >= 1.80x for Pilot & Scaled Grid!):
+                                    # Pure 1-Tick Ultra-Fast Velocity Exit (+2 Tick ONLY on Ultra-Thin Ask Walls < 6,000 or Extreme Imbalance >= 3.0x so capital compounds 4x faster!):
                                     fifo_2t = bool(tr.get("pilot") or (sym in ("USD1USDT", "USDCUSDT") and getattr(api, "_v89_scaled", False)))
-                                    want_2t = bool(spread_ticks >= 2 or (fifo_2t and sym in ("USD1USDT", "USDCUSDT") and (ask_q < 25000.0 or imb >= 1.80)))
+                                    want_2t = bool(spread_ticks >= 2 or (fifo_2t and sym in ("USD1USDT", "USDCUSDT") and (ask_q < 6000.0 or (ask_q < 15000.0 and imb >= 3.00))))
                                     target_ticks = 2 if want_2t else 1
                                     s_px = round(max(tr["buy_px"] + spec["tick"] * target_ticks, q_bbo["ask"] + (spec["tick"] if (want_2t and spread_ticks == 1) else 0.0)), spec["dec"])
                                 api._last_buy_map = getattr(api, "_last_buy_map", {})
@@ -1527,9 +1541,10 @@ def main():
                                 cm_bkey = "CM_BTC" if sym in ("BTCU", "BTCUSD1") else ("CM_ETH" if sym == "ETHU" else ("CM_BNB" if sym in ("BNBU", "BNBFDUSD") else ("CM_SOL" if sym == "SOLFDUSD" else ("CM_FDUSD" if sym == "FDUSDUSDT" else ("CM_USDC" if sym == "USDCUSDT" else ("CM_U" if sym in ("UUSDT", "UUSDC") else "CM_USD1"))))))
 
                                 q_str = spec["q_fmt"].format(tr["qty"])
+                                se_param = {"sideEffectType": "AUTO_REPAY"} if tr.get("borrowed") else {}
                                 sr = api.request("POST", "/sapi/v1/margin/order", {
                                     "symbol": sym, "side": "SELL", "type": "LIMIT_MAKER",
-                                    "quantity": q_str, "price": f"{s_px:.{spec['dec']}f}", **iso_param
+                                    "quantity": q_str, "price": f"{s_px:.{spec['dec']}f}", **iso_param, **se_param
                                 }, signed=True)
                                 if "orderId" in sr:
                                     tr["sell_oid"] = sr["orderId"]
@@ -1542,7 +1557,7 @@ def main():
                                     s_px2 = round(s_px + spec["tick"], spec["dec"])
                                     sr2 = api.request("POST", "/sapi/v1/margin/order", {
                                         "symbol": sym, "side": "SELL", "type": "LIMIT_MAKER",
-                                        "quantity": q_str, "price": f"{s_px2:.{spec['dec']}f}", **iso_param
+                                        "quantity": q_str, "price": f"{s_px2:.{spec['dec']}f}", **iso_param, **se_param
                                     }, signed=True)
                                     if "orderId" in sr2:
                                         tr["sell_oid"] = sr2["orderId"]
@@ -1612,9 +1627,9 @@ def main():
                                             tr["ts"] = loop_ts
                                             still_tranches.append(tr)
                                             continue
-                            # Smart +2 -> +1 Tick Profit Step-Down: Follow Ask down immediately if Ask drops, OR step +2 tick target down to +1 tick profit after 22s (FIFO-2T) / 65s so capital never idles!
+                            # Smart +2 -> +1 Tick Profit Step-Down: Follow Ask down immediately if Ask drops, OR step +2 tick target down to +1 tick profit after 6.0s (v9.2 High-Velocity) / 65s so capital compounds 4x faster!
                             min_step_gain = 2.50 if sym in ("BTCU", "BTCUSD1") else spec["tick"]
-                            step_wait_s = 22.0 if (tr.get("pilot") or (sym in ("USD1USDT", "USDCUSDT") and getattr(api, "_v89_scaled", False))) else 65.0
+                            step_wait_s = 6.0 if (tr.get("pilot") or (sym in ("USD1USDT", "USDCUSDT") and getattr(api, "_v89_scaled", False))) else 65.0
                             want_step_1tick = (
                                 sym not in ("FDUSDUSDC",)
                                 and float(o_live.get("executedQty", 0)) == 0
@@ -1630,9 +1645,10 @@ def main():
                                     rem_q = round(math.floor(raw_rq / spec["step"] + 1e-9) * spec["step"], 6)
                                     if rem_q * q_bbo["ask"] >= 5.2:
                                         ns_px = round(max(tr["buy_px"] + min_step_gain, q_bbo["ask"]), spec["dec"])
+                                        se_p = {"sideEffectType": "AUTO_REPAY"} if tr.get("borrowed") else {}
                                         sr = api.request("POST", "/sapi/v1/margin/order", {
                                             "symbol": sym, "side": "SELL", "type": "LIMIT_MAKER",
-                                            "quantity": spec["q_fmt"].format(rem_q), "price": f"{ns_px:.{spec['dec']}f}", **iso_param
+                                            "quantity": spec["q_fmt"].format(rem_q), "price": f"{ns_px:.{spec['dec']}f}", **iso_param, **se_p
                                         }, signed=True)
                                         if "orderId" in sr:
                                             tr["sell_oid"] = sr["orderId"]
@@ -1709,7 +1725,10 @@ def main():
                                 elif sym == "USD1U":
                                     free_map["CM_U"] += tr["qty"] * tr["sell_px"]
                                 elif sym not in ("USD1USDC", "FDUSDUSDC"):
-                                    free_map["CM_USDT"] += tr["qty"] * tr["sell_px"]
+                                    if tr.get("borrowed"):
+                                        free_map["CM_USDT"] += pnl_v
+                                    else:
+                                        free_map["CM_USDT"] += tr["qty"] * tr["sell_px"]
                                 round_trips.insert(0, {
                                     "time": int(loop_ts * 1000),
                                     "symbol": sym if not tr["iso"] else f"{sym} ({tr['lbl'].split('•')[0].strip()})",
@@ -1933,7 +1952,8 @@ def main():
                         if "orderId" in br_uw:
                             free_map["CM_USDT"] = max(0.0, free_map["CM_USDT"] - need_uc * bpx_uw)
                             api._uc_unwind_oid = (br_uw["orderId"], bpx_uw, loop_ts)
-                # Repay 100% of any Cross-Margin debt immediately so zero leverage interest or borrow/repay lag ever hits net equity!
+                # Repay 100% of any Cross-Margin debt immediately when no AUTO_BORROW thin-wall sniper leg is active!
+                has_bor_leg = any(tx.get("borrowed") for tx in active_tranches)
                 if cm_uc_debt > 0.01 and free_map["CM_USDC"] >= 0.50 and (loop_ts - getattr(api, "_last_uc_rep", 0.0)) >= 1.5:
                     api._last_uc_rep = loop_ts
                     rep_uc = min(free_map["CM_USDC"], cm_uc_debt)
@@ -1948,7 +1968,7 @@ def main():
                     if "tranId" in rr_u1:
                         free_map["CM_USD1"] = max(0.0, free_map["CM_USD1"] - rep_u1)
                         cm_u1_debt = max(0.0, cm_u1_debt - rep_u1)
-                if cm_ut_debt > 0.01 and free_map["CM_USDT"] >= 0.50 and (loop_ts - getattr(api, "_last_repay_tick", 0.0)) >= 1.5:
+                if (not has_bor_leg) and cm_ut_debt > 0.01 and free_map["CM_USDT"] >= 0.50 and (loop_ts - getattr(api, "_last_repay_tick", 0.0)) >= 1.5:
                     api._last_repay_tick = loop_ts
                     rep_q = min(free_map["CM_USDT"], cm_ut_debt)
                     if rep_q >= 0.50:
@@ -2149,26 +2169,34 @@ def main():
                     p_tr = [t for t in active_tranches if t["symbol"] == sym_p and t["iso"] == is_iso]
                     is_crypto_u1 = sym_p in ("BTCU", "BTCUSD1", "BNBU", "ETHU", "BNBFDUSD", "SOLFDUSD")
 
-                    # v9.1 $56 Balanced Micro Pilot (2x $28 FIFO-Locked BUY-Long + 1.8x Imbalance +2T Exit on USDCUSDT & USD1USDT; auto-scales main grid to $56 once 4 RTs verified!):
+                    # v9.2 High-Velocity 6s Compounding + Thin-Wall AUTO_BORROW Sniper Pilot ($56 = 2x $28 on USDCUSDT & USD1USDT; uses AUTO_BORROW when free cash is deployed & AskWall < 12,000; auto-scales to 6x $56 once 4 RTs proven!):
                     if sym_p in ("USDCUSDT", "USD1USDT") and allow_buys and (not getattr(api, "_s1_cb_tripped", False)):
                         s1_lg_sym = [t for t in p_tr if t.get("pilot") and t["state"] in ("BUY_OPEN", "SELL_OPEN")]
-                        wall_ok_pl = (q_bbo["bidQty"] >= q_bbo["askQty"] * 0.30)
-                        if len(s1_lg_sym) < 1 and len(s1_short_list) < 2 and free_map[f_key] >= 36.0 and wall_ok_pl:
-                            bq_pl = round(math.floor((28.0 / q_bbo["bid"]) / spec["step"] + 1e-9) * spec["step"], 6)
+                        bor_cnt_all = sum(1 for tx in active_tranches if tx.get("borrowed"))
+                        max_bor_legs = (6 if s1_can_scale else 2)
+                        can_spot_pl = (free_map[f_key] >= 36.0 and q_bbo["bidQty"] >= q_bbo["askQty"] * 0.30)
+                        can_bor_pl = (free_map[f_key] < 36.0 and bor_cnt_all < max_bor_legs and cm_ut_debt < (336.0 if s1_can_scale else 60.0) and q_bbo["askQty"] < 12000.0 and q_bbo["bidQty"] >= q_bbo["askQty"] * 1.35)
+                        max_pl_sym = (3 if (s1_can_scale and can_bor_pl) else 1)
+                        if len(s1_lg_sym) < max_pl_sym and (len(s1_short_list) < (6 if s1_can_scale else 2)) and (can_spot_pl or can_bor_pl):
+                            pl_usd_sz = (56.0 if s1_can_scale else 28.0)
+                            bq_pl = round(math.floor((pl_usd_sz / q_bbo["bid"]) / spec["step"] + 1e-9) * spec["step"], 6)
                             if bq_pl * q_bbo["bid"] >= 20.0:
                                 bpx_pl = round(q_bbo["bid"], spec["dec"])
-                                spx_pl = round(bpx_pl + spec["tick"] * (2 if (q_bbo["askQty"] < 25000.0 or q_bbo["bidQty"] >= q_bbo["askQty"] * 1.80) else 1), spec["dec"])
+                                spx_pl = round(bpx_pl + spec["tick"] * (2 if (not can_bor_pl and q_bbo["askQty"] < 6000.0) else 1), spec["dec"])
+                                se_b_pl = {"sideEffectType": "MARGIN_BUY"} if can_bor_pl else {}
                                 br_pl = api.request("POST", "/sapi/v1/margin/order", {
                                     "symbol": sym_p, "side": "BUY", "type": "LIMIT_MAKER",
-                                    "quantity": spec["q_fmt"].format(bq_pl), "price": f"{bpx_pl:.{spec['dec']}f}"
+                                    "quantity": spec["q_fmt"].format(bq_pl), "price": f"{bpx_pl:.{spec['dec']}f}", **se_b_pl
                                 }, signed=True)
                                 if "orderId" in br_pl:
-                                    free_map[f_key] -= bq_pl * bpx_pl
+                                    if not can_bor_pl:
+                                        free_map[f_key] -= bq_pl * bpx_pl
                                     daily_orders_placed += 1
                                     nt_pl = {
-                                        "tid": f"V91_{sym_p[:4]}", "symbol": sym_p, "iso": False, "lbl": "v9.1 PILOT $28",
+                                        "tid": f"V92_{sym_p[:4]}", "symbol": sym_p, "iso": False,
+                                        "lbl": f"v9.2 {'BORROW-5x' if can_bor_pl else 'PILOT'} ${int(pl_usd_sz)}",
                                         "qty": bq_pl, "buy_px": bpx_pl, "sell_px": spx_pl, "buy_oid": br_pl["orderId"], "sell_oid": None,
-                                        "state": "BUY_OPEN", "ts": loop_ts, "pilot": True
+                                        "state": "BUY_OPEN", "ts": loop_ts, "pilot": True, "borrowed": bool(can_bor_pl)
                                     }
                                     active_tranches.append(nt_pl)
                                     p_tr.append(nt_pl)
@@ -2369,7 +2397,7 @@ def main():
                 s1_eq2k_v = s1_equiv_2k_hr if "s1_equiv_2k_hr" in locals() else 0.0
                 s1_eq500_v = round(s1_raw_v * (500.0 / 56.0), 2)
                 s1_scale_v = bool(s1_can_scale) if "s1_can_scale" in locals() else False
-                s1_st_lbl = ("PILOT CB: " + getattr(api, "_s1_cb_reason", "")) if getattr(api, "_s1_cb_tripped", False) else (f"SCALED TO $56 BALANCED GRID • Net ${s1_net_v:+.4f} ({int(getattr(api, '_s1_short_rts', 0))} RTs)" if s1_scale_v else f"v9.1 $56 BALANCED PILOT • Net ${s1_net_v:+.4f} ({int(getattr(api, '_s1_short_rts', 0))}/4 RTs to Scale)")
+                s1_st_lbl = ("PILOT CB: " + getattr(api, "_s1_cb_reason", "")) if getattr(api, "_s1_cb_tripped", False) else (f"SCALED TO $56 + 6s VELOCITY + 5x BORROW • Net ${s1_net_v:+.4f} ({int(getattr(api, '_s1_short_rts', 0))} RTs)" if s1_scale_v else f"v9.2 6s VELOCITY + 5x BORROW PILOT • Net ${s1_net_v:+.4f} ({int(getattr(api, '_s1_short_rts', 0))}/4 RTs to Scale)")
                 payload = {
                     "ts": int(loop_ts * 1000),
                     "startEquityUsd": start_equity_usd,
@@ -2400,7 +2428,7 @@ def main():
                             else (
                                 f"PAUSED AT <=$495.00 — ALL TRADING STOPPED UNTIL USER REPLY (Eq ${cached_total_usd:.4f})"
                                 if getattr(api, "_paused_495", False)
-                                else f"v9.1 BALANCED $56 + 1.8x 2T ({s1_st_lbl}) • 1h {'+$' if equity_changes.get('1h', 0)>=0 else '-$'}{abs(equity_changes.get('1h', 0)):.4f}"
+                                else f"v9.2 6s VELOCITY + 5x BORROW ({s1_st_lbl}) • 1h {'+$' if equity_changes.get('1h', 0)>=0 else '-$'}{abs(equity_changes.get('1h', 0)):.4f}"
                             )
                         ),
                         "paused": bool(getattr(api, "_paused_495", False) or getattr(api, "_user_paused", False)),
@@ -2409,7 +2437,7 @@ def main():
                             "active": not bool(getattr(api, "_s1_cb_tripped", False)),
                             "cbTripped": bool(getattr(api, "_s1_cb_tripped", False)),
                             "cbReason": getattr(api, "_s1_cb_reason", ""),
-                            "strategy": "v9.1_BALANCED_56_IMB_2T",
+                            "strategy": "v9.2_VELOCITY_6S_BORROW_5X",
                             "budgetUsd": 56.0,
                             "trancheUsd": 56.0 if s1_scale_v else 28.0,
                             "realizedUsd": round(float(getattr(api, "_s1_short_realized", 0.0)), 4),
