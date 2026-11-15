@@ -2083,6 +2083,8 @@ def main():
                 free_tr_cnt = max(0, 55 - (active_tr_cnt + stuck_tr_cnt))
                 tot_tr_cnt = max(55, active_tr_cnt + free_tr_cnt + stuck_tr_cnt)
 
+                btcu_net_val = btcu_net_pnl if "btcu_net_pnl" in locals() else 0.0
+                btcu_pilot_str = ("CB TRIPPED: " + getattr(api, "_btcu_cb_reason", "")) if getattr(api, "_btcu_cb_tripped", False) else f"ACTIVE • Net ${btcu_net_val:+.4f}"
                 payload = {
                     "ts": int(loop_ts * 1000),
                     "startEquityUsd": start_equity_usd,
@@ -2113,7 +2115,7 @@ def main():
                             else (
                                 f"PAUSED AT <=$495.00 — ALL TRADING STOPPED UNTIL USER REPLY (Eq ${cached_total_usd:.4f})"
                                 if getattr(api, "_paused_495", False)
-                                else f"v8.2 CONSERVATIVE $0-DEBT + $20 BTCU MICRO-PILOT ({'CB TRIPPED: ' + getattr(api, '_btcu_cb_reason', '') if getattr(api, '_btcu_cb_tripped', False) else 'ACTIVE • Net $' + f'{btcu_net_pnl if \"btcu_net_pnl\" in locals() else 0.0:+.4f}'}) • 1h {'+$' if equity_changes.get('1h', 0)>=0 else '-$'}{abs(equity_changes.get('1h', 0)):.4f}"
+                                else f"v8.2 CONSERVATIVE $0-DEBT + $20 BTCU MICRO-PILOT ({btcu_pilot_str}) • 1h {'+$' if equity_changes.get('1h', 0)>=0 else '-$'}{abs(equity_changes.get('1h', 0)):.4f}"
                             )
                         ),
                         "paused": bool(getattr(api, "_paused_495", False) or getattr(api, "_user_paused", False)),
