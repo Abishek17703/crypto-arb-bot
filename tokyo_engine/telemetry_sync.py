@@ -1580,6 +1580,12 @@ def main():
                 # 4A. Ultra-Fast Bulk-Diff Tranche Engine (<150ms Order Flip + Dynamic +1/+2/+3 Tick Imbalance Ladder)
                 compute_composite_regime(api, bbos, last_1h_fills_count, tot_5m_pnl if "tot_5m_pnl" in locals() else 0.0, tot_15m_pnl if "tot_15m_pnl" in locals() else 0.0)
                 live_oid_map = {o.get("orderId"): o for o in cached_open_orders}
+                if getattr(api, "_open_orders_fetch_failed", False):
+                    # Never treat a transient HTTP timeout on openOrders as a phantom fill!
+                    for t_keep in active_tranches:
+                        oid_k = t_keep.get("buy_oid") if t_keep.get("state") == "BUY_OPEN" else t_keep.get("sell_oid")
+                        if oid_k and oid_k not in live_oid_map:
+                            live_oid_map[oid_k] = {"orderId": oid_k, "executedQty": "0"}
                 still_tranches = []
                 for idx_tr, tr in enumerate(list(active_tranches)):
                     sym = tr["symbol"]
@@ -1769,7 +1775,7 @@ def main():
                                     api._partial_buy_map[sym] = (tr["buy_px"], loop_ts)
                                     if not tr["iso"]:
                                         free_map[cm_bkey] += tr["qty"]
-                            elif st_code in ("CANCELED", "REJECTED", "EXPIRED") or (st.get("_error") == 400 and st.get("code") == -2013):
+                            elif False:
                                 pass
                             else:
                                 still_tranches.append(tr)
@@ -1936,7 +1942,7 @@ def main():
                                     "pnl": pnl_v,
                                     "eqAfter": cached_total_usd,
                                 })
-                            elif st_code in ("CANCELED", "REJECTED", "EXPIRED") or (st.get("_error") == 400 and st.get("code") == -2013):
+                            elif False:
                                 pass
                             else:
                                 still_tranches.append(tr)
@@ -2506,7 +2512,7 @@ def main():
                             # FDUSDUSDT ($0.00010 tick = +$0.0100 per $100 clip, 10x larger per trade!): Enter only when Ask wall is ultra-thin (< 35,000) & Bid >= 1.50x Ask!
                             impulse_ok = (
                                 rem_100_budget >= 25.0
-                                and free_map[f_key] >= 400.0
+                                and free_map[f_key] >= 95.0
                                 and not cons_guards.get(sym_p, {}).get("falling", False)
                                 and q_bbo["bidQty"] >= q_bbo["askQty"] * 1.50
                                 and q_bbo["askQty"] < 35000.0
@@ -2515,7 +2521,7 @@ def main():
                             # USD1USDT (694 flips/hr, 32K Bid / 8K Ask): Max-Volume mode enters whenever Bid >= 0.70x Ask so $100 stays continuously compounding!
                             impulse_ok = (
                                 rem_100_budget >= 25.0
-                                and free_map[f_key] >= 390.0
+                                and free_map[f_key] >= 95.0
                                 and not cons_guards.get(sym_p, {}).get("falling", False)
                                 and q_bbo["bidQty"] >= q_bbo["askQty"] * 0.70
                                 and q_bbo["askQty"] < 140000.0
@@ -2523,7 +2529,7 @@ def main():
                         bpx_entry = round(q_bbo["bid"], spec["dec"])
                         spx_target = round(bpx_entry + spec["tick"] * (1 if sym_p == "FDUSDUSDT" else (2 if q_bbo["askQty"] < 7000.0 else 1)), spec["dec"])
                         if len(tot_active_legs) < 1 and rem_100_budget >= 25.0 and impulse_ok:
-                            pl_usd_sz = min(100.0, rem_100_budget, max(0.0, free_map[f_key] - 398.0))
+                            pl_usd_sz = min(100.0, rem_100_budget, max(0.0, free_map[f_key] - 8.0))
                             bq_pl = round(math.floor((pl_usd_sz / bpx_entry) / spec["step"] + 1e-9) * spec["step"], 6)
                             if bq_pl * bpx_entry >= 15.0:
                                 bpx_pl = bpx_entry
@@ -2876,6 +2882,7 @@ def main():
                     CacheControl="no-store, no-cache, must-revalidate, max-age=0",
                 )
         except Exception as e:
+            api._last_loop_err = f"{type(e).__name__}: {e}"
             print("Loop err:", e)
         time.sleep(0.04)
 
