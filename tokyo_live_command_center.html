@@ -344,16 +344,75 @@
       </div>
     </div>
 
-    <!-- LIVE $0-RISK FORWARD-TESTING SHADOW ARENA ($5/HR TARGET LEADERBOARD) -->
-    <div class="bg-[var(--card)] border border-slate-800/90 rounded-3xl p-4 space-y-3">
+    <!-- LIVE $100 MICRO-TEST & SCALING RUN-RATE COMMAND PANEL (v9.9.2) -->
+    <div class="bg-[var(--card)] border border-emerald-500/40 rounded-3xl p-4 space-y-3 shadow-lg shadow-emerald-950/20">
       <div class="flex flex-wrap items-center justify-between gap-2">
         <div class="flex items-center gap-2">
-          <span class="w-2 h-2 rounded-full bg-cyan-300 live-dot"></span>
-          <span class="text-xs font-bold uppercase tracking-wider text-slate-200">Live $0-Risk Forward-Testing Arena (Real Binance aggTrade FIFO Queue Depletion • $2,000 Virtual Pool)</span>
+          <span class="w-2.5 h-2.5 rounded-full bg-emerald-400 live-dot"></span>
+          <span class="text-xs font-extrabold uppercase tracking-wider text-emerald-300" id="pilotPanelTitle">v9.9.2 • Live $100 Micro-Test Sniper ($40 BTCU + $30 USD1 + $30 USDC • $399 Idle USDT Reserve)</span>
         </div>
-        <span class="text-[11px] font-bold px-2.5 py-0.5 rounded-md bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 tabular-nums" id="shadowArenaBadge">Initializing Real-Market FIFO Stream...</span>
+        <div class="flex items-center gap-2">
+          <span class="text-[11px] font-bold px-2.5 py-0.5 rounded-md bg-slate-800 text-cyan-300 border border-cyan-500/30 tabular-nums" id="pilotBasisBadge">BTCU 60s Basis: -- | Jump: -- (Trig ≥ +$3.50)</span>
+          <span class="text-[11px] font-bold px-2.5 py-0.5 rounded-md bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 tabular-nums" id="pilotCbBadge">Hard Cap: -$0.0003/leg • Session CB: -$0.0100 (SAFE)</span>
+        </div>
       </div>
-      <div id="shadowStrategiesGrid" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3"></div>
+
+      <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
+        <!-- Card 1: Active $100 Test Pool vs Idle Reserve -->
+        <div class="bg-slate-950/90 border border-emerald-500/40 rounded-2xl p-3 space-y-1">
+          <div class="flex items-center justify-between text-xs">
+            <span class="font-extrabold text-emerald-400">🎯 $100 TEST POOL</span>
+            <span class="text-[11px] font-bold px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300" id="pilotRtsBadge">0 RTs (0 Scratches)</span>
+          </div>
+          <div class="text-lg font-extrabold text-white tabular-nums" id="pilotNetPnl">+$0.0000 Net</div>
+          <div class="text-[11px] text-slate-400 tabular-nums" id="pilotAllocSub">$40 BTCU • $30 USD1 • $30 USDC</div>
+          <div class="text-[11px] text-cyan-300 font-semibold tabular-nums pt-1 border-t border-slate-800/80" id="pilotReserveSub">Untouched Reserve: $399.06 USDT ($0 Debt)</div>
+        </div>
+
+        <!-- Card 2: $100 Micro-Test Live Run Rate -->
+        <div class="bg-slate-950/90 border border-slate-800/80 rounded-2xl p-3 space-y-1">
+          <div class="flex items-center justify-between text-xs">
+            <span class="font-bold text-slate-300">1. $100 Micro-Test (Active)</span>
+            <span class="text-[10px] font-bold px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300">LIVE NOW</span>
+          </div>
+          <div class="text-lg font-extrabold text-emerald-400 tabular-nums" id="scale100Rate">$0.18 – $0.38/hr</div>
+          <div class="text-[11px] text-slate-400 tabular-nums" id="scale100Day">Target: +$4.30 – $9.10 / day</div>
+          <div class="text-[11px] text-emerald-300/90 tabular-nums pt-1 border-t border-slate-800/80" id="scale100LiveSub">Live Pace: +$0.0000/hr</div>
+        </div>
+
+        <!-- Card 3: $250 Half-Cash Projection -->
+        <div class="bg-slate-950/90 border border-slate-800/80 rounded-2xl p-3 space-y-1">
+          <div class="flex items-center justify-between text-xs">
+            <span class="font-bold text-slate-300">2. $250 Half-Cash ($0 Debt)</span>
+            <span class="text-[10px] font-bold px-1.5 py-0.5 rounded bg-slate-800 text-slate-300">STAGE 2</span>
+          </div>
+          <div class="text-lg font-extrabold text-cyan-300 tabular-nums" id="scale250Rate">$0.45 – $0.95/hr</div>
+          <div class="text-[11px] text-slate-400 tabular-nums">Target: +$10.80 – $22.80 / day</div>
+          <div class="text-[11px] text-cyan-300/80 tabular-nums pt-1 border-t border-slate-800/80" id="scale250LiveSub">Equiv at Current Pace: +$0.00/hr</div>
+        </div>
+
+        <!-- Card 4: $499 Full-Cash Projection -->
+        <div class="bg-slate-950/90 border border-slate-800/80 rounded-2xl p-3 space-y-1">
+          <div class="flex items-center justify-between text-xs">
+            <span class="font-bold text-slate-300">3. $499 Full-Cash ($0 Debt)</span>
+            <span class="text-[10px] font-bold px-1.5 py-0.5 rounded bg-slate-800 text-slate-300">STAGE 3</span>
+          </div>
+          <div class="text-lg font-extrabold text-cyan-300 tabular-nums" id="scale500Rate">$0.90 – $1.90/hr</div>
+          <div class="text-[11px] text-slate-400 tabular-nums">Target: +$21.60 – $45.60 / day</div>
+          <div class="text-[11px] text-cyan-300/80 tabular-nums pt-1 border-t border-slate-800/80" id="scale500LiveSub">Equiv at Current Pace: +$0.00/hr</div>
+        </div>
+
+        <!-- Card 5: $2,000 4x Standing Pool Projection -->
+        <div class="bg-slate-950/90 border border-purple-500/30 rounded-2xl p-3 space-y-1">
+          <div class="flex items-center justify-between text-xs">
+            <span class="font-bold text-purple-300">4. $2,000 4x Standing Pool</span>
+            <span class="text-[10px] font-bold px-1.5 py-0.5 rounded bg-purple-500/20 text-purple-300">STAGE 4</span>
+          </div>
+          <div class="text-lg font-extrabold text-purple-300 tabular-nums" id="scale2kRate">$2.60 – $5.40/hr</div>
+          <div class="text-[11px] text-slate-400 tabular-nums">Target: +$62.00 – $130.00 / day</div>
+          <div class="text-[11px] text-purple-300/80 tabular-nums pt-1 border-t border-slate-800/80" id="scale2kLiveSub">Equiv at Current Pace: +$0.00/hr</div>
+        </div>
+      </div>
     </div>
 
     <!-- SIDE-BY-SIDE LIVE STREAMS: 1. CLOSED TRADES (REALIZED) & 2. LIVE OPEN ORDERS (WORKING / FREE / STUCK) -->
@@ -719,39 +778,41 @@
 
       renderClosedTrades(data, refNowMs);
       renderOpenOrders(data, refNowMs);
-      if (data.shadowArena && Array.isArray(data.shadowArena.strategies)) {
-        const sa = data.shadowArena;
-        const ldr = sa.leader || sa.strategies[0];
-        if (ldr) {
-          setElText("shadowArenaBadge", `Leader: ${ldr.id} • +$${Number(ldr.hrRateUsd || 0).toFixed(2)}/hr ($${Number(ldr.realizedUsd || 0).toFixed(4)} Realized • ${sa.elapsedMin || 0}m live)`);
+      if (data.hftTest && data.hftTest.s1BiDirPilot) {
+        const p = data.hftTest.s1BiDirPilot;
+        const net = Number(p.netUsd || 0);
+        const rts = Number(p.rts || 0);
+        const sc = Number(p.scratches || 0);
+        const rawHr = Number(p.rawHrUsd || 0);
+        const basis = Number(p.btcEmaBasis || 0);
+        const jump = Number(p.btcTrueJump || 0);
+        const idleRes = Number(p.idleReserveUsd || Math.max(0, latestLiveEq - 100));
+
+        setElText("pilotRtsBadge", `${rts} RTs (${sc} Scratches)`);
+        const netEl = document.getElementById("pilotNetPnl");
+        if (netEl) {
+          netEl.textContent = `${net >= 0 ? "+$" : "-$"}${Math.abs(net).toFixed(4)} Net`;
+          netEl.className = `text-lg font-extrabold tabular-nums ${net < 0 ? "text-rose-400" : "text-emerald-400"}`;
         }
-        const sg = document.getElementById("shadowStrategiesGrid");
-        if (sg) {
-          sg.innerHTML = sa.strategies.map((s, idx) => {
-            const hr = Number(s.hrRateUsd || 0);
-            const rlz = Number(s.realizedUsd || 0);
-            const net = Number(s.netUsd || 0);
-            const isTop = idx === 0;
-            const bdr = isTop ? "border-emerald-500/40" : "border-slate-800/80";
-            return `
-              <div class="bg-slate-950/90 border ${bdr} rounded-2xl p-3 space-y-1.5">
-                <div class="flex items-center justify-between gap-1">
-                  <span class="text-xs font-extrabold ${isTop ? 'text-emerald-400' : 'text-cyan-300'}">${isTop ? '🏆 ' : ''}${s.id}</span>
-                  <span class="text-xs font-extrabold text-emerald-400 tabular-nums">+$${hr.toFixed(2)}/hr</span>
-                </div>
-                <div class="text-[11px] text-slate-400">${s.name.split('•')[1] || s.name}</div>
-                <div class="flex items-center justify-between text-xs tabular-nums pt-1 border-t border-slate-800/80">
-                  <span class="text-slate-400">Realized: <strong class="text-emerald-400">+$${rlz.toFixed(4)}</strong></span>
-                  <span class="text-slate-400">Net: <strong class="${net >= 0 ? 'text-emerald-300' : 'text-rose-400'}">${net >= 0 ? '+$' : '-$'}${Math.abs(net).toFixed(4)}</strong></span>
-                </div>
-                <div class="flex items-center justify-between text-[11px] text-slate-400 tabular-nums">
-                  <span>Fills: <strong class="text-slate-200">${s.fills || 0}</strong> (${s.roundTrips || 0} RT)</span>
-                  <span>24h Pace: <strong class="text-emerald-300">+$${Number(s.dayRateUsd || 0).toFixed(2)}/d</strong></span>
-                </div>
-              </div>
-            `;
-          }).join("");
+        setElText("pilotReserveSub", `Untouched Reserve: $${idleRes.toFixed(2)} USDT ($0 Debt)`);
+        setElText("pilotBasisBadge", `BTCU 60s Basis: $${basis.toFixed(2)} | Live Jump: ${jump >= 0 ? "+$" : "-$"}${Math.abs(jump).toFixed(2)} (Trig ≥ +$3.50)`);
+
+        const cbEl = document.getElementById("pilotCbBadge");
+        if (cbEl) {
+          if (p.cbTripped) {
+            cbEl.textContent = `■ CB TRIPPED: ${p.cbReason || "Limit Hit"}`;
+            cbEl.className = "text-[11px] font-bold px-2.5 py-0.5 rounded-md bg-rose-500/20 text-rose-300 border border-rose-500/40 tabular-nums";
+          } else {
+            cbEl.textContent = `Hard Cap: -$0.0003/leg • Session CB: -$0.0100 (SAFE)`;
+            cbEl.className = "text-[11px] font-bold px-2.5 py-0.5 rounded-md bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 tabular-nums";
+          }
         }
+
+        const useHr = rawHr > 0 ? rawHr : nowHrProfit;
+        setElText("scale100LiveSub", `Live Pace: +$${useHr.toFixed(4)}/hr (+$${(useHr * 24).toFixed(2)}/d)`);
+        setElText("scale250LiveSub", `Equiv at Current Pace: +$${(useHr * 2.5).toFixed(2)}/hr (+$${(useHr * 2.5 * 24).toFixed(2)}/d)`);
+        setElText("scale500LiveSub", `Equiv at Current Pace: +$${(useHr * 5.0).toFixed(2)}/hr (+$${(useHr * 5.0 * 24).toFixed(2)}/d)`);
+        setElText("scale2kLiveSub",  `Equiv at Current Pace: +$${(useHr * 20.0).toFixed(2)}/hr (+$${(useHr * 20.0 * 24).toFixed(2)}/d)`);
       }
     }
 
