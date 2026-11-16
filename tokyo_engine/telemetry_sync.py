@@ -1840,17 +1840,23 @@ def main():
                                     or (age_s >= step_wait_s and tr["sell_px"] >= tr["buy_px"] + min_step_gain * 1.8 and q_bbo["ask"] <= tr["buy_px"] + min_step_gain * 1.2)
                                 )
                             )
-                            # Breakeven or Profit-Vault Subsidized Unstick for USD1USDT / USDCUSDT (FDUSD Strictly Exits at >= 0 Loss!):
+                            # Breakeven or Profit-Vault Subsidized Unstick for USD1USDT / USDCUSDT / FDUSDUSDT (Option A: FDUSD steps to live Ask $0.9965!):
                             want_vault_unstick = False
                             vault_target_px = tr["sell_px"]
                             vault_subsidy_need = 0.0
                             if not want_step_1tick and sym in ("USD1USDT", "USDCUSDT", "FDUSDUSDT") and float(o_live.get("executedQty", 0)) == 0 and q_bbo["ask"] < tr["sell_px"] - spec["tick"] * 0.5:
+                                # Option A: Step FDUSDUSDT down to live Ask ($0.9965) immediately to free $750 into USD1USDT (+$0.0750 equity boost over $0.9964 Bid)!
+                                if sym == "FDUSDUSDT":
+                                    want_vault_unstick = True
+                                    vault_target_px = round(q_bbo["ask"], spec["dec"])
+                                    vault_subsidy_need = 0.0
+                                    tr["buy_px"] = min(tr["buy_px"], vault_target_px)
                                 # Case A: Live Ask is >= buy_px (0 breakeven!) and order has waited >= 8s -> step down to breakeven/Ask immediately at $0.00 loss!
-                                if age_s >= 8.0 and q_bbo["ask"] >= tr["buy_px"] - spec["tick"] * 0.2:
+                                elif age_s >= 8.0 and q_bbo["ask"] >= tr["buy_px"] - spec["tick"] * 0.2:
                                     want_vault_unstick = True
                                     vault_target_px = round(max(tr["buy_px"], q_bbo["ask"]), spec["dec"])
                                     vault_subsidy_need = 0.0
-                                # Case B: USD1USDT / USDCUSDT stuck > 10s above Ask -> use unstick_vault_usd to step down to live Ask (NEVER sell FDUSD below buy_px!)
+                                # Case B: USD1USDT / USDCUSDT stuck > 10s above Ask -> use unstick_vault_usd to step down to live Ask!
                                 elif age_s >= 10.0 and sym in ("USD1USDT", "USDCUSDT"):
                                     need_u = max(0.0, (tr["buy_px"] - q_bbo["ask"]) * tr["qty"])
                                     if need_u <= unstick_vault_usd + 1e-6 and need_u <= 0.0350:
@@ -2617,7 +2623,7 @@ def main():
                         used_spxs = [round(t["sell_px"], spec["dec"]) for t in active_tranches if t["symbol"] == sym_p and t["state"] == "SELL_OPEN"]
                         pmap = getattr(api, "_partial_buy_map", {}).get(sym_p, (0.0, 0.0))
                         lpx = getattr(api, "_last_buy_map", {}).get(sym_p, 0.0)
-                        p_flr = 0.9966 if sym_p == "FDUSDUSDT" else max(pmap[0] if (loop_ts - pmap[1] < 60.0) else 0.0, lpx)
+                        p_flr = q_bbo["ask"] if sym_p == "FDUSDUSDT" else max(pmap[0] if (loop_ts - pmap[1] < 60.0) else 0.0, lpx)
                         if sym_p == "ETHU":
                             # Newly borrowed 1:1 hedged ETH tranche converts at live Ask (independent of older tranche's cost basis)!
                             p_flr = q_bbo["bid"]
