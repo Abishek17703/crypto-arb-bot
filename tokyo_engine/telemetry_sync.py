@@ -1553,8 +1553,8 @@ def halt_all_orders_and_repay(api):
             s_ast4 = sb4.get("asset", "")
             s_fv4 = float(sb4.get("free", 0))
             if s_ast4 != "USDT" and s_fv4 >= 0.000001:
-                # Try topping up $6 in Spot and selling 100% for USDC/U/FDUSD/USD1:
-                if s_ast4 in ("USDC", "U", "FDUSD", "USD1"):
+                # Only top-up Spot dust if balance >= 1.50 (never burn $7 transfers on sub-$1 dust!):
+                if s_ast4 in ("USDC", "U", "FDUSD", "USD1") and s_fv4 >= 1.50:
                     s_sym_sp = s_ast4 + "USDT"
                     if s_fv4 < 6.0:
                         need_sp = int(math.ceil(6.0 - math.floor(s_fv4)))
