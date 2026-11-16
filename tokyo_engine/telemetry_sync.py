@@ -865,41 +865,34 @@ def halt_all_orders_and_repay(api):
             if q_int_f >= 6:
                 spec_f = PAIRS.get(s_sym, {"dec": 5, "tick": 0.00001})
                 dec_f = spec_f["dec"]
-                with WS_LOCK:
-                    ws_b = float(WS_BBOS.get(s_sym, {}).get("bid", 0.0))
-                if ws_b <= 0:
-                    tk_f = api.request("GET", "/api/v3/ticker/bookTicker", {"symbol": s_sym})
-                    ws_b = float(tk_f.get("bidPrice", 0.9990)) if isinstance(tk_f, dict) else 0.9990
-                px_ioc = f"{round(ws_b, dec_f):.{dec_f}f}"
-                # Try 1: Exact same LIMIT IOC @ live Bid that works in main loop (no sideEffectType):
+                tk_f = api.request("GET", "/api/v3/ticker/bookTicker", {"symbol": s_sym})
+                ws_b = float(tk_f.get("bidPrice", 0.9990)) if isinstance(tk_f, dict) and "bidPrice" in tk_f else 0.9990
+                px_ioc = f"{round(ws_b - spec_f['tick'] * 3, dec_f):.{dec_f}f}"
                 r1 = api.request("POST", "/sapi/v1/margin/order", {
-                    "symbol": s_sym, "side": "SELL", "type": "LIMIT", "timeInForce": "IOC",
-                    "quantity": str(q_int_f), "price": px_ioc
+                    "symbol": s_sym, "side": "SELL", "type": "MARKET", "quantity": str(q_int_f)
                 }, signed=True)
-                if "orderId" not in r1 or float(r1.get("executedQty", 0)) < q_int_f - 1:
-                    # Try 2: MARKET SELL (no sideEffectType):
+                r2 = {}
+                r3 = {}
+                if "orderId" not in r1 or float(r1.get("executedQty", 0)) < 1:
                     r2 = api.request("POST", "/sapi/v1/margin/order", {
-                        "symbol": s_sym, "side": "SELL", "type": "MARKET", "quantity": str(q_int_f)
+                        "symbol": s_sym, "side": "SELL", "type": "LIMIT", "timeInForce": "IOC",
+                        "quantity": str(q_int_f), "price": px_ioc
                     }, signed=True)
-                    if "orderId" not in r2:
-                        # Try 3: Chunked 200-unit LIMIT IOC @ live Bid - 1 tick:
-                        px_ioc2 = f"{round(ws_b - spec_f['tick'], dec_f):.{dec_f}f}"
-                        rem_c = q_int_f
-                        r3 = {}
-                        while rem_c >= 6:
-                            c_sz = min(rem_c, 200)
+                    if "orderId" not in r2 or float(r2.get("executedQty", 0)) < 1:
+                        for _chk in range(6):
+                            cm_c = api.request("GET", "/sapi/v1/margin/account", signed=True)
+                            rem_f = int(math.floor(float(next((a.get("free", 0) for a in cm_c.get("userAssets", []) if a.get("asset") == s_ast), 0)))) if isinstance(cm_c, dict) else 0
+                            if rem_f < 6:
+                                break
+                            c_sz = min(rem_f, 200)
                             r3 = api.request("POST", "/sapi/v1/margin/order", {
                                 "symbol": s_sym, "side": "SELL", "type": "LIMIT", "timeInForce": "IOC",
-                                "quantity": str(c_sz), "price": px_ioc2
+                                "quantity": str(c_sz), "price": px_ioc
                             }, signed=True)
-                            if "orderId" not in r3:
+                            if float(r3.get("executedQty", 0)) < 1:
                                 break
-                            rem_c -= int(float(r3.get("executedQty", c_sz)))
-                        dbg_msgs.append(f"{s_sym}:{r1.get('msg',r1)}|{r2.get('msg',r2)}|{r3.get('msg',r3)}")
-                    else:
-                        dbg_msgs.append(f"{s_sym}:MKT_OK")
-                else:
-                    dbg_msgs.append(f"{s_sym}:IOC_OK")
+                            auto_compound_borrow(api, force_repay_all=True)
+                dbg_msgs.append(f"{s_sym}:r1={r1.get('status') or r1.get('msg')}|r2={r2.get('status') or r2.get('msg')}|r3={r3.get('status') or r3.get('msg')}")
                 auto_compound_borrow(api, force_repay_all=True)
         if dbg_msgs:
             api._s1_cb_reason = " ; ".join(dbg_msgs)[:220]
@@ -1306,8 +1299,8 @@ def main():
                         with WS_LOCK:
                             WS_BBOS[s_miss] = dict(bbos[s_miss])
 
-            # 1. Incremental myTrades Ledger Audit every 30s
-            if loop_ts - last_pnl_audit >= 30.0:
+            # 1. Incremental myTrades Ledger Audit every 30s (skip on first startup tick when paused so flatten updates S3 in <2s!)
+            if (not getattr(api, "_user_paused", False)) and loop_ts - last_pnl_audit >= 30.0:
                 last_pnl_audit = loop_ts
                 now_ms = int(loop_ts * 1000)
                 day_start_ms = 1794576000000
