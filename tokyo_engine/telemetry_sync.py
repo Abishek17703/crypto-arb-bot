@@ -893,9 +893,17 @@ def setup_sol_spot_perp_pilot(api, fapi):
                 p_epx = float(fp.get("entryPrice", 0.0))
                 p_sym = fp.get("symbol", "")
                 for _ck, _csp in MULTI_DN_SPECS.items():
-                    if _csp["perp"] == p_sym and abs(p_amt) >= _csp["min_q"] and sp_map4.get(_ck, 0.0) >= _csp["min_q"]:
-                        adopted_c = (_ck, _csp, sp_map4[_ck], p_amt, p_epx)
-                        break
+                    if _csp["perp"] == p_sym and abs(p_amt) >= _csp["min_q"]:
+                        if sp_map4.get(_ck, 0.0) >= _csp["min_q"]:
+                            adopted_c = (_ck, _csp, sp_map4[_ck], p_amt, p_epx)
+                            break
+                        else:
+                            # Close any orphan Perp position where Spot is already flat:
+                            q_cl = round(math.floor(abs(p_amt) / _csp["step"] + 1e-9) * _csp["step"], _csp["q_dec"])
+                            fapi.request("POST", "/fapi/v1/order", {
+                                "symbol": p_sym, "side": "BUY" if p_amt < 0 else "SELL", "type": "MARKET",
+                                "quantity": f"{q_cl:.{_csp['q_dec']}f}", "reduceOnly": "true"
+                            }, signed=True)
         st["spot_bal"] = round(sp_qf_now + (adopted_c[2] * adopted_c[4] if adopted_c else 0.0), 2)
         st["perp_bal"] = round(fut_uc_now, 2)
         st["ready"] = True
@@ -1301,9 +1309,15 @@ def auto_compound_borrow(api, force_repay_all=False):
                 ba_uc = ia_uc.get("baseAsset", {})
                 iso_net_u = float(qa_uc.get("netAsset", 0)) + float(ba_uc.get("netAsset", 0))
                 iso_bor_u = float(qa_uc.get("borrowed", 0)) + float(qa_uc.get("interest", 0))
-                # Seed $100 USDT into 10x Isolated USDCUSDT when CM_USDT has >= $115 free:
-                if iso_net_u < 95.0 and cm_ut_free >= 115.0:
-                    need_seed = min(round(100.0 - iso_net_u, 2), math.floor((cm_ut_free - 10.0) * 100) / 100.0)
+                # Repay idle Cross-Margin USDT debt first so we can seed $350 USDT into 10x Isolated USDCUSDT ($3,490 10x Pool!):
+                if iso_net_u < 345.0 and ut_borrowed > 10.0 and cm_ut_free >= 100.0:
+                    rep_cm = min(cm_ut_free, ut_borrowed)
+                    api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "USDT", "isIsolated": "FALSE", "amount": f"{rep_cm:.2f}", "type": "REPAY"}, signed=True)
+                    cm_acc_r = api.request("GET", "/sapi/v1/margin/account", signed=True)
+                    cm_ut_free = float(next((a.get("free", 0) for a in cm_acc_r.get("userAssets", []) if a.get("asset") == "USDT"), 0)) if isinstance(cm_acc_r, dict) else 0.0
+                    ut_borrowed = float(next((float(a.get("borrowed", 0)) + float(a.get("interest", 0)) for a in cm_acc_r.get("userAssets", []) if a.get("asset") == "USDT"), 0)) if isinstance(cm_acc_r, dict) else 0.0
+                if iso_net_u < 345.0 and cm_ut_free >= 25.0 and ut_borrowed < 50.0:
+                    need_seed = min(round(350.0 - iso_net_u, 2), math.floor((cm_ut_free - 10.0) * 100) / 100.0)
                     if need_seed >= 10.0:
                         r_u1 = api.request("POST", "/sapi/v1/asset/transfer", {"type": "MARGIN_ISOLATEDMARGIN", "asset": "USDT", "amount": f"{need_seed:.2f}", "toSymbol": "USDCUSDT"}, signed=True)
                         if "tranId" in r_u1:
@@ -1318,8 +1332,8 @@ def auto_compound_borrow(api, force_repay_all=False):
                     can_b = min(round(iso_net_u * 8.95 - iso_bor_u, 2), float(mx_b.get("amount", 0)) * 0.96) if isinstance(mx_b, dict) else 0.0
                     if can_b >= 10.0:
                         api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "USDT", "isIsolated": "TRUE", "symbol": "USDCUSDT", "amount": f"{can_b:.2f}", "type": "BORROW"}, signed=True)
-            # Maintain 5x Cross-Margin USDT loan ($1,440 when $100 is in 10x Iso + $31.50 in Spot-Perp Pilot, or $1,840 otherwise):
-            target_cm_loan = 1440.0 if iso_net_u >= 50.0 else 1840.0
+            # Keep remaining ~$114 Cross-Margin USDT debt-free ($0.00 interest bleed while CM -1015 resets):
+            target_cm_loan = 0.0 if iso_net_u >= 200.0 else 1440.0
             if ut_borrowed < target_cm_loan - 5.0:
                 mx_cm_b = api.request("GET", "/sapi/v1/margin/maxBorrowable", {"asset": "USDT"}, signed=True)
                 can_cm_b = min(round(target_cm_loan - ut_borrowed, 2), float(mx_cm_b.get("amount", 0)) * 0.96) if isinstance(mx_cm_b, dict) else 0.0
@@ -3409,7 +3423,7 @@ def main():
                     ("FDUSDUSDT", False, "CM_USDT",       "CM_FDUSD",      0,                       0,  24.0,   0.0, "STOPPED • 0-LOSS DRAIN"),
                     ("USD1USDC",  False, "CM_USDC",       "CM_USD1",      15 if allow_buys else 0,  0,  24.0, 360.0, "v12.6 10x-TICK • USD1/USDC $24"),
                     ("UUSDT",     False, "CM_USDT",       "CM_U",         25 if allow_buys else 0,  0,  24.0, 600.0, "v12.6 10x-TICK • U/USDT $24"),
-                    ("USDCUSDT",  True,  "ISO_USDC_USDT", "ISO_USDC_BASE", 16 if allow_buys else 0, 0,  60.0, 990.0, "v12.6 10x ISO • USDC $60"),
+                    ("USDCUSDT",  True,  "ISO_USDC_USDT", "ISO_USDC_BASE", 58 if allow_buys else 0, 0,  60.0, 3480.0, "v13.2 10x ISO • USDC $60"),
                     ("USDCUSDT",  False, "CM_USDT",       "CM_USDC",      55 if allow_buys else 0,  0,  24.0, 1320.0, "v12.6 100x$24 • USDC $24"),
                     ("USD1USDT",  False, "CM_USDT",       "CM_USD1",      88 if allow_buys else 0,  0,  24.0, 2150.0, "v12.6 100x$24 • USD1 $24"),
                 ):
@@ -3427,9 +3441,9 @@ def main():
                         if is_iso:
                             tot_iso_legs = [t for t in active_tranches if t["symbol"] == "USDCUSDT" and t["iso"] and t["state"] in ("BUY_OPEN", "SELL_OPEN")]
                             tot_deployed_usd = sum(t["qty"] * t["buy_px"] for t in tot_iso_legs)
-                            rem_2k_budget = max(0.0, 990.0 - tot_deployed_usd)
-                            max_sym_legs = 16
-                            max_buy_slots = 10
+                            rem_2k_budget = max(0.0, 3480.0 - tot_deployed_usd)
+                            max_sym_legs = 58
+                            max_buy_slots = 30
                             clip_sz_u = 60.0
                             impulse_ok = (
                                 rem_2k_budget >= 20.0
