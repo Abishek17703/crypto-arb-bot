@@ -855,6 +855,33 @@ def halt_all_orders_and_repay(api):
                 if oid:
                     api.request("DELETE", "/sapi/v1/margin/order", {"symbol": iso_sym, "isIsolated": "TRUE", "orderId": oid}, signed=True)
     auto_compound_borrow(api, force_repay_all=True)
+    # 2b. PRIORITY STEP: Immediately sell all Cross-Margin USD1, USDC, U, FDUSD (>= 6) to USDT with AUTO_REPAY and repay 100% of USDT loan!
+    try:
+        cm_fast = api.request("GET", "/sapi/v1/margin/account", signed=True)
+        amap_f = {a.get("asset"): a for a in cm_fast.get("userAssets", [])} if isinstance(cm_fast, dict) else {}
+        for s_ast, s_sym in (("USD1", "USD1USDT"), ("USDC", "USDCUSDT"), ("U", "UUSDT"), ("FDUSD", "FDUSDUSDT")):
+            q_int_f = int(math.floor(float(amap_f.get(s_ast, {}).get("free", 0))))
+            if q_int_f >= 6:
+                r_f1 = api.request("POST", "/sapi/v1/margin/order", {
+                    "symbol": s_sym, "side": "SELL", "type": "MARKET",
+                    "quantity": str(q_int_f), "sideEffectType": "AUTO_REPAY"
+                }, signed=True)
+                if "orderId" not in r_f1:
+                    r_f2 = api.request("POST", "/sapi/v1/margin/order", {
+                        "symbol": s_sym, "side": "SELL", "type": "MARKET", "quantity": str(q_int_f)
+                    }, signed=True)
+                    if "orderId" not in r_f2:
+                        tk_f = api.request("GET", "/api/v3/ticker/bookTicker", {"symbol": s_sym})
+                        dec_f = PAIRS.get(s_sym, {}).get("dec", 4)
+                        bid_f = float(tk_f.get("bidPrice", 0.9980)) if isinstance(tk_f, dict) else 0.9980
+                        px_f = round(bid_f - 0.0002, dec_f)
+                        api.request("POST", "/sapi/v1/margin/order", {
+                            "symbol": s_sym, "side": "SELL", "type": "LIMIT", "timeInForce": "IOC",
+                            "quantity": str(q_int_f), "price": f"{px_f:.{dec_f}f}", "sideEffectType": "AUTO_REPAY"
+                        }, signed=True)
+        auto_compound_borrow(api, force_repay_all=True)
+    except Exception:
+        pass
     # 3. Sweep 100% of ALL non-USDT assets (Cross Margin, Isolated Margin, and Spot — even 0.00001 fractional dust) into pure USDT:
     try:
         # 3a. Reclaim ALL Isolated Margin assets to Spot -> Cross Margin (and deactivate empty Isolated accounts):
@@ -3237,8 +3264,9 @@ def main():
                         pass
                     try:
                         _p_url = s3.generate_presigned_url("put_object", Params={"Bucket": S3_BUCKET, "Key": "pause-control.json", "ContentType": "text/plain"}, ExpiresIn=604800)
-                        s3.put_object(Bucket=S3_BUCKET, Key="pause-control.json", Body=json.dumps({"paused": False, "ts": int(loop_ts * 1000)}), ContentType="text/plain")
-                        api._user_paused = False
+                        s3.put_object(Bucket=S3_BUCKET, Key="pause-control.json", Body=json.dumps({"paused": True, "ts": int(loop_ts * 1000)}), ContentType="text/plain")
+                        api._user_paused = True
+                        halt_all_orders_and_repay(api)
                     except Exception:
                         _p_url = ""
                     api._pause_put_url = _p_url
