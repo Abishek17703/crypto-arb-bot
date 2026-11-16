@@ -3164,7 +3164,7 @@ def main():
                 s1_raw_v = s1_raw_hr if "s1_raw_hr" in locals() else 0.0
                 s1_eq2k_v = s1_equiv_2k_hr if "s1_equiv_2k_hr" in locals() else 0.0
                 s1_eq500_v = round(s1_raw_v, 2)
-                s1_scale_v = bool(s1_short_net >= 0.0500 and int(getattr(api, "_s1_short_rts", 0)) >= 25)
+                s1_scale_v = bool(s1_net_v >= 0.0500 and int(getattr(api, "_s1_short_rts", 0)) >= 25)
                 ethu_net_lbl = f"ETHU DN ${ethu_net_v:+.4f} ({int(getattr(api, '_ethu_rts', 0))} RTs)" if "ethu_net_v" in locals() else "ETHU DN $0.0000"
                 s1_rts_tot = int(getattr(api, "_s1_short_rts", 0)) + int(getattr(api, "_btcu_rts", 0))
                 s1_sc_tot = int(getattr(api, "_s1_short_scratches", 0))
