@@ -583,13 +583,19 @@ def auto_compound_borrow(api, force_repay_all=False):
                 if iso_net_u < 95.0:
                     need_seed = round(100.0 - iso_net_u, 2)
                     if need_seed >= 5.0:
-                        # Repay excess CM USDT debt if needed so maxTransferable covers the $100 seed transfer to Spot -> Isolated USDCUSDT:
+                        # Repay excess CM USDT debt first so maxTransferable >= $100:
                         cm_fv = float(next((a.get("free", 0) for a in cm_acc.get("userAssets", []) if a.get("asset") == "USDT"), 0))
-                        if ut_borrowed > 1400.0 and cm_fv >= 105.0:
-                            api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "USDT", "isIsolated": "FALSE", "amount": f"{min(cm_fv - 102.0, ut_borrowed - 1400.0):.2f}", "type": "REPAY"}, signed=True)
-                        api.request("POST", "/sapi/v1/margin/transfer", {"asset": "USDT", "amount": f"{need_seed:.2f}", "type": "2"}, signed=True)
-                        api.request("POST", "/sapi/v1/margin/isolated/transfer", {"asset": "USDT", "symbol": "USDCUSDT", "transFrom": "SPOT", "transTo": "ISOLATED_MARGIN", "amount": f"{need_seed:.2f}"}, signed=True)
-                        iso_net_u += need_seed
+                        if ut_borrowed > 800.0 and cm_fv >= 105.0:
+                            rep_amt = min(cm_fv - 102.0, ut_borrowed - 800.0)
+                            if rep_amt >= 5.0:
+                                api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "USDT", "isIsolated": "FALSE", "amount": f"{rep_amt:.2f}", "type": "REPAY"}, signed=True)
+                                ut_borrowed -= rep_amt
+                        mx_tr_r = api.request("GET", "/sapi/v1/margin/maxTransferable", {"asset": "USDT"}, signed=True)
+                        can_tr_u = min(need_seed, float(mx_tr_r.get("amount", need_seed)) * 0.99) if isinstance(mx_tr_r, dict) else need_seed
+                        if can_tr_u >= 5.0:
+                            api.request("POST", "/sapi/v1/margin/transfer", {"asset": "USDT", "amount": f"{can_tr_u:.2f}", "type": "2"}, signed=True)
+                            api.request("POST", "/sapi/v1/margin/isolated/transfer", {"asset": "USDT", "symbol": "USDCUSDT", "transFrom": "SPOT", "transTo": "ISOLATED_MARGIN", "amount": f"{can_tr_u:.2f}"}, signed=True)
+                            iso_net_u += can_tr_u
                 if iso_net_u >= 90.0 and iso_bor_u < 880.0:
                     mx_b = api.request("GET", "/sapi/v1/margin/maxBorrowable", {"asset": "USDT", "isolatedSymbol": "USDCUSDT"}, signed=True)
                     can_b = min(round(890.0 - iso_bor_u, 2), float(mx_b.get("amount", 0)) * 0.96) if isinstance(mx_b, dict) else 0.0
