@@ -641,7 +641,496 @@ class BinanceMarginSession:
                     return {"_error": 500, "msg": str(e)}
 
 
+class BinanceFuturesSession:
+    def __init__(self):
+        self.conn = None
+        self.connect()
+
+    def connect(self):
+        try:
+            if self.conn:
+                self.conn.close()
+        except Exception:
+            pass
+        self.conn = http.client.HTTPSConnection("fapi.binance.com", 443, timeout=4)
+
+    def request(self, method, path, params=None, signed=False):
+        if params is None:
+            params = {}
+        if signed:
+            params["timestamp"] = int(time.time() * 1000)
+            params["recvWindow"] = 5000
+        qs = urllib.parse.urlencode(params)
+        if signed:
+            sig = hmac.new(API_SEC, qs.encode(), hashlib.sha256).hexdigest()
+            qs = f"{qs}&signature={sig}"
+        full_path = f"{path}?{qs}" if qs else path
+        headers = {"X-MBX-APIKEY": API_KEY, "Connection": "keep-alive"}
+        for attempt in range(2):
+            try:
+                self.conn.request(method, full_path, headers=headers)
+                resp = self.conn.getresponse()
+                raw = resp.read().decode()
+                if resp.status == 200:
+                    return json.loads(raw)
+                return {"_error": resp.status, "msg": raw}
+            except Exception as e:
+                self.connect()
+                if attempt == 1:
+                    return {"_error": 500, "msg": str(e)}
+
+
+def start_futures_bbo_ws():
+    def _run_f():
+        while True:
+            s = None
+            try:
+                raw_s = socket.create_connection(("fstream.binance.com", 443), timeout=5)
+                raw_s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                ctx = ssl.create_default_context()
+                s = ctx.wrap_socket(raw_s, server_hostname="fstream.binance.com")
+                key_ws = base64.b64encode(os.urandom(16)).decode()
+                req = (
+                    "GET /ws/solusdc@bookTicker HTTP/1.1\r\n"
+                    "Host: fstream.binance.com\r\n"
+                    "Upgrade: websocket\r\n"
+                    "Connection: Upgrade\r\n"
+                    f"Sec-WebSocket-Key: {key_ws}\r\n"
+                    "Sec-WebSocket-Version: 13\r\n\r\n"
+                )
+                s.sendall(req.encode())
+                buf = b""
+                while b"\r\n\r\n" not in buf:
+                    c = s.recv(4096)
+                    if not c:
+                        raise ConnectionError("Futures WS handshake closed")
+                    buf += c
+                buf = buf.split(b"\r\n\r\n", 1)[1]
+                while True:
+                    while len(buf) < 2:
+                        c = s.recv(4096)
+                        if not c:
+                            raise ConnectionError("Futures WS closed")
+                        buf += c
+                    b0, b1 = buf[0], buf[1]
+                    opcode = b0 & 0x0f
+                    plen = b1 & 0x7f
+                    idx = 2
+                    if plen == 126:
+                        while len(buf) < 4:
+                            buf += s.recv(4096)
+                        plen = struct.unpack(">H", buf[2:4])[0]
+                        idx = 4
+                    elif plen == 127:
+                        while len(buf) < 10:
+                            buf += s.recv(4096)
+                        plen = struct.unpack(">Q", buf[2:10])[0]
+                        idx = 10
+                    while len(buf) < idx + plen:
+                        c = s.recv(4096)
+                        if not c:
+                            raise ConnectionError("Futures WS closed mid")
+                        buf += c
+                    payload = buf[idx:idx + plen]
+                    buf = buf[idx + plen:]
+                    if opcode == 0x9:
+                        pong = bytearray([0x8a, 0x80 | len(payload)])
+                        mask = os.urandom(4)
+                        pong.extend(mask)
+                        pong.extend(bytes(b ^ mask[i % 4] for i, b in enumerate(payload)))
+                        s.sendall(bytes(pong))
+                    elif opcode == 0x1:
+                        msg = json.loads(payload.decode("utf-8", errors="ignore"))
+                        if "b" in msg and "a" in msg:
+                            with WS_LOCK:
+                                WS_BBOS["SOLUSDC_PERP"] = {
+                                    "bid": float(msg["b"]),
+                                    "ask": float(msg["a"]),
+                                    "bidQty": float(msg.get("B", 0.0)),
+                                    "askQty": float(msg.get("A", 0.0)),
+                                    "ts": time.time(),
+                                }
+                    elif opcode == 0x8:
+                        break
+            except Exception:
+                time.sleep(1.0)
+            finally:
+                try:
+                    if s:
+                        s.close()
+                except Exception:
+                    pass
+
+    threading.Thread(target=_run_f, daemon=True).start()
+
+
+def setup_sol_spot_perp_pilot(api, fapi):
+    # v13.0 $30 ($15 Spot + $15 Perp) Pre-Flight Gap Verification & Seeding:
+    st = {
+        "ready": False,
+        "spot_sym": "SOLFDUSD",
+        "spot_quote": "FDUSD",
+        "perp_sym": "SOLUSDC",
+        "spot_maker_fee": 0.0,
+        "perp_maker_fee": 0.0,
+        "perp_taker_fee": 0.0004,
+        "state": "IDLE",
+        "ema_basis_bps": None,
+        "last_basis_bps": 0.0,
+        "last_edge_bps": 0.0,
+        "qty": 0.0,
+        "spot_oid": None,
+        "perp_oid": None,
+        "spot_px": 0.0,
+        "perp_px": 0.0,
+        "entry_basis_bps": 0.0,
+        "hedge_start_ts": 0.0,
+        "hedge_ref_bid": 0.0,
+        "entry_ts": 0.0,
+        "realized_pnl": 0.0,
+        "unrealized_pnl": 0.0,
+        "rts": 0,
+        "ioc_bailouts": 0,
+        "msg": "Initializing $30 Spot-Perp Pilot...",
+    }
+    try:
+        # Gap 3: Verify 0% Maker Fee across SOL Spot candidates (SOLFDUSD, SOLU, SOLUSD1):
+        tf_res = api.request("GET", "/sapi/v1/asset/tradeFee", signed=True)
+        fee_map = {x.get("symbol"): float(x.get("makerCommission", 0.001)) for x in tf_res} if isinstance(tf_res, list) else {}
+        chosen_sp = None
+        for cand_sym, cand_q in (("SOLFDUSD", "FDUSD"), ("SOLU", "U"), ("SOLUSD1", "USD1")):
+            if fee_map.get(cand_sym, 0.0) <= 0.00001:
+                chosen_sp = (cand_sym, cand_q, fee_map.get(cand_sym, 0.0))
+                break
+        if chosen_sp is None:
+            chosen_sp = ("SOLFDUSD", "FDUSD", fee_map.get("SOLFDUSD", 0.0))
+        st["spot_sym"], st["spot_quote"], st["spot_maker_fee"] = chosen_sp
+
+        # Gap 5: Verify Futures API permission & commissionRate on SOLUSDC Perp:
+        f_acc = fapi.request("GET", "/fapi/v2/account", signed=True)
+        if "_error" in f_acc:
+            st["msg"] = f"FUTURES_API_CHECK: {f_acc.get('msg', f_acc)[:140]}"
+            api._sp_pilot = st
+            return st
+        f_comm = fapi.request("GET", "/fapi/v1/commissionRate", {"symbol": "SOLUSDC"}, signed=True)
+        if isinstance(f_comm, dict) and "makerCommissionRate" in f_comm:
+            st["perp_maker_fee"] = float(f_comm.get("makerCommissionRate", 0.0))
+            st["perp_taker_fee"] = float(f_comm.get("takerCommissionRate", 0.0004))
+
+        fapi.request("POST", "/fapi/v1/leverage", {"symbol": "SOLUSDC", "leverage": 2}, signed=True)
+
+        # Gap 4: Seed exactly $15.50 USDC in UMFUTURE + $15.50 Quote (FDUSD/U/USD1) in Spot while leaving ~$467.85 USDT untouched in Cross-Margin!
+        fut_usdc = 0.0
+        for fa in f_acc.get("assets", []):
+            if fa.get("asset") == "USDC":
+                fut_usdc = float(fa.get("walletBalance", 0.0))
+        if fut_usdc < 14.50:
+            need_uc = round(15.50 - fut_usdc, 2)
+            # Move 5.00 USDC from Cross-Margin to Spot if available:
+            api.request("POST", "/sapi/v1/margin/transfer", {"asset": "USDC", "amount": "5.00", "type": "2"}, signed=True)
+            sp_a = api.request("GET", "/api/v3/account", signed=True)
+            sp_uc = float(next((b.get("free", 0) for b in sp_a.get("balances", []) if b.get("asset") == "USDC"), 0)) if isinstance(sp_a, dict) else 0.0
+            if sp_uc < need_uc:
+                buy_uc = int(math.ceil(need_uc - sp_uc + 1.0))
+                if buy_uc >= 6:
+                    api.request("POST", "/sapi/v1/margin/transfer", {"asset": "USDT", "amount": f"{buy_uc + 0.50:.2f}", "type": "2"}, signed=True)
+                    api.request("POST", "/api/v3/order", {"symbol": "USDCUSDT", "side": "BUY", "type": "MARKET", "quantity": str(buy_uc)}, signed=True)
+            sp_a2 = api.request("GET", "/api/v3/account", signed=True)
+            sp_uc2 = float(next((b.get("free", 0) for b in sp_a2.get("balances", []) if b.get("asset") == "USDC"), 0)) if isinstance(sp_a2, dict) else 0.0
+            tr_uc = min(round(need_uc, 2), math.floor(sp_uc2 * 100.0) / 100.0)
+            if tr_uc >= 1.0:
+                api.request("POST", "/sapi/v1/asset/transfer", {"type": "MAIN_UMFUTURE", "asset": "USDC", "amount": f"{tr_uc:.2f}"}, signed=True)
+
+        # Ensure $15.50 of Spot quote asset (FDUSD / U / USD1) in Spot:
+        q_ast = st["spot_quote"]
+        sp_a3 = api.request("GET", "/api/v3/account", signed=True)
+        sp_qf = float(next((b.get("free", 0) for b in sp_a3.get("balances", []) if b.get("asset") == q_ast), 0)) if isinstance(sp_a3, dict) else 0.0
+        sp_sol = float(next((b.get("free", 0) for b in sp_a3.get("balances", []) if b.get("asset") == "SOL"), 0)) if isinstance(sp_a3, dict) else 0.0
+        if sp_qf < 14.50 and sp_sol < 0.10:
+            buy_q = int(math.ceil(16.0 - sp_qf))
+            if buy_q >= 6:
+                api.request("POST", "/sapi/v1/margin/transfer", {"asset": "USDT", "amount": f"{buy_q + 0.50:.2f}", "type": "2"}, signed=True)
+                api.request("POST", "/api/v3/order", {"symbol": q_ast + "USDT", "side": "BUY", "type": "MARKET", "quantity": str(buy_q)}, signed=True)
+
+        st["ready"] = True
+        st["msg"] = f"ACTIVE $30 PILOT: {st['spot_sym']} (mkr={st['spot_maker_fee']*100:.3f}%) + SOLUSDC Perp (mkr={st['perp_maker_fee']*100:.3f}%, tkr={st['perp_taker_fee']*100:.3f}%)"
+    except Exception as e:
+        st["msg"] = f"SETUP_ERR: {e}"
+    api._sp_pilot = st
+    return st
+
+
+def run_sol_spot_perp_tick(api, fapi, bbos, loop_ts, round_trips, cached_total_usd):
+    st = getattr(api, "_sp_pilot", None)
+    if not st or not st.get("ready"):
+        return
+    if getattr(api, "_paused_495", False) or getattr(api, "_user_paused", False):
+        return
+    sp_sym = st["spot_sym"]
+    q_ast = st["spot_quote"]
+    sp_bbo = bbos.get(sp_sym)
+    with WS_LOCK:
+        pp_bbo = dict(WS_BBOS.get("SOLUSDC_PERP", {}))
+    if not pp_bbo or loop_ts - pp_bbo.get("ts", 0) > 10.0:
+        tk_p = fapi.request("GET", "/fapi/v1/ticker/bookTicker", {"symbol": "SOLUSDC"})
+        if isinstance(tk_p, dict) and "bidPrice" in tk_p:
+            pp_bbo = {"bid": float(tk_p["bidPrice"]), "ask": float(tk_p["askPrice"]), "bidQty": float(tk_p.get("bidQty", 0)), "askQty": float(tk_p.get("askQty", 0)), "ts": loop_ts}
+            with WS_LOCK:
+                WS_BBOS["SOLUSDC_PERP"] = dict(pp_bbo)
+    if not sp_bbo or not pp_bbo or sp_bbo.get("bid", 0) <= 0 or pp_bbo.get("bid", 0) <= 0:
+        return
+
+    # Gap 2: FX-Normalize both SOL Spot (FDUSD/U/USD1) and SOLUSDC Perp into exact USDT terms:
+    q_usdt = float(bbos.get(q_ast + "USDT", {}).get("bid", 0.99655 if q_ast == "FDUSD" else 1.0001))
+    uc_usdt = float(bbos.get("USDCUSDT", {}).get("bid", 1.00073))
+    sp_bid_u = sp_bbo["bid"] * q_usdt
+    sp_ask_u = sp_bbo["ask"] * q_usdt
+    pp_bid_u = pp_bbo["bid"] * uc_usdt
+    pp_ask_u = pp_bbo["ask"] * uc_usdt
+    sp_mid_u = 0.5 * (sp_bid_u + sp_ask_u)
+    pp_mid_u = 0.5 * (pp_bid_u + pp_ask_u)
+
+    mid_basis_bps = ((pp_mid_u - sp_mid_u) / sp_mid_u) * 10000.0
+    if st["ema_basis_bps"] is None:
+        st["ema_basis_bps"] = mid_basis_bps
+    else:
+        st["ema_basis_bps"] = st["ema_basis_bps"] * 0.997 + mid_basis_bps * 0.003
+
+    # Entry basis (buying Spot @ sp_bid, hedging Perp @ pp_bid) vs EMA:
+    entry_basis_bps = ((pp_bid_u - sp_bid_u) / sp_bid_u) * 10000.0
+    edge_bps = entry_basis_bps - st["ema_basis_bps"]
+    st["last_basis_bps"] = round(entry_basis_bps, 2)
+    st["last_edge_bps"] = round(edge_bps, 2)
+
+    # Hard -$0.15 (15 cent) Pilot Stop:
+    if st["realized_pnl"] + st["unrealized_pnl"] <= -0.1500:
+        st["msg"] = f"STOPPED AT -$0.15 CAP (Net ${st['realized_pnl'] + st['unrealized_pnl']:+.4f})"
+        return
+
+    state = st["state"]
+    if state == "IDLE":
+        # Trigger entry when Perp leads Spot upward by >= +3.5 bps above 60s EMA basis:
+        if edge_bps >= 3.50 and (loop_ts - st.get("last_trade_ts", 0.0)) >= 1.0:
+            # Gap 1: Force exact 0.01 SOL step size ($15 clip = ~0.21 SOL) so Spot & Perp match 1:1 with zero dust:
+            qty_sol = math.floor((15.0 / sp_bbo["bid"]) * 100.0) / 100.0
+            if qty_sol >= 0.08:
+                bpx_sp = round(sp_bbo["bid"], 2)
+                r_sp = api.request("POST", "/api/v3/order", {
+                    "symbol": sp_sym, "side": "BUY", "type": "LIMIT_MAKER",
+                    "quantity": f"{qty_sol:.2f}", "price": f"{bpx_sp:.2f}"
+                }, signed=True)
+                if "orderId" in r_sp:
+                    st["state"] = "SPOT_BUY_OPEN"
+                    st["spot_oid"] = r_sp["orderId"]
+                    st["spot_px"] = bpx_sp
+                    st["qty"] = qty_sol
+                    st["entry_ts"] = loop_ts
+                    st["msg"] = f"SPOT_BUY_OPEN: {qty_sol:.2f} {sp_sym} @ ${bpx_sp:.2f} (edge={edge_bps:+.2f}bps)"
+
+    elif state == "SPOT_BUY_OPEN":
+        if loop_ts - st.get("last_poll_ts", 0.0) >= 0.08:
+            st["last_poll_ts"] = loop_ts
+            o_sp = api.request("GET", "/api/v3/order", {"symbol": sp_sym, "orderId": st["spot_oid"]}, signed=True)
+            if isinstance(o_sp, dict) and "status" in o_sp:
+                st_o = o_sp["status"]
+                ex_q = float(o_sp.get("executedQty", 0.0))
+                if st_o == "FILLED" or (ex_q >= 0.08 and (edge_bps < 1.0 or loop_ts - st["entry_ts"] >= 5.0)):
+                    if st_o != "FILLED":
+                        api.request("DELETE", "/api/v3/order", {"symbol": sp_sym, "orderId": st["spot_oid"]}, signed=True)
+                    h_qty = math.floor(ex_q * 100.0) / 100.0
+                    st["qty"] = h_qty
+                    st["entry_basis_bps"] = entry_basis_bps
+                    # Exact millisecond Spot fill confirms -> Post LIMIT_MAKER (GTX) hedge on SOLUSDC Perp 1 tick inside ask/at bid:
+                    spx_pp = round(max(pp_bbo["bid"], pp_bbo["ask"] - 0.01), 2)
+                    r_pp = fapi.request("POST", "/fapi/v1/order", {
+                        "symbol": "SOLUSDC", "side": "SELL", "type": "LIMIT", "timeInForce": "GTX",
+                        "quantity": f"{h_qty:.2f}", "price": f"{spx_pp:.2f}"
+                    }, signed=True)
+                    st["hedge_start_ts"] = time.time()
+                    st["hedge_ref_bid"] = pp_bbo["bid"]
+                    if "orderId" in r_pp and r_pp.get("status") not in ("EXPIRED", "CANCELED", "REJECTED"):
+                        st["perp_oid"] = r_pp["orderId"]
+                        st["perp_px"] = spx_pp
+                        st["state"] = "PERP_HEDGE_MAKER"
+                        st["msg"] = f"PERP_HEDGE_MAKER: SELL {h_qty:.2f} SOLUSDC @ ${spx_pp:.2f}"
+                    else:
+                        # GTX crossed -> try @ pp_bbo["ask"]:
+                        spx_pp2 = round(pp_bbo["ask"], 2)
+                        r_pp2 = fapi.request("POST", "/fapi/v1/order", {
+                            "symbol": "SOLUSDC", "side": "SELL", "type": "LIMIT", "timeInForce": "GTX",
+                            "quantity": f"{h_qty:.2f}", "price": f"{spx_pp2:.2f}"
+                        }, signed=True)
+                        if "orderId" in r_pp2 and r_pp2.get("status") not in ("EXPIRED", "CANCELED", "REJECTED"):
+                            st["perp_oid"] = r_pp2["orderId"]
+                            st["perp_px"] = spx_pp2
+                            st["state"] = "PERP_HEDGE_MAKER"
+                        else:
+                            # Immediate IOC Taker Hedge so we are never naked:
+                            r_ioc = fapi.request("POST", "/fapi/v1/order", {
+                                "symbol": "SOLUSDC", "side": "SELL", "type": "MARKET", "quantity": f"{h_qty:.2f}"
+                            }, signed=True)
+                            st["perp_px"] = float(r_ioc.get("avgPrice") or pp_bbo["bid"])
+                            st["ioc_bailouts"] += 1
+                            st["state"] = "HEDGED"
+                            st["entry_ts"] = loop_ts
+                elif st_o in ("CANCELED", "EXPIRED", "REJECTED"):
+                    st["state"] = "IDLE"
+                    st["spot_oid"] = None
+                elif ex_q < 0.08 and (edge_bps < 0.80 or (loop_ts - st["entry_ts"]) >= 6.0):
+                    cr_s = api.request("DELETE", "/api/v3/order", {"symbol": sp_sym, "orderId": st["spot_oid"]}, signed=True)
+                    if cr_s.get("status") == "CANCELED" and float(cr_s.get("executedQty", 0)) < 0.08:
+                        st["state"] = "IDLE"
+                        st["spot_oid"] = None
+
+    elif state == "PERP_HEDGE_MAKER":
+        # 500ms / 2 bps Bailout Rule: If Perp maker does not fill within 500ms AND price drops > 2 bps (or > 1.2s elapsed), fire immediate IOC/Market Taker hedge!
+        elapsed_h = time.time() - st["hedge_start_ts"]
+        adv_drop_bps = ((st["hedge_ref_bid"] - pp_bbo["bid"]) / st["hedge_ref_bid"]) * 10000.0
+        need_bailout = (elapsed_h >= 0.500 and adv_drop_bps >= 2.0) or (elapsed_h >= 1.20)
+        if need_bailout or (loop_ts - st.get("last_poll_ts", 0.0) >= 0.08):
+            st["last_poll_ts"] = loop_ts
+            o_pp = fapi.request("GET", "/fapi/v1/order", {"symbol": "SOLUSDC", "orderId": st["perp_oid"]}, signed=True)
+            if isinstance(o_pp, dict) and o_pp.get("status") == "FILLED":
+                st["perp_px"] = float(o_pp.get("avgPrice") or st["perp_px"])
+                st["state"] = "HEDGED"
+                st["entry_ts"] = loop_ts
+                st["msg"] = f"HEDGED 1:1: Long {st['qty']:.2f} {sp_sym} @ ${st['spot_px']:.2f} / Short SOLUSDC @ ${st['perp_px']:.2f}"
+            elif need_bailout or (isinstance(o_pp, dict) and o_pp.get("status") in ("CANCELED", "EXPIRED")):
+                fapi.request("DELETE", "/fapi/v1/order", {"symbol": "SOLUSDC", "orderId": st["perp_oid"]}, signed=True)
+                o_chk = fapi.request("GET", "/fapi/v1/order", {"symbol": "SOLUSDC", "orderId": st["perp_oid"]}, signed=True)
+                rem_h = round(st["qty"] - float(o_chk.get("executedQty", 0.0) if isinstance(o_chk, dict) else 0.0), 2)
+                if rem_h >= 0.08:
+                    r_ioc = fapi.request("POST", "/fapi/v1/order", {
+                        "symbol": "SOLUSDC", "side": "SELL", "type": "MARKET", "quantity": f"{rem_h:.2f}"
+                    }, signed=True)
+                    st["perp_px"] = float(r_ioc.get("avgPrice") or pp_bbo["bid"])
+                    st["ioc_bailouts"] += 1
+                st["state"] = "HEDGED"
+                st["entry_ts"] = loop_ts
+                st["msg"] = f"HEDGED (500ms IOC BAILOUT): Long {st['qty']:.2f} {sp_sym} / Short SOLUSDC @ ${st['perp_px']:.2f}"
+
+    elif state == "HEDGED":
+        # Calculate live delta-neutral MTM PnL in USDT:
+        sp_exit_u = sp_bbo["ask"] * q_usdt
+        pp_exit_u = pp_bbo["bid"] * uc_usdt
+        sp_entry_u = st["spot_px"] * q_usdt
+        pp_entry_u = st["perp_px"] * uc_usdt
+        gross_pnl = ((sp_exit_u - sp_entry_u) + (pp_entry_u - pp_exit_u)) * st["qty"]
+        st["unrealized_pnl"] = round(gross_pnl, 4)
+        hold_s = loop_ts - st["entry_ts"]
+        # Trigger exit when basis converges back (gross_pnl >= +$0.008 = ~5.3 bps on $15) or after 45s at >= +$0.003:
+        if gross_pnl >= 0.0080 or (hold_s >= 45.0 and gross_pnl >= 0.0025) or (hold_s >= 180.0 and gross_pnl >= 0.0005):
+            spx_sp = round(sp_bbo["ask"], 2)
+            r_s_ex = api.request("POST", "/api/v3/order", {
+                "symbol": sp_sym, "side": "SELL", "type": "LIMIT_MAKER",
+                "quantity": f"{st['qty']:.2f}", "price": f"{spx_sp:.2f}"
+            }, signed=True)
+            if "orderId" in r_s_ex:
+                st["spot_oid"] = r_s_ex["orderId"]
+                st["spot_exit_px"] = spx_sp
+                st["exit_ts"] = loop_ts
+                st["state"] = "EXIT_SPOT_OPEN"
+                st["msg"] = f"EXIT_SPOT_OPEN: SELL {st['qty']:.2f} {sp_sym} @ ${spx_sp:.2f}"
+
+    elif state == "EXIT_SPOT_OPEN":
+        if loop_ts - st.get("last_poll_ts", 0.0) >= 0.08:
+            st["last_poll_ts"] = loop_ts
+            o_sp = api.request("GET", "/api/v3/order", {"symbol": sp_sym, "orderId": st["spot_oid"]}, signed=True)
+            if isinstance(o_sp, dict) and o_sp.get("status") == "FILLED":
+                # Spot leg exited -> Immediately close Perp Short (GTX Maker BUY -> 500ms IOC BUY bailout):
+                bpx_pp = round(min(pp_bbo["ask"], pp_bbo["bid"] + 0.01), 2)
+                r_pp_c = fapi.request("POST", "/fapi/v1/order", {
+                    "symbol": "SOLUSDC", "side": "BUY", "type": "LIMIT", "timeInForce": "GTX",
+                    "quantity": f"{st['qty']:.2f}", "price": f"{bpx_pp:.2f}", "reduceOnly": "true"
+                }, signed=True)
+                st["hedge_start_ts"] = time.time()
+                st["hedge_ref_ask"] = pp_bbo["ask"]
+                if "orderId" in r_pp_c and r_pp_c.get("status") not in ("EXPIRED", "CANCELED", "REJECTED"):
+                    st["perp_oid"] = r_pp_c["orderId"]
+                    st["perp_exit_px"] = bpx_pp
+                    st["state"] = "EXIT_PERP_MAKER"
+                else:
+                    r_ioc_c = fapi.request("POST", "/fapi/v1/order", {
+                        "symbol": "SOLUSDC", "side": "BUY", "type": "MARKET",
+                        "quantity": f"{st['qty']:.2f}", "reduceOnly": "true"
+                    }, signed=True)
+                    p_ex = float(r_ioc_c.get("avgPrice") or pp_bbo["ask"])
+                    fee_est = (st["qty"] * p_ex * st["perp_taker_fee"])
+                    net_rt = round(((st["spot_exit_px"] - st["spot_px"]) * q_usdt + (st["perp_px"] - p_ex) * uc_usdt) * st["qty"] - fee_est, 5)
+                    st["realized_pnl"] = round(st["realized_pnl"] + net_rt, 4)
+                    st["unrealized_pnl"] = 0.0
+                    st["rts"] += 1
+                    st["ioc_bailouts"] += 1
+                    st["state"] = "IDLE"
+                    st["last_trade_ts"] = loop_ts
+                    round_trips.insert(0, {
+                        "time": int(loop_ts * 1000),
+                        "symbol": f"{sp_sym}+SOLUSDC_PERP ($30 DN)",
+                        "type": "COMPLETED",
+                        "route": f"[$30 DN ARB] Spot {st['spot_px']:.2f}->{st['spot_exit_px']:.2f} | Perp {st['perp_px']:.2f}->{p_ex:.2f}",
+                        "id": f"#DN_{st['rts']}",
+                        "pnl": net_rt,
+                        "eqAfter": cached_total_usd,
+                    })
+            elif (loop_ts - st.get("exit_ts", loop_ts)) >= 3.0 and abs(sp_bbo["ask"] - st.get("spot_exit_px", 0)) >= 0.02:
+                cr_ex = api.request("DELETE", "/api/v3/order", {"symbol": sp_sym, "orderId": st["spot_oid"]}, signed=True)
+                if cr_ex.get("status") == "CANCELED" and float(cr_ex.get("executedQty", 0)) < 0.01:
+                    st["state"] = "HEDGED"
+
+    elif state == "EXIT_PERP_MAKER":
+        elapsed_c = time.time() - st["hedge_start_ts"]
+        adv_jump_bps = ((pp_bbo["ask"] - st["hedge_ref_ask"]) / st["hedge_ref_ask"]) * 10000.0
+        need_bail_c = (elapsed_c >= 0.500 and adv_jump_bps >= 2.0) or (elapsed_c >= 1.20)
+        if need_bail_c or (loop_ts - st.get("last_poll_ts", 0.0) >= 0.08):
+            st["last_poll_ts"] = loop_ts
+            o_ppc = fapi.request("GET", "/fapi/v1/order", {"symbol": "SOLUSDC", "orderId": st["perp_oid"]}, signed=True)
+            if isinstance(o_ppc, dict) and o_ppc.get("status") == "FILLED":
+                p_ex = float(o_ppc.get("avgPrice") or st["perp_exit_px"])
+                net_rt = round(((st["spot_exit_px"] - st["spot_px"]) * q_usdt + (st["perp_px"] - p_ex) * uc_usdt) * st["qty"], 5)
+                st["realized_pnl"] = round(st["realized_pnl"] + net_rt, 4)
+                st["unrealized_pnl"] = 0.0
+                st["rts"] += 1
+                st["state"] = "IDLE"
+                st["last_trade_ts"] = loop_ts
+                st["msg"] = f"RT #{st['rts']} COMPLETED (0% MAKER): +${net_rt:.4f} (Total ${st['realized_pnl']:+.4f})"
+                round_trips.insert(0, {
+                    "time": int(loop_ts * 1000),
+                    "symbol": f"{sp_sym}+SOLUSDC_PERP (0% MKR)",
+                    "type": "COMPLETED",
+                    "route": f"[$30 DN ARB] Spot {st['spot_px']:.2f}->{st['spot_exit_px']:.2f} | Perp {st['perp_px']:.2f}->{p_ex:.2f}",
+                    "id": f"#DN_{st['rts']}",
+                    "pnl": net_rt,
+                    "eqAfter": cached_total_usd,
+                })
+            elif need_bail_c:
+                fapi.request("DELETE", "/fapi/v1/order", {"symbol": "SOLUSDC", "orderId": st["perp_oid"]}, signed=True)
+                r_ioc_c = fapi.request("POST", "/fapi/v1/order", {
+                    "symbol": "SOLUSDC", "side": "BUY", "type": "MARKET",
+                    "quantity": f"{st['qty']:.2f}", "reduceOnly": "true"
+                }, signed=True)
+                p_ex = float(r_ioc_c.get("avgPrice") or pp_bbo["ask"])
+                fee_est = (st["qty"] * p_ex * st["perp_taker_fee"])
+                net_rt = round(((st["spot_exit_px"] - st["spot_px"]) * q_usdt + (st["perp_px"] - p_ex) * uc_usdt) * st["qty"] - fee_est, 5)
+                st["realized_pnl"] = round(st["realized_pnl"] + net_rt, 4)
+                st["unrealized_pnl"] = 0.0
+                st["rts"] += 1
+                st["ioc_bailouts"] += 1
+                st["state"] = "IDLE"
+                st["last_trade_ts"] = loop_ts
+                round_trips.insert(0, {
+                    "time": int(loop_ts * 1000),
+                    "symbol": f"{sp_sym}+SOLUSDC_PERP (500ms IOC)",
+                    "type": "COMPLETED",
+                    "route": f"[$30 DN ARB] Spot {st['spot_px']:.2f}->{st['spot_exit_px']:.2f} | Perp {st['perp_px']:.2f}->{p_ex:.2f}",
+                    "id": f"#DN_{st['rts']}",
+                    "pnl": net_rt,
+                    "eqAfter": cached_total_usd,
+                })
+
+
 def auto_compound_borrow(api, force_repay_all=False):
+    if getattr(api, "_v13_spot_perp_only", True) and not force_repay_all:
+        return
     # 0. Auto-sweep any new Spot USDT/USDC deposit (>= $5) into Cross Margin
     try:
         spot = api.request("GET", "/api/v3/account", signed=True)
@@ -1188,17 +1677,18 @@ def main():
     except Exception:
         pass
     try:
-        s3.put_object(Bucket=S3_BUCKET, Key="pause-control.json", Body=json.dumps({"paused": True, "ts": int(time.time() * 1000)}).encode("utf-8"), ContentType="application/json")
+        s3.put_object(Bucket=S3_BUCKET, Key="pause-control.json", Body=json.dumps({"paused": False, "ts": int(time.time() * 1000)}).encode("utf-8"), ContentType="application/json")
     except Exception:
         pass
-    api._user_paused = True
+    api._user_paused = False
+    api._cm_swarm_paused = True
+    api._v13_spot_perp_only = True
 
-    # Live 1:1 Delta-Lock Hedging: Base loans strictly match live inventory (0 static short overhang!)
-    api._target_hedge_u1 = 0.0
-    api._target_hedge_uc = 0.0
-    halt_all_orders_and_repay(api)
+    fapi = BinanceFuturesSession()
+    start_futures_bbo_ws()
+    setup_sol_spot_perp_pilot(api, fapi)
 
-    active_tranches = [] if api._user_paused else adopt_existing_tranches(api)
+    active_tranches = []
     trades_cache = {s: [] for s in ("USDCUSDT", "USDCUSDT_CM", "USD1USDT_CM", "USD1USDT_ISO", "USD1USDC_CM", "USD1U_CM", "UUSDT_CM", "FDUSDUSDT", "FDUSDUSDT_CM", "FDUSDUSDC", "FDUSDUSDC_CM", "BTCU_CM", "BTCUSD1_CM", "BNBU_CM", "ETHU_CM", "BNBFDUSD_CM", "SOLFDUSD_CM", "EURIUSDT", "BTCU", "ETHU")}
     trades_day_ms = 0
 
@@ -1291,8 +1781,8 @@ def main():
                         with WS_LOCK:
                             WS_BBOS[s_miss] = dict(bbos[s_miss])
 
-            # 1. Incremental myTrades Ledger Audit every 30s (skip on first startup tick when paused so flatten updates S3 in <2s!)
-            if (not getattr(api, "_user_paused", False)) and loop_ts - last_pnl_audit >= 30.0:
+            # 1. Incremental myTrades Ledger Audit every 30s (skip when CM swarm is paused so v13.0 $30 Spot-Perp Pilot runs with <5ms loop & <2s S3 sync!)
+            if (not getattr(api, "_user_paused", False)) and (not getattr(api, "_cm_swarm_paused", True)) and loop_ts - last_pnl_audit >= 30.0:
                 last_pnl_audit = loop_ts
                 now_ms = int(loop_ts * 1000)
                 day_start_ms = 1794576000000
@@ -1655,6 +2145,8 @@ def main():
                         sf = float(sb.get("free", 0)) + float(sb.get("locked", 0))
                         s_ast = sb.get("asset", "")
                         if sf > 0.00001:
+                            if sf >= 0.05 and s_ast in ("FDUSD", "SOL", "USDC", "USDT", "U", "USD1"):
+                                bals.append({"asset": f"{s_ast} (Spot Pilot)", "free": f"{float(sb.get('free',0)):.4f}", "locked": f"{float(sb.get('locked',0)):.4f}", "borrowed": "0.00"})
                             if s_ast == "USDT":
                                 spot_net += sf
                             elif s_ast in ("USDC", "FDUSD", "USD1", "U"):
@@ -1667,6 +2159,16 @@ def main():
                                         api._spot_dust_px = getattr(api, "_spot_dust_px", {})
                                         s_px_b = api._spot_dust_px.setdefault(s_ast, s_px_b)
                                     spot_net += sf * s_px_b
+                    # Include UMFUTURE ($15 USDC Perp Pilot) balance & unrealized PnL in spot_net so total equity matches 1:1:
+                    f_acc_r = fapi.request("GET", "/fapi/v2/account", signed=True)
+                    if isinstance(f_acc_r, dict) and "assets" in f_acc_r:
+                        for fa_r in f_acc_r.get("assets", []):
+                            f_mb = float(fa_r.get("marginBalance", 0.0))
+                            f_ast = fa_r.get("asset", "")
+                            if f_mb > 0.01:
+                                f_px_u = bbos.get(f_ast + "USDT", {}).get("bid", 1.0) if f_ast != "USDT" else 1.0
+                                spot_net += f_mb * f_px_u
+                                bals.append({"asset": f"{f_ast} (Perp Pilot)", "free": f"{float(fa_r.get('availableBalance',0)):.4f}", "locked": f"{float(fa_r.get('initialMargin',0)):.4f}", "borrowed": "0.00"})
                     for ia_x in iso.get("assets", []):
                         if ia_x["symbol"] not in PAIRS:
                             b_ast_x = ia_x["baseAsset"]["asset"]
@@ -1793,6 +2295,8 @@ def main():
                 cached_open_orders = []
                 live_hourly_rate_usd = 0.0
                 live_daily_rate_usd = 0.0
+            elif getattr(api, "_cm_swarm_paused", True):
+                run_sol_spot_perp_tick(api, fapi, bbos, loop_ts, round_trips, cached_total_usd)
             else:
                 # 4A. Ultra-Fast <2ms WS Push + Bulk-Diff Tranche Engine
                 compute_composite_regime(api, bbos, last_1h_fills_count, tot_5m_pnl if "tot_5m_pnl" in locals() else 0.0, tot_15m_pnl if "tot_15m_pnl" in locals() else 0.0)
@@ -3160,7 +3664,8 @@ def main():
                 ethu_net_lbl = f"ETHU DN ${ethu_net_v:+.4f} ({int(getattr(api, '_ethu_rts', 0))} RTs)" if "ethu_net_v" in locals() else "ETHU DN $0.0000"
                 s1_rts_tot = int(getattr(api, "_s1_short_rts", 0)) + int(getattr(api, "_btcu_rts", 0))
                 s1_sc_tot = int(getattr(api, "_s1_short_scratches", 0))
-                s1_st_lbl = ("PILOT CB: " + getattr(api, "_s1_cb_reason", "")) if getattr(api, "_s1_cb_tripped", False) else f"v12.3 100x$24 MICRO-SWARM + 50% VAULT UNSTICK (88x$24 USD1 + 12x$24 USDC • HARD $498.50 CB) • Net ${s1_net_v:+.4f} ({s1_rts_tot} RTs)"
+                sp_st = getattr(api, "_sp_pilot", {})
+                s1_st_lbl = sp_st.get("msg", "v13.0 $30 Spot-Perp Pilot") if getattr(api, "_cm_swarm_paused", True) else (("PILOT CB: " + getattr(api, "_s1_cb_reason", "")) if getattr(api, "_s1_cb_tripped", False) else f"v12.3 100x$24 MICRO-SWARM + 50% VAULT UNSTICK (88x$24 USD1 + 12x$24 USDC • HARD $498.50 CB) • Net ${s1_net_v:+.4f} ({s1_rts_tot} RTs)")
                 payload = {
                     "ts": int(loop_ts * 1000),
                     "startEquityUsd": start_equity_usd,
@@ -3177,6 +3682,7 @@ def main():
                     "realizedYesterdayUsd": realized_yesterday_usd,
                     "todayFillsCount": today_fills_count,
                     "last1hFillsCount": last_1h_fills_count,
+                    "solSpotPerpPilot": sp_st,
                     "trancheStats": {
                         "total": tot_tr_cnt,
                         "active": active_tr_cnt,
@@ -3272,9 +3778,8 @@ def main():
                         pass
                     try:
                         _p_url = s3.generate_presigned_url("put_object", Params={"Bucket": S3_BUCKET, "Key": "pause-control.json", "ContentType": "text/plain"}, ExpiresIn=604800)
-                        s3.put_object(Bucket=S3_BUCKET, Key="pause-control.json", Body=json.dumps({"paused": True, "ts": int(loop_ts * 1000)}), ContentType="text/plain")
-                        api._user_paused = True
-                        halt_all_orders_and_repay(api)
+                        s3.put_object(Bucket=S3_BUCKET, Key="pause-control.json", Body=json.dumps({"paused": False, "ts": int(loop_ts * 1000)}), ContentType="text/plain")
+                        api._user_paused = False
                     except Exception:
                         _p_url = ""
                     api._pause_put_url = _p_url
