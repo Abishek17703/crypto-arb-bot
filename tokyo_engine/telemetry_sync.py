@@ -562,6 +562,10 @@ def auto_compound_borrow(api, force_repay_all=False):
                 ut_borrowed = bv_u
                 if force_repay_all and bv_u > 0.01 and fv_u >= 0.05:
                     api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "USDT", "isIsolated": "FALSE", "amount": f"{min(fv_u, bv_u):.4f}", "type": "REPAY"}, signed=True)
+                elif not force_repay_all and bv_u > 1505.0 and fv_u >= 5.0:
+                    rep_ex = min(fv_u, bv_u - 1502.0)
+                    if rep_ex >= 2.0:
+                        api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "USDT", "isIsolated": "FALSE", "amount": f"{rep_ex:.2f}", "type": "REPAY"}, signed=True)
                 continue
             if bv_u > 0.0001 and fv_u >= (0.0001 if ast_u == "ETH" else 0.05):
                 api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": ast_u, "isIsolated": "FALSE", "amount": f"{min(fv_u, bv_u):.4f}", "type": "REPAY"}, signed=True)
@@ -1071,8 +1075,8 @@ def main():
                 eq_series = [[k, merged_map[k]] for k in sorted(merged_map.keys())]
     except Exception:
         eq_series = list(seed_true_hist)
-    # Waterfall Unstick Vault: seeded with $0.1800 of today's banked profit + accrues 100% of active tranche profits to unfreeze stuck clips at net >= $0.00!
-    unstick_vault_usd = max(0.1800, prev_vault_seed if "prev_vault_seed" in locals() else 0.1800)
+    # Zero-Loss Pure Maker Mode: Do NOT seed a phantom vault that subsidizes negative step-downs on USD1USDT/USDCUSDT!
+    unstick_vault_usd = 0.0
 
     free_map = {
         "CM_USDT": 129.0, "CM_USD1": 0.0, "CM_FDUSD": 0.0, "CM_USDC": 0.0, "CM_U": 0.0, "CM_BTC": 0.0, "CM_ETH": 0.0, "CM_BNB": 0.0, "CM_SOL": 0.0,
@@ -1805,8 +1809,8 @@ def main():
                                 tr["buy_px"] = 0.9966
                             elif sym == "USD1USDT" and tr["buy_px"] < tr["sell_px"] - 0.00004:
                                 tr["buy_px"] = round(tr["sell_px"] - spec["tick"], spec["dec"])
-                            # Mechanism 2: Cross-Pair Triangular Profit Exit (USD1/FDUSD -> USDC -> USDT at >= cost basis or +profit!)
-                            if (not tr["iso"]) and sym in ("USD1USDT", "FDUSDUSDT") and age_s > 10.0 and "USDCUSDT" in bbos:
+                            # Disabled USD1USDC cross-pair flip so USD1 never gets valued at USD1USDC's lower Bid (-$0.09 MTM drag!)
+                            if False and (not tr["iso"]) and sym in ("USD1USDT", "FDUSDUSDT") and age_s > 10.0 and "USDCUSDT" in bbos:
                                 uc_pair_s = "USD1USDC" if sym == "USD1USDT" else "FDUSDUSDC"
                                 if uc_pair_s in bbos:
                                     u1_uc_ask = bbos[uc_pair_s]["ask"]
@@ -1835,8 +1839,8 @@ def main():
                                 ref_tick_s = PAIRS[ref_ut_s]["tick"]
                                 uc_bid_conv = bbos.get("USDCUSDT", {}).get("bid", 1.00045)
                                 eff_bpx_ut = round(tr["buy_px"] * uc_bid_conv, ref_dec_s) if tr["buy_px"] <= 0.99890 else round(tr["buy_px"], ref_dec_s)
-                                # Flip stuck USD1USDC / FDUSDUSDC back to USD1USDT / FDUSDUSDT whenever live USDT Ask >= eff_bpx_ut + 1 tick!
-                                if ref_ut_s in bbos and bbos[ref_ut_s]["ask"] >= eff_bpx_ut + ref_tick_s and (q_bbo["ask"] < tr["sell_px"] - spec["tick"] * 0.5 or bbos[ref_ut_s]["ask"] > (tr["sell_px"] * uc_bid_conv) + ref_tick_s):
+                                # Flip any remaining USD1USDC / FDUSDUSDC order immediately back to USD1USDT / FDUSDUSDT at >= live Ask!
+                                if ref_ut_s in bbos:
                                     cr = api.request("DELETE", "/sapi/v1/margin/order", {"symbol": sym, "orderId": tr["sell_oid"]}, signed=True)
                                     if cr.get("status") == "CANCELED":
                                         ns_px = round(max(eff_bpx_ut + ref_tick_s, bbos[ref_ut_s]["ask"]), ref_dec_s)
@@ -1849,7 +1853,7 @@ def main():
                                             tr["ts"] = loop_ts
                                             still_tranches.append(tr)
                                             continue
-                            # Mechanism 1: Smart +2/+3 -> +1 Tick Profit Step-Down (after 5.0s) + Breakeven Step-Down + Profit-Vault Subsidy Unstick (FDUSD Strictly >= $0.00 Loss!)
+                            # Mechanism 1: Smart +2/+3 -> +1 Tick Profit Step-Down (after 5.0s) + Strictly >= Breakeven Step-Down (ZERO negative step-downs ever!)
                             min_step_gain = 2.50 if sym in ("BTCU", "BTCUSD1") else spec["tick"]
                             step_wait_s = 5.0 if (tr.get("pilot") or (sym in ("USD1USDT", "USDCUSDT") and getattr(api, "_v89_scaled", False))) else 65.0
                             want_step_1tick = (
@@ -1860,29 +1864,15 @@ def main():
                                     or (age_s >= step_wait_s and tr["sell_px"] >= tr["buy_px"] + min_step_gain * 1.8 and q_bbo["ask"] <= tr["buy_px"] + min_step_gain * 1.2)
                                 )
                             )
-                            # Breakeven or Profit-Vault Subsidized Unstick for USD1USDT / USDCUSDT / FDUSDUSDT (Option A: FDUSD steps to live Ask $0.9965!):
+                            # Strictly >= Breakeven ($0.00 loss) Step-Down ONLY (NEVER step down below buy_px!):
                             want_vault_unstick = False
                             vault_target_px = tr["sell_px"]
                             vault_subsidy_need = 0.0
                             if not want_step_1tick and sym in ("USD1USDT", "USDCUSDT", "FDUSDUSDT") and float(o_live.get("executedQty", 0)) == 0 and q_bbo["ask"] < tr["sell_px"] - spec["tick"] * 0.5:
-                                # Option A: Step FDUSDUSDT down to live Ask ($0.9965) immediately to free $750 into USD1USDT (+$0.0750 equity boost over $0.9964 Bid)!
-                                if sym == "FDUSDUSDT":
-                                    want_vault_unstick = True
-                                    vault_target_px = round(q_bbo["ask"], spec["dec"])
-                                    vault_subsidy_need = 0.0
-                                    tr["buy_px"] = min(tr["buy_px"], vault_target_px)
-                                # Case A: Live Ask is >= buy_px (0 breakeven!) and order has waited >= 8s -> step down to breakeven/Ask immediately at $0.00 loss!
-                                elif age_s >= 8.0 and q_bbo["ask"] >= tr["buy_px"] - spec["tick"] * 0.2:
+                                if age_s >= 12.0 and q_bbo["ask"] >= tr["buy_px"] - spec["tick"] * 0.2:
                                     want_vault_unstick = True
                                     vault_target_px = round(max(tr["buy_px"], q_bbo["ask"]), spec["dec"])
                                     vault_subsidy_need = 0.0
-                                # Case B: USD1USDT / USDCUSDT stuck > 10s above Ask -> use unstick_vault_usd to step down to live Ask!
-                                elif age_s >= 10.0 and sym in ("USD1USDT", "USDCUSDT"):
-                                    need_u = max(0.0, (tr["buy_px"] - q_bbo["ask"]) * tr["qty"])
-                                    if need_u <= unstick_vault_usd + 1e-6 and need_u <= 0.0350:
-                                        want_vault_unstick = True
-                                        vault_target_px = round(q_bbo["ask"], spec["dec"])
-                                        vault_subsidy_need = need_u
                             if want_step_1tick or want_vault_unstick:
                                 cr = api.request("DELETE", "/sapi/v1/margin/order", {"symbol": sym, "orderId": tr["sell_oid"], **iso_param}, signed=True)
                                 if cr.get("status") == "CANCELED":
@@ -2420,9 +2410,9 @@ def main():
                     elif "USDCUSDT" in bbos and (bbos["USDCUSDT"]["ask"] < uc_seed_ord[3] - 0.000005 or loop_ts - uc_seed_ord[2] > 4.0):
                         api.request("DELETE", "/sapi/v1/margin/order", {"symbol": "USDCUSDT", "orderId": uc_seed_ord[1]}, signed=True)
                         api._uc_seed_oid = None
-                # Keep ~142 USDC available for 1x$142 USD1USDC 10x-tick direct maker-maker clip; convert excess USDC > 160 to USDT:
-                elif "USDCUSDT" in bbos and free_map["CM_USDC"] >= (6.0 if soft_delev else 160.0) and cm_uc_debt < 1.0 and (soft_delev or not any(t["symbol"] == "USDCUSDT" for t in active_tranches)):
-                    uc_s_mkr = min(250, math.floor(free_map["CM_USDC"] - (0.0 if soft_delev else 145.0)))
+                # Convert any free USDC >= 6 directly to USDT on USDCUSDT:
+                elif "USDCUSDT" in bbos and free_map["CM_USDC"] >= 6.0 and cm_uc_debt < 1.0 and (soft_delev or not any(t["symbol"] == "USDCUSDT" for t in active_tranches)):
+                    uc_s_mkr = min(250, math.floor(free_map["CM_USDC"]))
                     if uc_s_mkr >= 6:
                         uc_ask_now = bbos["USDCUSDT"]["ask"]
                         s_res = api.request("POST", "/sapi/v1/margin/order", {"symbol": "USDCUSDT", "side": "SELL", "type": "LIMIT_MAKER", "quantity": str(uc_s_mkr), "price": f"{uc_ask_now:.5f}"}, signed=True)
@@ -2537,9 +2527,9 @@ def main():
                     ("FDUSDUSDC", False, "CM_USDC",  "CM_FDUSD",   0,                       0, 20.0,   0.0, "STOPPED"),
                     ("USD1U",     False, "CM_U",     "CM_USD1",    0,                       0, 14.0,   0.0, "STOPPED"),
                     ("FDUSDUSDT", False, "CM_USDT",  "CM_FDUSD",   0,                       0, 142.0,  0.0, "STOPPED • 0-LOSS DRAIN"),
-                    ("USD1USDC",  False, "CM_USDC",  "CM_USD1",    1 if allow_buys else 0,  0, 142.0, 250.0, "v11.4 10x-TICK • USD1USDC $142"),
-                    ("USD1USDT",  False, "CM_USDT",  "CM_USD1",   11 if allow_buys else 0,  0, 142.0, 1750.0, "v11.4 14x$142 • USD1 $142"),
-                    ("USDCUSDT",  False, "CM_USDT",  "CM_USDC",    2 if allow_buys else 0,  0, 142.0, 350.0, "v11.4 14x$142 • USDC $142"),
+                    ("USD1USDC",  False, "CM_USDC",  "CM_USD1",    0,                       0, 142.0,  0.0, "STOPPED • PURE USDT"),
+                    ("USD1USDT",  False, "CM_USDT",  "CM_USD1",   12 if allow_buys else 0,  0, 142.0, 1750.0, "v11.4.6 PURE ZERO-LOSS • USD1 $142"),
+                    ("USDCUSDT",  False, "CM_USDT",  "CM_USDC",    2 if allow_buys else 0,  0, 142.0, 350.0, "v11.4.6 PURE ZERO-LOSS • USDC $142"),
                     ("UUSDT",     False, "CM_USDT",  "CM_U",       0,                       0, 14.1,   0.0, "STOPPED"),
                 ):
                     q_bbo = bbos.get(sym_p)
@@ -2550,27 +2540,18 @@ def main():
                     p_tr = [t for t in active_tranches if t["symbol"] == sym_p and t["iso"] == is_iso]
                     is_crypto_u1 = sym_p in ("BTCU", "BTCUSD1", "BNBU", "ETHU", "BNBFDUSD", "SOLFDUSD")
 
-                    # v11.4.2 High-Velocity 14x$142 Pool (Exclude 0-Loss FDUSD waiting orders from the 14-clip cap so 100% of free USDT deploys!):
-                    if sym_p in ("USD1USDT", "USDCUSDT", "USD1USDC") and allow_buys and (not getattr(api, "_s1_cb_tripped", False)):
+                    # v11.4.6 Pure Zero-Loss 14x$142 Pool (12x$142 USD1USDT + 2x$142 USDCUSDT | 0 USD1USDC MTM Drag | 0 Below-Cost Step-Downs):
+                    if sym_p in ("USD1USDT", "USDCUSDT") and allow_buys and (not getattr(api, "_s1_cb_tripped", False)):
                         tot_active_legs = [t for t in active_tranches if t["symbol"] in ("USD1USDT", "USDCUSDT", "USD1USDC") and t["state"] in ("BUY_OPEN", "SELL_OPEN")]
                         tot_deployed_usd = sum(t["qty"] * t["buy_px"] for t in tot_active_legs)
                         rem_2k_budget = max(0.0, 2000.0 - tot_deployed_usd)
-                        if sym_p == "USD1USDC":
-                            # Upgrade 4: Zero-Fee USD1USDC Direct Maker-Maker ($0.0001 tick = 10x larger profit per trade!)
-                            impulse_ok = (
-                                rem_2k_budget >= 25.0
-                                and free_map[f_key] >= 25.0
-                                and not cons_guards.get(sym_p, {}).get("falling", False)
-                                and q_bbo["bidQty"] >= q_bbo["askQty"] * 0.45
-                            )
-                            max_sym_legs = 1
-                        elif sym_p == "USD1USDT":
+                        if sym_p == "USD1USDT":
                             impulse_ok = (
                                 rem_2k_budget >= 25.0
                                 and free_map[f_key] >= 25.0
                                 and not cons_guards.get(sym_p, {}).get("falling", False)
                             )
-                            max_sym_legs = 11
+                            max_sym_legs = 12
                         else:
                             # USDCUSDT (2x$142 fast-turnover clips at #1 Bid):
                             impulse_ok = (
