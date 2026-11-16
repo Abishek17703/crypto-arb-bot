@@ -2712,7 +2712,7 @@ def main():
                         bid_now_b = float(q_b_now.get("bid", 0.0))
                         disloc_gone = (
                             (sym_ts == "FDUSDUSDT" and float(q_b_now.get("bidQty", 0)) < float(q_b_now.get("askQty", 999999)) * 0.90)
-                            or (bid_now_b > t_s["buy_px"] + PAIRS[sym_ts]["tick"] * 0.5)
+                            or (bid_now_b > t_s["buy_px"] + PAIRS[sym_ts]["tick"] * (6.5 if sym_ts == "USD1USDT" else 3.5))
                         )
                         if (loop_ts - float(t_s.get("ts", loop_ts))) >= 180.0 or disloc_gone:
                             cr_b_sc = api.request("DELETE", "/sapi/v1/margin/order", {"symbol": sym_ts, "orderId": t_s["buy_oid"]}, signed=True)
@@ -2754,10 +2754,10 @@ def main():
                     ("USD1U",     False, "CM_U",     "CM_USD1",    0,                       0, 14.0,   0.0, "STOPPED"),
                     ("FDUSDUSDT", False, "CM_USDT",       "CM_FDUSD",      0,                       0,  24.0,   0.0, "STOPPED • 0-LOSS DRAIN"),
                     ("USD1USDC",  False, "CM_USDC",       "CM_USD1",      15 if allow_buys else 0,  0,  24.0, 360.0, "v12.6 10x-TICK • USD1/USDC $24"),
-                    ("USDCUSDT",  True,  "ISO_USDC_USDT", "ISO_USDC_BASE", 16 if allow_buys else 0, 0,  60.0, 990.0, "v12.6 10x ISO • USDC $60"),
-                    ("USD1USDT",  False, "CM_USDT",       "CM_USD1",      88 if allow_buys else 0,  0,  24.0, 2150.0, "v12.6 100x$24 • USD1 $24"),
-                    ("USDCUSDT",  False, "CM_USDT",       "CM_USDC",      15 if allow_buys else 0,  0,  24.0, 360.0, "v12.6 100x$24 • USDC $24"),
                     ("UUSDT",     False, "CM_USDT",       "CM_U",         15 if allow_buys else 0,  0,  24.0, 360.0, "v12.6 10x-TICK • U/USDT $24"),
+                    ("USDCUSDT",  True,  "ISO_USDC_USDT", "ISO_USDC_BASE", 16 if allow_buys else 0, 0,  60.0, 990.0, "v12.6 10x ISO • USDC $60"),
+                    ("USDCUSDT",  False, "CM_USDT",       "CM_USDC",      15 if allow_buys else 0,  0,  24.0, 360.0, "v12.6 100x$24 • USDC $24"),
+                    ("USD1USDT",  False, "CM_USDT",       "CM_USD1",      88 if allow_buys else 0,  0,  24.0, 2150.0, "v12.6 100x$24 • USD1 $24"),
                 ):
                     q_bbo = bbos.get(sym_p)
                     if not q_bbo or q_bbo["bid"] <= 0:
