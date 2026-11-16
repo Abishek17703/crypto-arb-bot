@@ -1855,6 +1855,36 @@ def main():
                                             tr["ts"] = loop_ts
                                             still_tranches.append(tr)
                                             continue
+                            # Mechanism 0 (v11.6): <3ms 0%-Fee Breakeven/Profit IOC Bailout when Bid >= buy_px and Bid wall weakens (prevents 15-min lockups at $0.0000 loss!)
+                            if (not tr["iso"]) and sym in ("USD1USDT", "USDCUSDT", "USD1USDC") and float(o_live.get("executedQty", 0)) == 0 and age_s >= 2.5:
+                                ioc_profit_ok = (q_bbo["bid"] >= tr["buy_px"] + spec["tick"] * 0.8)
+                                ioc_be_bail = (abs(q_bbo["bid"] - tr["buy_px"]) < spec["tick"] * 0.3 and (q_bbo["bidQty"] < 3000.0 or q_bbo["bidQty"] < q_bbo["askQty"] * 0.25 or (age_s >= 12.0 and q_bbo["bidQty"] < q_bbo["askQty"] * 0.65)))
+                                if ioc_profit_ok or ioc_be_bail:
+                                    cr_ioc = api.request("DELETE", "/sapi/v1/margin/order", {"symbol": sym, "orderId": tr["sell_oid"]}, signed=True)
+                                    if cr_ioc.get("status") == "CANCELED":
+                                        rem_ioc = round(math.floor((tr["qty"] - float(cr_ioc.get("executedQty", 0))) / spec["step"] + 1e-9) * spec["step"], 6)
+                                        if rem_ioc * q_bbo["bid"] >= 5.2:
+                                            bpx_ioc_exit = round(max(tr["buy_px"], q_bbo["bid"]), spec["dec"])
+                                            sr_ioc_b = api.request("POST", "/sapi/v1/margin/order", {
+                                                "symbol": sym, "side": "SELL", "type": "LIMIT", "timeInForce": "IOC",
+                                                "quantity": spec["q_fmt"].format(rem_ioc), "price": f"{bpx_ioc_exit:.{spec['dec']}f}"
+                                            }, signed=True)
+                                            ex_ioc_q = float(sr_ioc_b.get("executedQty", 0))
+                                            if ex_ioc_q > 0:
+                                                q_key_ioc = "CM_USDC" if sym == "USD1USDC" else "CM_USDT"
+                                                free_map[q_key_ioc] += ex_ioc_q * bpx_ioc_exit
+                                                pnl_ioc = ex_ioc_q * (bpx_ioc_exit - tr["buy_px"]) * (bbos.get("USDCUSDT", {}).get("bid", 1.0) if sym == "USD1USDC" else 1.0)
+                                                if pnl_ioc > 0:
+                                                    unstick_vault_usd += pnl_ioc
+                                                    session_live_pnl += pnl_ioc
+                                                    api._s1_short_realized = getattr(api, "_s1_short_realized", 0.0) + pnl_ioc
+                                                    api._s1_short_rts = getattr(api, "_s1_short_rts", 0) + 1
+                                                daily_orders_placed += 1
+                                            left_ioc = round(math.floor((rem_ioc - ex_ioc_q) / spec["step"] + 1e-9) * spec["step"], 6)
+                                            if left_ioc * q_bbo["ask"] >= 5.5:
+                                                b_key_ioc = "CM_USDC" if sym == "USDCUSDT" else "CM_USD1"
+                                                free_map[b_key_ioc] += left_ioc
+                                            continue
                             # Mechanism 1: Smart +2/+3 -> +1 Tick Profit Step-Down (after 5.0s) + Breakeven Step-Down + Profit-Vault Subsidy Unstick (FDUSD Strictly >= $0.00 Loss!)
                             min_step_gain = 2.50 if sym in ("BTCU", "BTCUSD1") else spec["tick"]
                             step_wait_s = 5.0 if (tr.get("pilot") or (sym in ("USD1USDT", "USDCUSDT") and getattr(api, "_v89_scaled", False))) else 65.0
@@ -2597,6 +2627,55 @@ def main():
                                 and q_bbo["bidQty"] >= q_bbo["askQty"] * 0.25
                             )
                         while len(p_tr) < max_sym_legs and len(tot_active_legs) < 14 and rem_2k_budget >= 25.0 and free_map[f_key] >= 25.0 and impulse_ok:
+                            # v11.6 Last-Look 0%-Fee IOC Ask Sniping + Triangular Dislocation Sniping (skips 16,000+ Bid queue when Ask < 800 is about to wipe out!):
+                            can_snipe_ask = (
+                                sym_p not in getattr(api, "_disabled_fee_keys", set())
+                                and loop_ts - getattr(api, "_last_ioc_snipe_ts", 0.0) >= 1.5
+                                and (
+                                    (sym_p == "USD1USDT" and q_bbo["askQty"] <= 900.0 and q_bbo["bidQty"] >= max(10000.0, q_bbo["askQty"] * 12.0))
+                                    or (sym_p == "USD1USDT" and "USD1USDC" in bbos and "USDCUSDT" in bbos and (bbos["USD1USDC"]["bid"] * bbos["USDCUSDT"]["bid"]) >= q_bbo["ask"] + spec["tick"])
+                                    or (sym_p == "USD1USDC" and "USD1USDT" in bbos and "USDCUSDT" in bbos and bbos["USD1USDT"]["bid"] >= (q_bbo["ask"] * bbos["USDCUSDT"]["ask"]) + 0.000015)
+                                )
+                            )
+                            if can_snipe_ask:
+                                api._last_ioc_snipe_ts = loop_ts
+                                snipe_px = round(q_bbo["ask"], spec["dec"])
+                                clip_cap_s = 133.0 if sym_p == "USD1USDC" else 140.0
+                                pl_snipe_u = min(clip_cap_s, rem_2k_budget, free_map[f_key] * 0.99)
+                                bq_snipe = round(math.floor((pl_snipe_u / snipe_px) / spec["step"] + 1e-9) * spec["step"], 6)
+                                if bq_snipe * snipe_px >= 15.0:
+                                    br_sn = api.request("POST", "/sapi/v1/margin/order", {
+                                        "symbol": sym_p, "side": "BUY", "type": "LIMIT", "timeInForce": "IOC",
+                                        "quantity": spec["q_fmt"].format(bq_snipe), "price": f"{snipe_px:.{spec['dec']}f}"
+                                    }, signed=True)
+                                    ex_sn = float(br_sn.get("executedQty", 0))
+                                    if ex_sn >= 6.0:
+                                        spent_sn = ex_sn * snipe_px
+                                        free_map[f_key] -= spent_sn
+                                        rem_2k_budget = max(0.0, rem_2k_budget - spent_sn)
+                                        daily_orders_placed += 1
+                                        spx_sn = round(snipe_px + spec["tick"], spec["dec"])
+                                        sr_sn = api.request("POST", "/sapi/v1/margin/order", {
+                                            "symbol": sym_p, "side": "SELL", "type": "LIMIT_MAKER",
+                                            "quantity": spec["q_fmt"].format(ex_sn), "price": f"{spx_sn:.{spec['dec']}f}"
+                                        }, signed=True)
+                                        if "orderId" in sr_sn:
+                                            nt_sn = {
+                                                "tid": f"SNIPE_{sym_p[:4]}{len(p_tr)+1}", "symbol": sym_p, "iso": False,
+                                                "lbl": f"v11.6 IOC-SNIPE • {sym_p[:4]} ${int(ex_sn)}",
+                                                "qty": ex_sn, "buy_px": snipe_px, "sell_px": spx_sn, "buy_oid": "SNIPE", "sell_oid": sr_sn["orderId"],
+                                                "state": "SELL_OPEN", "ts": loop_ts, "pilot": True, "borrowed": False
+                                            }
+                                            active_tranches.append(nt_sn)
+                                            p_tr.append(nt_sn)
+                                            tot_active_legs.append(nt_sn)
+                                            s1_short_list.append(nt_sn)
+                                            continue
+                                        else:
+                                            free_map[b_key] += ex_sn
+                                            api._last_buy_map = getattr(api, "_last_buy_map", {})
+                                            api._last_buy_map[sym_p] = snipe_px
+                                            break
                             # Pack USD1USDT strictly into Top-3 Ticks (Bid, Bid-1, Bid-2: up to 4 clips/tick across 3 ticks = 10 clips):
                             bpx_entry = None
                             pass_caps = (1, 2, 3, 4) if sym_p == "USD1USDT" else ((1, 2) if sym_p == "USD1USDC" else (1,))
@@ -2855,7 +2934,7 @@ def main():
                 ethu_net_lbl = f"ETHU DN ${ethu_net_v:+.4f} ({int(getattr(api, '_ethu_rts', 0))} RTs)" if "ethu_net_v" in locals() else "ETHU DN $0.0000"
                 s1_rts_tot = int(getattr(api, "_s1_short_rts", 0)) + int(getattr(api, "_btcu_rts", 0))
                 s1_sc_tot = int(getattr(api, "_s1_short_scratches", 0))
-                s1_st_lbl = ("PILOT CB: " + getattr(api, "_s1_cb_reason", "")) if getattr(api, "_s1_cb_tripped", False) else f"v11.5 MAX-VELOCITY 70/20/10 (70% USD1 TOP-3 + 20% USD1USDC 10x + 10% USDC) • 1h {'+$' if live_hourly_rate_usd>=0 else '-$'}{abs(live_hourly_rate_usd):.4f}/hr"
+                s1_st_lbl = ("PILOT CB: " + getattr(api, "_s1_cb_reason", "")) if getattr(api, "_s1_cb_tripped", False) else f"v11.6 0%-FEE IOC BAILOUT + LAST-LOOK SNIPE (70% USD1 + 20% USD1USDC + 10% USDC) • 1h {'+$' if live_hourly_rate_usd>=0 else '-$'}{abs(live_hourly_rate_usd):.4f}/hr"
                 payload = {
                     "ts": int(loop_ts * 1000),
                     "startEquityUsd": start_equity_usd,
@@ -2895,7 +2974,7 @@ def main():
                             "active": not bool(getattr(api, "_s1_cb_tripped", False)),
                             "cbTripped": bool(getattr(api, "_s1_cb_tripped", False)),
                             "cbReason": getattr(api, "_s1_cb_reason", ""),
-                            "strategy": "v11.5_MAX_VELOCITY_70USD1_20USD1USDC_10USDC",
+                            "strategy": "v11.6_IOC_BREAKEVEN_BAILOUT_AND_LAST_LOOK_SNIPE",
                             "budgetUsd": 2000.0,
                             "idleReserveUsd": 0.0,
                             "allocStr": "$2000 (70% USD1 Top-3 [10x$140] + 20% USD1USDC [3x$133] + 10% USDC [1x$200])",
