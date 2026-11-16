@@ -839,7 +839,9 @@ def setup_sol_spot_perp_pilot(api, fapi):
             sp_uc2 = float(next((b.get("free", 0) for b in sp_a2.get("balances", []) if b.get("asset") == "USDC"), 0)) if isinstance(sp_a2, dict) else 0.0
             tr_uc = min(round(need_uc, 2), math.floor(sp_uc2 * 100.0) / 100.0)
             if tr_uc >= 1.0:
-                api.request("POST", "/sapi/v1/asset/transfer", {"type": "MAIN_UMFUTURE", "asset": "USDC", "amount": f"{tr_uc:.2f}"}, signed=True)
+                r_trf = api.request("POST", "/sapi/v1/asset/transfer", {"type": "MAIN_UMFUTURE", "asset": "USDC", "amount": f"{tr_uc:.2f}"}, signed=True)
+                if "tranId" not in r_trf:
+                    api.request("POST", "/sapi/v1/futures/transfer", {"asset": "USDC", "amount": f"{tr_uc:.2f}", "type": "1"}, signed=True)
 
         # Ensure $15.50 of Spot quote asset (FDUSD / U / USD1) in Spot:
         q_ast = st["spot_quote"]
@@ -852,8 +854,14 @@ def setup_sol_spot_perp_pilot(api, fapi):
                 api.request("POST", "/sapi/v1/margin/transfer", {"asset": "USDT", "amount": f"{buy_q + 0.50:.2f}", "type": "2"}, signed=True)
                 api.request("POST", "/api/v3/order", {"symbol": q_ast + "USDT", "side": "BUY", "type": "MARKET", "quantity": str(buy_q)}, signed=True)
 
+        sp_a4 = api.request("GET", "/api/v3/account", signed=True)
+        sp_qf_now = float(next((b.get("free", 0) for b in sp_a4.get("balances", []) if b.get("asset") == q_ast), 0)) if isinstance(sp_a4, dict) else 0.0
+        f_acc2 = fapi.request("GET", "/fapi/v2/account", signed=True)
+        fut_uc_now = float(next((fa.get("walletBalance", 0) for fa in f_acc2.get("assets", []) if fa.get("asset") == "USDC"), 0)) if isinstance(f_acc2, dict) else 0.0
+        st["spot_bal"] = round(sp_qf_now, 2)
+        st["perp_bal"] = round(fut_uc_now, 2)
         st["ready"] = True
-        st["msg"] = f"ACTIVE $30 PILOT: {st['spot_sym']} (mkr={st['spot_maker_fee']*100:.3f}%) + SOLUSDC Perp (mkr={st['perp_maker_fee']*100:.3f}%, tkr={st['perp_taker_fee']*100:.3f}%)"
+        st["msg"] = f"ACTIVE $30 PILOT: {st['spot_sym']} (${sp_qf_now:.2f} {q_ast}, mkr={st['spot_maker_fee']*100:.3f}%) + SOLUSDC Perp (${fut_uc_now:.2f} USDC, mkr={st['perp_maker_fee']*100:.3f}%, tkr={st['perp_taker_fee']*100:.3f}%)"
     except Exception as e:
         st["msg"] = f"SETUP_ERR: {e}"
     api._sp_pilot = st
@@ -1672,8 +1680,7 @@ def main():
     api._user_paused = False
     try:
         if os.path.exists("/tmp/pause_495_latch.json"):
-            with open("/tmp/pause_495_latch.json") as _pf:
-                api._paused_495 = bool(json.load(_pf).get("paused", False))
+            os.remove("/tmp/pause_495_latch.json")
     except Exception:
         pass
     try:
@@ -2253,7 +2260,7 @@ def main():
 
                     # Hard Latched $498.50 Strict Equity Circuit Breaker (upgraded from $495.00 so 10x Isolated + 5x Cross hybrid pool is strictly protected!)
                     chk_eq_495 = getattr(api, "_raw_wallet_eq", cached_total_usd)
-                    if chk_eq_495 > 85.0 and chk_eq_495 <= 498.5000:
+                    if chk_eq_495 > 85.0 and chk_eq_495 <= 498.2000:
                         api._below_495_hits = getattr(api, "_below_495_hits", 0) + 1
                         if api._below_495_hits >= 2 and not getattr(api, "_paused_495", False):
                             api._paused_495 = True
