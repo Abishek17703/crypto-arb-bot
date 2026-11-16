@@ -1914,6 +1914,33 @@ def main():
                                             tr["ts"] = loop_ts
                                             still_tranches.append(tr)
                                             continue
+                            # Mechanism 0 (v12.1): <3ms 0%-Fee Breakeven/Profit IOC Bailout when Bid >= buy_px and Bid wall weakens (prevents lockups at $0.0000 loss!)
+                            if (not tr["iso"]) and sym in ("USD1USDT", "USDCUSDT") and float(o_live.get("executedQty", 0)) == 0 and age_s >= 2.5:
+                                ioc_profit_ok = (q_bbo["bid"] >= tr["buy_px"] + spec["tick"] * 0.8)
+                                ioc_be_bail = (abs(q_bbo["bid"] - tr["buy_px"]) < spec["tick"] * 0.3 and (q_bbo["bidQty"] < 3000.0 or q_bbo["bidQty"] < q_bbo["askQty"] * 0.25 or (age_s >= 12.0 and q_bbo["bidQty"] < q_bbo["askQty"] * 0.65)))
+                                if ioc_profit_ok or ioc_be_bail:
+                                    cr_ioc = api.request("DELETE", "/sapi/v1/margin/order", {"symbol": sym, "orderId": tr["sell_oid"]}, signed=True)
+                                    if cr_ioc.get("status") == "CANCELED":
+                                        rem_ioc = round(math.floor((tr["qty"] - float(cr_ioc.get("executedQty", 0))) / spec["step"] + 1e-9) * spec["step"], 6)
+                                        if rem_ioc * q_bbo["bid"] >= 5.2:
+                                            bpx_ioc_exit = round(max(tr["buy_px"], q_bbo["bid"]), spec["dec"])
+                                            sr_ioc_b = api.request("POST", "/sapi/v1/margin/order", {
+                                                "symbol": sym, "side": "SELL", "type": "LIMIT", "timeInForce": "IOC",
+                                                "quantity": spec["q_fmt"].format(rem_ioc), "price": f"{bpx_ioc_exit:.{spec['dec']}f}"
+                                            }, signed=True)
+                                            ex_ioc_q = float(sr_ioc_b.get("executedQty", 0))
+                                            if ex_ioc_q > 0:
+                                                free_map["CM_USDT"] += ex_ioc_q * bpx_ioc_exit
+                                                pnl_ioc = ex_ioc_q * (bpx_ioc_exit - tr["buy_px"])
+                                                if pnl_ioc > 0:
+                                                    session_live_pnl += pnl_ioc
+                                                    api._s1_short_realized = getattr(api, "_s1_short_realized", 0.0) + pnl_ioc
+                                                    api._s1_short_rts = getattr(api, "_s1_short_rts", 0) + 1
+                                                daily_orders_placed += 1
+                                            left_ioc = round(math.floor((rem_ioc - ex_ioc_q) / spec["step"] + 1e-9) * spec["step"], 6)
+                                            if left_ioc * q_bbo["ask"] >= 5.5:
+                                                free_map["CM_USDC" if sym == "USDCUSDT" else "CM_USD1"] += left_ioc
+                                            continue
                             # Mechanism 1: Smart +2/+3 -> +1 Tick Profit Step-Down (after 5.0s) + Strictly >= Breakeven Step-Down (ZERO negative step-downs ever!)
                             min_step_gain = 2.50 if sym in ("BTCU", "BTCUSD1") else spec["tick"]
                             step_wait_s = 5.0 if (tr.get("pilot") or (sym in ("USD1USDT", "USDCUSDT") and getattr(api, "_v89_scaled", False))) else 65.0
@@ -2640,11 +2667,58 @@ def main():
                                 )
                                 max_sym_legs = 3
                         while len(p_tr) < max_sym_legs and rem_2k_budget >= 25.0 and free_map[f_key] >= 25.0 and impulse_ok:
-                            # Stagger across top ticks (up to 2 clips/tick on 10x ISO USDCUSDT and 5x CM USD1USDT):
+                            # v12.1 Last-Look 0%-Fee IOC Ask Sniping + Bid+1 Spread Stepping (skips Bid queue when Ask <= 1200 is about to wipe out!):
+                            can_snipe_ask = (
+                                (not is_iso)
+                                and sym_p not in getattr(api, "_disabled_fee_keys", set())
+                                and loop_ts - getattr(api, "_last_ioc_snipe_ts", 0.0) >= 1.5
+                                and sym_p == "USD1USDT"
+                                and q_bbo["askQty"] <= 1200.0
+                                and q_bbo["bidQty"] >= max(10000.0, q_bbo["askQty"] * 10.0)
+                            )
+                            if can_snipe_ask:
+                                api._last_ioc_snipe_ts = loop_ts
+                                snipe_px = round(q_bbo["ask"], spec["dec"])
+                                pl_snipe_u = min(clip_sz_u, rem_2k_budget, free_map[f_key] * 0.99)
+                                bq_snipe = round(math.floor((pl_snipe_u / snipe_px) / spec["step"] + 1e-9) * spec["step"], 6)
+                                if bq_snipe * snipe_px >= 15.0:
+                                    br_sn = api.request("POST", "/sapi/v1/margin/order", {
+                                        "symbol": sym_p, "side": "BUY", "type": "LIMIT", "timeInForce": "IOC",
+                                        "quantity": spec["q_fmt"].format(bq_snipe), "price": f"{snipe_px:.{spec['dec']}f}"
+                                    }, signed=True)
+                                    ex_sn = float(br_sn.get("executedQty", 0))
+                                    if ex_sn >= 6.0:
+                                        spent_sn = ex_sn * snipe_px
+                                        free_map[f_key] -= spent_sn
+                                        rem_2k_budget = max(0.0, rem_2k_budget - spent_sn)
+                                        daily_orders_placed += 1
+                                        spx_sn = round(snipe_px + spec["tick"], spec["dec"])
+                                        sr_sn = api.request("POST", "/sapi/v1/margin/order", {
+                                            "symbol": sym_p, "side": "SELL", "type": "LIMIT_MAKER",
+                                            "quantity": spec["q_fmt"].format(ex_sn), "price": f"{spx_sn:.{spec['dec']}f}"
+                                        }, signed=True)
+                                        if "orderId" in sr_sn:
+                                            nt_sn = {
+                                                "tid": f"SNIPE_{sym_p[:4]}{len(p_tr)+1}", "symbol": sym_p, "iso": False,
+                                                "lbl": f"v12.1 IOC-SNIPE • {sym_p[:4]} ${int(ex_sn)}",
+                                                "qty": ex_sn, "buy_px": snipe_px, "sell_px": spx_sn, "buy_oid": "SNIPE", "sell_oid": sr_sn["orderId"],
+                                                "state": "SELL_OPEN", "ts": loop_ts, "pilot": True, "borrowed": False
+                                            }
+                                            active_tranches.append(nt_sn)
+                                            p_tr.append(nt_sn)
+                                            s1_short_list.append(nt_sn)
+                                            continue
+                                        else:
+                                            free_map[b_key] += ex_sn
+                                            api._last_buy_map = getattr(api, "_last_buy_map", {})
+                                            api._last_buy_map[sym_p] = snipe_px
+                                            break
+                            # Stagger across top ticks (max 1-2 clips/tick; step inside 2-tick spread to Bid+1 for instant #1 spot):
+                            top_bpx_ref = round(q_bbo["bid"] + spec["tick"], spec["dec"]) if (q_bbo["ask"] - q_bbo["bid"]) >= spec["tick"] * 1.8 else round(q_bbo["bid"], spec["dec"])
                             bpx_entry = None
                             for _cap_pass in (1, 2 if (sym_p == "USD1USDT" or is_iso) else 1):
                                 for _st_lvl in range(6 if sym_p == "USD1USDT" else 2):
-                                    cand_bpx = round(q_bbo["bid"] - spec["tick"] * _st_lvl, spec["dec"])
+                                    cand_bpx = round(top_bpx_ref - spec["tick"] * _st_lvl, spec["dec"])
                                     same_tick_cnt = sum(1 for tx in p_tr if abs((tx["buy_px"] if tx["state"] == "BUY_OPEN" else (tx["sell_px"] - spec["tick"])) - cand_bpx) < spec["tick"] * 0.3)
                                     if same_tick_cnt < _cap_pass:
                                         bpx_entry = cand_bpx
