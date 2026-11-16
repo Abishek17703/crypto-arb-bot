@@ -583,15 +583,21 @@ def auto_compound_borrow(api, force_repay_all=False):
                 if iso_net_u < 95.0:
                     need_seed = round(100.0 - iso_net_u, 2)
                     if need_seed >= 5.0:
-                        # Repay excess CM USDT debt first so maxTransferable >= $100:
-                        cm_fv = float(next((a.get("free", 0) for a in cm_acc.get("userAssets", []) if a.get("asset") == "USDT"), 0))
-                        if ut_borrowed > 800.0 and cm_fv >= 105.0:
-                            rep_amt = min(cm_fv - 102.0, ut_borrowed - 800.0)
+                        # Repay CM USDT debt down to <= $200 (canceling open CM BUY orders if needed) so marginLevel > 3.0 and maxTransferable >= $100:
+                        if ut_borrowed > 200.0:
+                            _oc_u = api.request("GET", "/sapi/v1/margin/openOrders", signed=True)
+                            if isinstance(_oc_u, list):
+                                for _ou in _oc_u:
+                                    if _ou.get("side") == "BUY":
+                                        api.request("DELETE", "/sapi/v1/margin/order", {"symbol": _ou["symbol"], "orderId": _ou["orderId"]}, signed=True)
+                            cm_acc_r = api.request("GET", "/sapi/v1/margin/account", signed=True)
+                            cm_fv = float(next((a.get("free", 0) for a in cm_acc_r.get("userAssets", []) if a.get("asset") == "USDT"), 0))
+                            rep_amt = min(cm_fv - 102.0, ut_borrowed - 150.0)
                             if rep_amt >= 5.0:
                                 api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "USDT", "isIsolated": "FALSE", "amount": f"{rep_amt:.2f}", "type": "REPAY"}, signed=True)
                                 ut_borrowed -= rep_amt
                         mx_tr_r = api.request("GET", "/sapi/v1/margin/maxTransferable", {"asset": "USDT"}, signed=True)
-                        can_tr_u = min(need_seed, float(mx_tr_r.get("amount", need_seed)) * 0.99) if isinstance(mx_tr_r, dict) else need_seed
+                        can_tr_u = min(need_seed, float(mx_tr_r.get("amount", need_seed)) * 0.98) if isinstance(mx_tr_r, dict) else need_seed
                         if can_tr_u >= 5.0:
                             api.request("POST", "/sapi/v1/margin/transfer", {"asset": "USDT", "amount": f"{can_tr_u:.2f}", "type": "2"}, signed=True)
                             api.request("POST", "/sapi/v1/margin/isolated/transfer", {"asset": "USDT", "symbol": "USDCUSDT", "transFrom": "SPOT", "transTo": "ISOLATED_MARGIN", "amount": f"{can_tr_u:.2f}"}, signed=True)
