@@ -2602,7 +2602,8 @@ def main():
                                 break
 
                     # Immediately post maker SELL for any free non-hedged base inventory (keep at least 28 USDC reserved for FDUSDUSDC latency arb when edge >= +0.70 bps!)
-                    while sym_p not in ("FDUSDUSDC", "USD1U", "UUSDT") and (free_map[b_key] - (28.5 if (sym_p == "USDCUSDT" and fd_tri_edge_ok) else 0.0)) * q_bbo["ask"] >= 5.6 and len(p_tr) < (max_tr + 2):
+                    max_inv_sells = 6 if sym_p == "FDUSDUSDT" else (max_tr + 2)
+                    while sym_p not in ("FDUSDUSDC", "USD1U", "UUSDT") and (free_map[b_key] - (28.5 if (sym_p == "USDCUSDT" and fd_tri_edge_ok) else 0.0)) * q_bbo["ask"] >= 5.6 and len(p_tr) < max_inv_sells:
                         if (sym_p == "USD1USDT" and cm_u1_debt >= 1.0) or (sym_p == "USDCUSDT" and cm_uc_debt >= 1.0):
                             break
                         max_base_s = max(0.0, free_map[b_key] - (28.5 if (sym_p == "USDCUSDT" and fd_tri_edge_ok) else 0.0))
@@ -2615,16 +2616,16 @@ def main():
                         used_spxs = [round(t["sell_px"], spec["dec"]) for t in active_tranches if t["symbol"] == sym_p and t["state"] == "SELL_OPEN"]
                         pmap = getattr(api, "_partial_buy_map", {}).get(sym_p, (0.0, 0.0))
                         lpx = getattr(api, "_last_buy_map", {}).get(sym_p, 0.0)
-                        p_flr = max(pmap[0] if (loop_ts - pmap[1] < 60.0) else 0.0, lpx)
+                        p_flr = 0.9966 if sym_p == "FDUSDUSDT" else max(pmap[0] if (loop_ts - pmap[1] < 60.0) else 0.0, lpx)
                         if sym_p == "ETHU":
                             # Newly borrowed 1:1 hedged ETH tranche converts at live Ask (independent of older tranche's cost basis)!
                             p_flr = q_bbo["bid"]
                         elif is_crypto_u1 and p_flr <= 0:
                             p_flr = q_bbo["bid"]
-                        min_gain_flr = 2.50 if (sym_p in ("BTCU", "BTCUSD1") and p_flr > 0) else (round(p_flr * 0.00005, spec["dec"]) if (is_crypto_u1 and p_flr > 0) else spec["tick"])
-                        min_spx = round(max(q_bbo["ask"], (p_flr + max(spec["tick"], min_gain_flr)) if p_flr > 0 else q_bbo["ask"]), spec["dec"])
+                        min_gain_flr = 0.0 if sym_p == "FDUSDUSDT" else (2.50 if (sym_p in ("BTCU", "BTCUSD1") and p_flr > 0) else (round(p_flr * 0.00005, spec["dec"]) if (is_crypto_u1 and p_flr > 0) else spec["tick"]))
+                        min_spx = round(max(q_bbo["ask"], (p_flr + min_gain_flr) if p_flr > 0 else q_bbo["ask"]), spec["dec"])
                         spx = min_spx
-                        s_cap = 1
+                        s_cap = 6 if sym_p == "FDUSDUSDT" else 1
                         for _slvl in range(1):
                             if sum(1 for sx in used_spxs if abs(sx - spx) < spec["tick"] * 0.3) >= s_cap:
                                 spx = round(spx + spec["tick"], spec["dec"])
