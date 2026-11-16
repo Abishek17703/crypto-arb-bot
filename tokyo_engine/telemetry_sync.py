@@ -562,17 +562,45 @@ def auto_compound_borrow(api, force_repay_all=False):
                 ut_borrowed = bv_u
                 if force_repay_all and bv_u > 0.01 and fv_u >= 0.05:
                     api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "USDT", "isIsolated": "FALSE", "amount": f"{min(fv_u, bv_u):.4f}", "type": "REPAY"}, signed=True)
-                elif not force_repay_all and bv_u > 1505.0 and fv_u >= 5.0:
-                    rep_ex = min(fv_u, bv_u - 1502.0)
-                    if rep_ex >= 2.0:
-                        api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "USDT", "isIsolated": "FALSE", "amount": f"{rep_ex:.2f}", "type": "REPAY"}, signed=True)
                 continue
             if bv_u > 0.0001 and fv_u >= (0.0001 if ast_u == "ETH" else 0.05):
                 api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": ast_u, "isIsolated": "FALSE", "amount": f"{min(fv_u, bv_u):.4f}", "type": "REPAY"}, signed=True)
-        if not force_repay_all and ut_borrowed < 1495.0:
-            need_ut_loan = round(1502.0 - ut_borrowed, 2)
-            if need_ut_loan >= 5.0:
-                api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "USDT", "isIsolated": "FALSE", "amount": f"{need_ut_loan:.2f}", "type": "BORROW"}, signed=True)
+        if not force_repay_all:
+            # v12.0 10x Isolated + 5x Cross Hybrid Pool ($2,000 5x CM + $1,000 10x ISO USDCUSDT = $3,000 Total Power):
+            # 1. Ensure $100 USDT is seeded into USDCUSDT 10x Isolated Margin and borrow $900 USDT (10x = $1,000 pool):
+            iso_r = api.request("GET", "/sapi/v1/margin/isolated/account", {"symbols": "USDCUSDT"}, signed=True)
+            iso_assets = iso_r.get("assets", []) if isinstance(iso_r, dict) else []
+            if not iso_assets:
+                api.request("POST", "/sapi/v1/margin/isolated/account", {"symbol": "USDCUSDT"}, signed=True)
+                iso_r = api.request("GET", "/sapi/v1/margin/isolated/account", {"symbols": "USDCUSDT"}, signed=True)
+                iso_assets = iso_r.get("assets", []) if isinstance(iso_r, dict) else []
+            if iso_assets:
+                ia_uc = iso_assets[0]
+                qa_uc = ia_uc.get("quoteAsset", {})
+                ba_uc = ia_uc.get("baseAsset", {})
+                iso_net_u = float(qa_uc.get("netAsset", 0)) + float(ba_uc.get("netAsset", 0))
+                iso_bor_u = float(qa_uc.get("borrowed", 0)) + float(qa_uc.get("interest", 0))
+                if iso_net_u < 95.0:
+                    need_seed = round(100.0 - iso_net_u, 2)
+                    if need_seed >= 5.0:
+                        # Repay excess CM USDT debt if needed so maxTransferable covers the $100 seed transfer to Spot -> Isolated USDCUSDT:
+                        cm_fv = float(next((a.get("free", 0) for a in cm_acc.get("userAssets", []) if a.get("asset") == "USDT"), 0))
+                        if ut_borrowed > 1400.0 and cm_fv >= 105.0:
+                            api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "USDT", "isIsolated": "FALSE", "amount": f"{min(cm_fv - 102.0, ut_borrowed - 1400.0):.2f}", "type": "REPAY"}, signed=True)
+                        api.request("POST", "/sapi/v1/margin/transfer", {"asset": "USDT", "amount": f"{need_seed:.2f}", "type": "2"}, signed=True)
+                        api.request("POST", "/sapi/v1/margin/isolated/transfer", {"asset": "USDT", "symbol": "USDCUSDT", "transFrom": "SPOT", "transTo": "ISOLATED_MARGIN", "amount": f"{need_seed:.2f}"}, signed=True)
+                        iso_net_u += need_seed
+                if iso_net_u >= 90.0 and iso_bor_u < 880.0:
+                    mx_b = api.request("GET", "/sapi/v1/margin/maxBorrowable", {"asset": "USDT", "isolatedSymbol": "USDCUSDT"}, signed=True)
+                    can_b = min(round(890.0 - iso_bor_u, 2), float(mx_b.get("amount", 0)) * 0.96) if isinstance(mx_b, dict) else 0.0
+                    if can_b >= 10.0:
+                        api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "USDT", "isIsolated": "TRUE", "symbol": "USDCUSDT", "amount": f"{can_b:.2f}", "type": "BORROW"}, signed=True)
+            # 2. Maintain $1,580 Cross-Margin USDT loan on remaining ~$399 CM cash ($1,980 5x CM pool + $1,000 10x ISO pool = $2,980 total working capital!):
+            if ut_borrowed < 1570.0:
+                mx_cm_b = api.request("GET", "/sapi/v1/margin/maxBorrowable", {"asset": "USDT"}, signed=True)
+                can_cm_b = min(round(1580.0 - ut_borrowed, 2), float(mx_cm_b.get("amount", 0)) * 0.95) if isinstance(mx_cm_b, dict) else 0.0
+                if can_cm_b >= 5.0:
+                    api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "USDT", "isIsolated": "FALSE", "amount": f"{can_cm_b:.2f}", "type": "BORROW"}, signed=True)
     except Exception:
         pass
 
@@ -1322,7 +1350,13 @@ def main():
                 if not isinstance(_all_cm, list):
                     time.sleep(0.05)
                     continue
-                cached_open_orders = [o for o in _all_cm if o.get("symbol") in PAIRS]
+                _all_iso_uc = api.request("GET", "/sapi/v1/margin/openOrders", {"symbol": "USDCUSDT", "isIsolated": "TRUE"}, signed=True)
+                if isinstance(_all_iso_uc, list):
+                    for _io in _all_iso_uc:
+                        _io["isIsolated"] = True
+                else:
+                    _all_iso_uc = []
+                cached_open_orders = [o for o in _all_cm if o.get("symbol") in PAIRS] + _all_iso_uc
 
                 # Orphan Adoption Self-Heal every 8.0s: adopt any live open order missing from active_tranches!
                 if not getattr(api, "_paused_495", False) and not getattr(api, "_user_paused", False) and loop_ts - getattr(api, "_last_orphan_heal", 0.0) >= 8.0:
@@ -1554,9 +1588,9 @@ def main():
                             equity_changes[lbl_w] = true_delta
                             equity_changes_pct[lbl_w] = round((true_delta / max(1.0, ref_eq_w)) * 100.0, 4)
 
-                    # Hard Latched $495.00 Equity Circuit Breaker (checks TRUE raw wallet equity so staircase display never masks real $495 stop!)
+                    # Hard Latched $498.50 Strict Equity Circuit Breaker (upgraded from $495.00 so 10x Isolated + 5x Cross hybrid pool is strictly protected!)
                     chk_eq_495 = getattr(api, "_raw_wallet_eq", cached_total_usd)
-                    if chk_eq_495 > 85.0 and chk_eq_495 <= 495.0000:
+                    if chk_eq_495 > 85.0 and chk_eq_495 <= 498.5000:
                         api._below_495_hits = getattr(api, "_below_495_hits", 0) + 1
                         if api._below_495_hits >= 2 and not getattr(api, "_paused_495", False):
                             api._paused_495 = True
@@ -1568,7 +1602,7 @@ def main():
                             halt_all_orders_and_repay(api)
                             active_tranches = []
                             cached_open_orders = []
-                    elif chk_eq_495 > 495.0000:
+                    elif chk_eq_495 > 498.5000:
                         api._below_495_hits = 0
 
             # Check remote S3 dashboard pause control (pause-control.json) every 2.0s so dashboard red PAUSE button stops trading immediately!
@@ -2528,11 +2562,12 @@ def main():
                     ("ETHU",      False, "CM_U",     "CM_ETH",     0,                       0, 30.0,   0.0, "STOPPED"),
                     ("FDUSDUSDC", False, "CM_USDC",  "CM_FDUSD",   0,                       0, 20.0,   0.0, "STOPPED"),
                     ("USD1U",     False, "CM_U",     "CM_USD1",    0,                       0, 14.0,   0.0, "STOPPED"),
-                    ("FDUSDUSDT", False, "CM_USDT",  "CM_FDUSD",   0,                       0, 142.0,  0.0, "STOPPED • 0-LOSS DRAIN"),
-                    ("USD1USDC",  False, "CM_USDC",  "CM_USD1",    0,                       0, 142.0,  0.0, "STOPPED • PURE USDT"),
-                    ("USD1USDT",  False, "CM_USDT",  "CM_USD1",   12 if allow_buys else 0,  0, 142.0, 1750.0, "v11.4.6 PURE ZERO-LOSS • USD1 $142"),
-                    ("USDCUSDT",  False, "CM_USDT",  "CM_USDC",    2 if allow_buys else 0,  0, 142.0, 350.0, "v11.4.6 PURE ZERO-LOSS • USDC $142"),
-                    ("UUSDT",     False, "CM_USDT",  "CM_U",       0,                       0, 14.1,   0.0, "STOPPED"),
+                    ("FDUSDUSDT", False, "CM_USDT",       "CM_FDUSD",      0,                       0, 142.0,  0.0, "STOPPED • 0-LOSS DRAIN"),
+                    ("USD1USDC",  False, "CM_USDC",       "CM_USD1",       0,                       0, 142.0,  0.0, "STOPPED • PURE USDT"),
+                    ("USDCUSDT",  True,  "ISO_USDC_USDT", "ISO_USDC_BASE", 4 if allow_buys else 0,  0, 245.0, 990.0, "v12.0 10x ISO • USDC $245"),
+                    ("USD1USDT",  False, "CM_USDT",       "CM_USD1",      12 if allow_buys else 0,  0, 142.0, 1750.0, "v12.0 5x CM • USD1 $142"),
+                    ("USDCUSDT",  False, "CM_USDT",       "CM_USDC",       2 if allow_buys else 0,  0, 142.0, 350.0, "v12.0 5x CM • USDC $142"),
+                    ("UUSDT",     False, "CM_USDT",       "CM_U",          0,                       0, 14.1,   0.0, "STOPPED"),
                 ):
                     q_bbo = bbos.get(sym_p)
                     if not q_bbo or q_bbo["bid"] <= 0:
@@ -2542,31 +2577,46 @@ def main():
                     p_tr = [t for t in active_tranches if t["symbol"] == sym_p and t["iso"] == is_iso]
                     is_crypto_u1 = sym_p in ("BTCU", "BTCUSD1", "BNBU", "ETHU", "BNBFDUSD", "SOLFDUSD")
 
-                    # v11.4.6 Pure Zero-Loss 14x$142 Pool (12x$142 USD1USDT + 2x$142 USDCUSDT | 0 USD1USDC MTM Drag | 0 Below-Cost Step-Downs):
+                    # v12.0 $3,000 Hybrid Pool (4x$245 10x ISO USDCUSDT [$1,000] + 12x$142 5x CM USD1USDT + 2x$142 5x CM USDCUSDT [$2,000] | Strict $498.50 CB):
                     if sym_p in ("USD1USDT", "USDCUSDT") and allow_buys and (not getattr(api, "_s1_cb_tripped", False)):
-                        tot_active_legs = [t for t in active_tranches if t["symbol"] in ("USD1USDT", "USDCUSDT", "USD1USDC") and t["state"] in ("BUY_OPEN", "SELL_OPEN")]
-                        tot_deployed_usd = sum(t["qty"] * t["buy_px"] for t in tot_active_legs)
-                        rem_2k_budget = max(0.0, 2000.0 - tot_deployed_usd)
-                        if sym_p == "USD1USDT":
-                            impulse_ok = (
-                                rem_2k_budget >= 25.0
-                                and free_map[f_key] >= 25.0
-                                and not cons_guards.get(sym_p, {}).get("falling", False)
-                            )
-                            max_sym_legs = 12
-                        else:
-                            # USDCUSDT (2x$142 fast-turnover clips at #1 Bid):
+                        if is_iso:
+                            tot_iso_legs = [t for t in active_tranches if t["symbol"] == "USDCUSDT" and t["iso"] and t["state"] in ("BUY_OPEN", "SELL_OPEN")]
+                            tot_deployed_usd = sum(t["qty"] * t["buy_px"] for t in tot_iso_legs)
+                            rem_2k_budget = max(0.0, 990.0 - tot_deployed_usd)
+                            max_sym_legs = 4
+                            max_pool_legs = 18
+                            clip_sz_u = 245.0
                             impulse_ok = (
                                 rem_2k_budget >= 25.0
                                 and free_map[f_key] >= 25.0
                                 and not cons_guards.get(sym_p, {}).get("falling", False)
                                 and q_bbo["bidQty"] >= q_bbo["askQty"] * 0.25
                             )
-                            max_sym_legs = 2
-                        while len(p_tr) < max_sym_legs and len(tot_active_legs) < 14 and rem_2k_budget >= 25.0 and free_map[f_key] >= 25.0 and impulse_ok:
-                            # Upgrade 3: Smaller $142 clips staggered across top 6 ticks (1 clip/tick first, max 2/tick) for 1.8x faster single-swipe fills!
+                        else:
+                            tot_active_legs = [t for t in active_tranches if (not t["iso"]) and t["symbol"] in ("USD1USDT", "USDCUSDT", "USD1USDC") and t["state"] in ("BUY_OPEN", "SELL_OPEN")]
+                            tot_deployed_usd = sum(t["qty"] * t["buy_px"] for t in tot_active_legs)
+                            rem_2k_budget = max(0.0, 1980.0 - tot_deployed_usd)
+                            max_pool_legs = 14
+                            clip_sz_u = 142.0
+                            if sym_p == "USD1USDT":
+                                impulse_ok = (
+                                    rem_2k_budget >= 25.0
+                                    and free_map[f_key] >= 25.0
+                                    and not cons_guards.get(sym_p, {}).get("falling", False)
+                                )
+                                max_sym_legs = 12
+                            else:
+                                impulse_ok = (
+                                    rem_2k_budget >= 25.0
+                                    and free_map[f_key] >= 25.0
+                                    and not cons_guards.get(sym_p, {}).get("falling", False)
+                                    and q_bbo["bidQty"] >= q_bbo["askQty"] * 0.25
+                                )
+                                max_sym_legs = 2
+                        while len(p_tr) < max_sym_legs and rem_2k_budget >= 25.0 and free_map[f_key] >= 25.0 and impulse_ok:
+                            # Stagger across top ticks (up to 2 clips/tick on 10x ISO USDCUSDT and 5x CM USD1USDT):
                             bpx_entry = None
-                            for _cap_pass in (1, 2 if sym_p == "USD1USDT" else 1):
+                            for _cap_pass in (1, 2 if (sym_p == "USD1USDT" or is_iso) else 1):
                                 for _st_lvl in range(6 if sym_p == "USD1USDT" else 2):
                                     cand_bpx = round(q_bbo["bid"] - spec["tick"] * _st_lvl, spec["dec"])
                                     same_tick_cnt = sum(1 for tx in p_tr if abs((tx["buy_px"] if tx["state"] == "BUY_OPEN" else (tx["sell_px"] - spec["tick"])) - cand_bpx) < spec["tick"] * 0.3)
@@ -2577,19 +2627,19 @@ def main():
                                     break
                             if bpx_entry is None:
                                 break
-                            # Upgrade 1: Dynamic +2/+3 Tick target when Ask wall is thin (< 12,000 USD1):
+                            # Dynamic +2/+3 Tick target when Ask wall is thin (< 12,000 USD1):
                             ask_q_now = q_bbo["askQty"]
                             imb_now = q_bbo["bidQty"] / max(1.0, ask_q_now)
                             t_ticks = 3 if (sym_p == "USD1USDT" and ask_q_now < 4500.0 and imb_now >= 2.50) else (2 if (sym_p == "USD1USDT" and (ask_q_now < 12000.0 or imb_now >= 2.20)) else 1)
                             spx_target = round(bpx_entry + spec["tick"] * t_ticks, spec["dec"])
-                            pl_usd_sz = min(142.0, rem_2k_budget, free_map[f_key] * 0.99)
+                            pl_usd_sz = min(clip_sz_u, rem_2k_budget, free_map[f_key] * 0.99)
                             bq_pl = round(math.floor((pl_usd_sz / bpx_entry) / spec["step"] + 1e-9) * spec["step"], 6)
                             if bq_pl * bpx_entry < 15.0:
                                 break
                             bpx_pl = bpx_entry
                             br_pl = api.request("POST", "/sapi/v1/margin/order", {
                                 "symbol": sym_p, "side": "BUY", "type": "LIMIT_MAKER",
-                                "quantity": spec["q_fmt"].format(bq_pl), "price": f"{bpx_pl:.{spec['dec']}f}"
+                                "quantity": spec["q_fmt"].format(bq_pl), "price": f"{bpx_pl:.{spec['dec']}f}", **iso_param
                             }, signed=True)
                             if "orderId" in br_pl:
                                 spent_u = bq_pl * bpx_pl
@@ -2597,14 +2647,13 @@ def main():
                                 rem_2k_budget = max(0.0, rem_2k_budget - spent_u)
                                 daily_orders_placed += 1
                                 nt_pl = {
-                                    "tid": f"V114_{sym_p[:4]}{len(p_tr)+1}", "symbol": sym_p, "iso": False,
-                                    "lbl": f"v11.4 14x$142 • {sym_p[:4]} ${int(bq_pl)}",
+                                    "tid": f"V120_{'ISO' if is_iso else 'CM'}_{sym_p[:4]}{len(p_tr)+1}", "symbol": sym_p, "iso": is_iso,
+                                    "lbl": f"v12.0 {'10x ISO' if is_iso else '5x CM'} • {sym_p[:4]} ${int(bq_pl)}",
                                     "qty": bq_pl, "buy_px": bpx_pl, "sell_px": spx_target, "buy_oid": br_pl["orderId"], "sell_oid": None,
                                     "state": "BUY_OPEN", "ts": loop_ts, "pilot": True, "borrowed": False
                                 }
                                 active_tranches.append(nt_pl)
                                 p_tr.append(nt_pl)
-                                tot_active_legs.append(nt_pl)
                                 s1_short_list.append(nt_pl)
                             else:
                                 break
@@ -2817,7 +2866,7 @@ def main():
                 ethu_net_lbl = f"ETHU DN ${ethu_net_v:+.4f} ({int(getattr(api, '_ethu_rts', 0))} RTs)" if "ethu_net_v" in locals() else "ETHU DN $0.0000"
                 s1_rts_tot = int(getattr(api, "_s1_short_rts", 0)) + int(getattr(api, "_btcu_rts", 0))
                 s1_sc_tot = int(getattr(api, "_s1_short_scratches", 0))
-                s1_st_lbl = ("PILOT CB: " + getattr(api, "_s1_cb_reason", "")) if getattr(api, "_s1_cb_tripped", False) else f"v11.4 14x$142 TURBO (11x USD1 + 2x USDC + 1x USD1USDC [10x TICK] • FDUSD 0-LOSS EXIT) • Net ${s1_net_v:+.4f} ({s1_rts_tot} RTs)"
+                s1_st_lbl = ("PILOT CB: " + getattr(api, "_s1_cb_reason", "")) if getattr(api, "_s1_cb_tripped", False) else f"v12.0 $3000 10x-ISO + 5x-CM HYBRID (4x$245 10x USDC + 12x$142 USD1 + 2x$142 USDC • STRICT $498.50 CB) • Net ${s1_net_v:+.4f} ({s1_rts_tot} RTs)"
                 payload = {
                     "ts": int(loop_ts * 1000),
                     "startEquityUsd": start_equity_usd,
@@ -2857,10 +2906,10 @@ def main():
                             "active": not bool(getattr(api, "_s1_cb_tripped", False)),
                             "cbTripped": bool(getattr(api, "_s1_cb_tripped", False)),
                             "cbReason": getattr(api, "_s1_cb_reason", ""),
-                            "strategy": "v11.4_14x142_USD1_USDC_USD1USDC_0LOSS_FDUSD",
-                            "budgetUsd": 2000.0,
+                            "strategy": "v12.0_3000USD_10X_ISO_USDC_AND_5X_CM_USD1",
+                            "budgetUsd": 3000.0,
                             "idleReserveUsd": 0.0,
-                            "allocStr": "$2000 (14x$142 Clips) 11xUSD1 + 2xUSDC + 1xUSD1USDC (10x Tick)",
+                            "allocStr": "$3000 Hybrid: $1000 10x-ISO USDC (4x$245) + $2000 5x-CM USD1/USDC (14x$142)",
                             "legCapUsd": 0.0,
                             "sessionCapUsd": -0.0100,
                             "btcEmaBasis": round(btc_ema_basis if "btc_ema_basis" in locals() else 0.0, 2),
