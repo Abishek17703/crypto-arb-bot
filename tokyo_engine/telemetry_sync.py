@@ -3542,8 +3542,8 @@ def main():
                             # Stagger $24 micro-clips across top 6 ticks (up to 6 clips/tick = 35 BUY slots):
                             top_bpx_ref = round(q_bbo["bid"] + spec["tick"], spec["dec"]) if (q_bbo["ask"] - q_bbo["bid"]) >= spec["tick"] * 1.8 else round(q_bbo["bid"], spec["dec"])
                             bpx_entry = None
-                            for _cap_pass in (1, 2, 3, 4, 5, 6 if sym_p == "USD1USDT" else 4):
-                                for _st_lvl in range(6 if sym_p == "USD1USDT" else 3):
+                            for _cap_pass in (1, 2, 3, 4, 5, 6 if sym_p in ("USD1USDT", "USDCUSDT") else 4):
+                                for _st_lvl in range(6 if sym_p in ("USD1USDT", "USDCUSDT") else 3):
                                     cand_bpx = round(top_bpx_ref - spec["tick"] * _st_lvl, spec["dec"])
                                     same_tick_cnt = sum(1 for tx in p_buy_open if abs(tx["buy_px"] - cand_bpx) < spec["tick"] * 0.3)
                                     if same_tick_cnt < _cap_pass:
