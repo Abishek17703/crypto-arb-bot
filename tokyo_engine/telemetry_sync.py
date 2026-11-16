@@ -1828,10 +1828,12 @@ def main():
     except Exception:
         pass
     try:
-        s3.put_object(Bucket=S3_BUCKET, Key="pause-control.json", Body=json.dumps({"paused": True, "ts": int(time.time() * 1000)}).encode("utf-8"), ContentType="application/json")
+        s3.put_object(Bucket=S3_BUCKET, Key="pause-control.json", Body=json.dumps({"paused": False, "ts": int(time.time() * 1000)}).encode("utf-8"), ContentType="application/json")
     except Exception:
         pass
-    api._user_paused = True
+    api._user_paused = False
+    api._test_stop_ts = time.time() + 300.0
+    api._stablecoin_only_5m = True
     api._cm_swarm_paused = False
     api._v13_spot_perp_only = False
 
@@ -2403,9 +2405,9 @@ def main():
                             equity_changes[lbl_w] = true_delta
                             equity_changes_pct[lbl_w] = round((true_delta / max(1.0, ref_eq_w)) * 100.0, 4)
 
-                    # Hard Latched $498.50 Strict Equity Circuit Breaker (upgraded from $495.00 so 10x Isolated + 5x Cross hybrid pool is strictly protected!)
+                    # Hard Latched $498.50 Strict Equity Circuit Breaker (max -$0.08 drawdown) + 5-min Auto-Stop
                     chk_eq_495 = getattr(api, "_raw_wallet_eq", cached_total_usd)
-                    if chk_eq_495 > 85.0 and chk_eq_495 <= 498.2000:
+                    if chk_eq_495 > 85.0 and chk_eq_495 <= 498.5000:
                         api._below_495_hits = getattr(api, "_below_495_hits", 0) + 1
                         if api._below_495_hits >= 2 and not getattr(api, "_paused_495", False):
                             api._paused_495 = True
@@ -2417,8 +2419,19 @@ def main():
                             halt_all_orders_and_repay(api)
                             active_tranches = []
                             cached_open_orders = []
-                    elif chk_eq_495 > 498.5000:
+                    elif chk_eq_495 > 498.5500:
                         api._below_495_hits = 0
+
+            # 5-Minute Strict Test Auto-Stop & Flatten
+            if not getattr(api, "_user_paused", False) and getattr(api, "_test_stop_ts", 0.0) > 0 and loop_ts >= api._test_stop_ts:
+                api._user_paused = True
+                try:
+                    s3.put_object(Bucket=S3_BUCKET, Key="pause-control.json", Body=json.dumps({"paused": True, "ts": int(loop_ts * 1000)}).encode("utf-8"), ContentType="application/json")
+                except Exception:
+                    pass
+                halt_all_orders_and_repay(api)
+                active_tranches = []
+                cached_open_orders = []
 
             # Check remote S3 dashboard pause control (pause-control.json) every 2.0s so dashboard red PAUSE button stops trading immediately!
             if loop_ts - getattr(api, "_last_s3_pause_chk", 0.0) >= 2.0:
@@ -2450,8 +2463,9 @@ def main():
             elif getattr(api, "_cm_swarm_paused", True):
                 run_sol_spot_perp_tick(api, fapi, bbos, loop_ts, round_trips, cached_total_usd)
             else:
-                # Run $30 Multi-Asset (SOL/XRP/DOGE/BNB) Spot-Perp Delta-Neutral Pilot in parallel with the Stablecoin Swarm!
-                run_sol_spot_perp_tick(api, fapi, bbos, loop_ts, round_trips, cached_total_usd)
+                # Run $30 Multi-Asset (SOL/XRP/DOGE/BNB) Spot-Perp Delta-Neutral Pilot unless in 5m stablecoin-only test
+                if not getattr(api, "_stablecoin_only_5m", False):
+                    run_sol_spot_perp_tick(api, fapi, bbos, loop_ts, round_trips, cached_total_usd)
                 # 4A. Ultra-Fast <2ms WS Push + Bulk-Diff Tranche Engine
                 compute_composite_regime(api, bbos, last_1h_fills_count, tot_5m_pnl if "tot_5m_pnl" in locals() else 0.0, tot_15m_pnl if "tot_15m_pnl" in locals() else 0.0)
                 with WS_LOCK:
@@ -3932,8 +3946,8 @@ def main():
                         pass
                     try:
                         _p_url = s3.generate_presigned_url("put_object", Params={"Bucket": S3_BUCKET, "Key": "pause-control.json", "ContentType": "text/plain"}, ExpiresIn=604800)
-                        s3.put_object(Bucket=S3_BUCKET, Key="pause-control.json", Body=json.dumps({"paused": True, "ts": int(loop_ts * 1000)}), ContentType="text/plain")
-                        api._user_paused = True
+                        if getattr(api, "_user_paused", False):
+                            s3.put_object(Bucket=S3_BUCKET, Key="pause-control.json", Body=json.dumps({"paused": True, "ts": int(loop_ts * 1000)}), ContentType="text/plain")
                     except Exception:
                         _p_url = ""
                     api._pause_put_url = _p_url
