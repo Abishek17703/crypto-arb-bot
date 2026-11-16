@@ -1227,22 +1227,8 @@ def run_sol_spot_perp_tick(api, fapi, bbos, loop_ts, round_trips, cached_total_u
 
 
 def auto_compound_borrow(api, force_repay_all=False):
-    if getattr(api, "_v13_spot_perp_only", True) and not force_repay_all:
-        return
-    # 0. Auto-sweep any new Spot USDT/USDC deposit (>= $5) into Cross Margin
+    # v13.2 Dual-Engine Mode: Keep Spot ($16 FDUSD) + UMFUTURE ($15.50 USDC) isolated for the $30 Spot-Perp Pilot while compounding Cross-Margin + 10x Isolated!
     try:
-        spot = api.request("GET", "/api/v3/account", signed=True)
-        for b in spot.get("balances", []):
-            if b.get("asset") == "USDC" and float(b.get("free", 0)) >= 1.20:
-                uc_free = math.floor(float(b["free"]) * 100) / 100.0
-                if uc_free >= 1.20:
-                    api.request("POST", "/sapi/v1/margin/transfer", {"asset": "USDC", "amount": f"{uc_free:.2f}", "type": "1"}, signed=True)
-        for b in spot.get("balances", []):
-            if b.get("asset") == "USDT" and float(b.get("free", 0)) >= 1.20:
-                ut_free = math.floor(float(b["free"]) * 100) / 100.0
-                if ut_free >= 1.20:
-                    api.request("POST", "/sapi/v1/margin/transfer", {"asset": "USDT", "amount": f"{ut_free:.2f}", "type": "1"}, signed=True)
-        # Reclaim any idle Isolated Margin FDUSD/USD1 (skip USDCUSDT 10x Isolated pool!) back to Spot -> Cross Margin
         iso_acc = api.request("GET", "/sapi/v1/margin/isolated/account", signed=True)
         for ia in iso_acc.get("assets", []):
             isym = ia.get("symbol", "")
@@ -1258,7 +1244,7 @@ def auto_compound_borrow(api, force_repay_all=False):
                     api.request("POST", "/sapi/v1/margin/transfer", {"asset": q_ast, "amount": f"{q_free:.2f}", "type": "1"}, signed=True)
     except Exception:
         pass
-    # v12.6 Auto-Compounding 5x Cross + 10x Isolated Hybrid Pool (Zero Order Cancellation):
+    # v13.2 Auto-Compounding 5x Cross + 10x Isolated Hybrid Pool (Alongside $30 Spot-Perp Pilot):
     try:
         cm_acc = api.request("GET", "/sapi/v1/margin/account", signed=True)
         ut_borrowed = 0.0
@@ -1291,20 +1277,25 @@ def auto_compound_borrow(api, force_repay_all=False):
                 ba_uc = ia_uc.get("baseAsset", {})
                 iso_net_u = float(qa_uc.get("netAsset", 0)) + float(ba_uc.get("netAsset", 0))
                 iso_bor_u = float(qa_uc.get("borrowed", 0)) + float(qa_uc.get("interest", 0))
-                # Non-disruptive opportunistic 10x Isolated seeding when free CM_USDT allows transfer without canceling active orders:
+                # Seed $100 USDT into 10x Isolated USDCUSDT when CM_USDT has >= $115 free:
                 if iso_net_u < 95.0 and cm_ut_free >= 115.0:
                     need_seed = min(round(100.0 - iso_net_u, 2), math.floor((cm_ut_free - 10.0) * 100) / 100.0)
                     if need_seed >= 10.0:
                         r_u1 = api.request("POST", "/sapi/v1/asset/transfer", {"type": "MARGIN_ISOLATEDMARGIN", "asset": "USDT", "amount": f"{need_seed:.2f}", "toSymbol": "USDCUSDT"}, signed=True)
                         if "tranId" in r_u1:
                             iso_net_u += need_seed
+                        else:
+                            api.request("POST", "/sapi/v1/margin/transfer", {"asset": "USDT", "amount": f"{need_seed:.2f}", "type": "2"}, signed=True)
+                            r_u2 = api.request("POST", "/sapi/v1/margin/isolated/transfer", {"asset": "USDT", "symbol": "USDCUSDT", "transFrom": "SPOT", "transTo": "ISOLATED_MARGIN", "amount": f"{need_seed:.2f}"}, signed=True)
+                            if "tranId" in r_u2:
+                                iso_net_u += need_seed
                 if iso_net_u >= 25.0 and iso_bor_u < iso_net_u * 8.9:
                     mx_b = api.request("GET", "/sapi/v1/margin/maxBorrowable", {"asset": "USDT", "isolatedSymbol": "USDCUSDT"}, signed=True)
                     can_b = min(round(iso_net_u * 8.95 - iso_bor_u, 2), float(mx_b.get("amount", 0)) * 0.96) if isinstance(mx_b, dict) else 0.0
                     if can_b >= 10.0:
                         api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "USDT", "isIsolated": "TRUE", "symbol": "USDCUSDT", "amount": f"{can_b:.2f}", "type": "BORROW"}, signed=True)
-            # Auto-compound Cross-Margin 5x loan up to maxBorrowable (scales above $1,950 automatically as Equity grows!):
-            target_cm_loan = 1580.0 if iso_net_u >= 50.0 else 1985.0
+            # Maintain 5x Cross-Margin USDT loan ($1,440 when $100 is in 10x Iso + $31.50 in Spot-Perp Pilot, or $1,840 otherwise):
+            target_cm_loan = 1440.0 if iso_net_u >= 50.0 else 1840.0
             if ut_borrowed < target_cm_loan - 5.0:
                 mx_cm_b = api.request("GET", "/sapi/v1/margin/maxBorrowable", {"asset": "USDT"}, signed=True)
                 can_cm_b = min(round(target_cm_loan - ut_borrowed, 2), float(mx_cm_b.get("amount", 0)) * 0.96) if isinstance(mx_cm_b, dict) else 0.0
@@ -1778,14 +1769,15 @@ def main():
     except Exception:
         pass
     api._user_paused = False
-    api._cm_swarm_paused = True
-    api._v13_spot_perp_only = True
+    api._cm_swarm_paused = False
+    api._v13_spot_perp_only = False
 
     fapi = BinanceFuturesSession()
     start_futures_bbo_ws()
     setup_sol_spot_perp_pilot(api, fapi)
+    auto_compound_borrow(api, force_repay_all=False)
 
-    active_tranches = []
+    active_tranches = adopt_existing_tranches(api)
     trades_cache = {s: [] for s in ("USDCUSDT", "USDCUSDT_CM", "USD1USDT_CM", "USD1USDT_ISO", "USD1USDC_CM", "USD1U_CM", "UUSDT_CM", "FDUSDUSDT", "FDUSDUSDT_CM", "FDUSDUSDC", "FDUSDUSDC_CM", "BTCU_CM", "BTCUSD1_CM", "BNBU_CM", "ETHU_CM", "BNBFDUSD_CM", "SOLFDUSD_CM", "EURIUSDT", "BTCU", "ETHU")}
     trades_day_ms = 0
 
@@ -1795,7 +1787,7 @@ def main():
     }
 
     last_acct_poll = 0.0
-    last_pnl_audit = 0.0
+    last_pnl_audit = time.time() - 22.0
     last_compound_ts = time.time()
     last_s3_push = 0.0
 
@@ -2395,6 +2387,8 @@ def main():
             elif getattr(api, "_cm_swarm_paused", True):
                 run_sol_spot_perp_tick(api, fapi, bbos, loop_ts, round_trips, cached_total_usd)
             else:
+                # Run $30 Multi-Asset (SOL/XRP/DOGE/BNB) Spot-Perp Delta-Neutral Pilot in parallel with the Stablecoin Swarm!
+                run_sol_spot_perp_tick(api, fapi, bbos, loop_ts, round_trips, cached_total_usd)
                 # 4A. Ultra-Fast <2ms WS Push + Bulk-Diff Tranche Engine
                 compute_composite_regime(api, bbos, last_1h_fills_count, tot_5m_pnl if "tot_5m_pnl" in locals() else 0.0, tot_15m_pnl if "tot_15m_pnl" in locals() else 0.0)
                 with WS_LOCK:
