@@ -1969,6 +1969,48 @@ def main():
                                         want_vault_unstick = True
                                         vault_target_px = round(q_bbo["ask"], spec["dec"])
                                         vault_subsidy_need = need_u
+                            # Mechanism 3 (v12.4): Stuck-Tranche Reverse-Flip Inventory Recycling!
+                            # When a SELL_OPEN tranche is stuck >= 1.5 ticks above live Ask for >= 25s, convert it into a SHORT_SELL_OPEN @ live Ask (which sells @ Ask and buys back 1 tick lower @ Bid, stepping down its cost basis by -1 tick per flip while earning +$0.00024/flip!):
+                            active_rev_flips = sum(1 for tx in still_tranches + active_tranches if tx.get("symbol") == sym and tx.get("state") in ("SHORT_SELL_OPEN", "SHORT_BUY_OPEN"))
+                            if (not want_step_1tick) and (not want_vault_unstick) and (not tr["iso"]) and sym in ("USD1USDT", "USDCUSDT") and float(o_live.get("executedQty", 0)) == 0 and age_s >= 25.0 and q_bbo["ask"] <= tr["sell_px"] - spec["tick"] * 1.5 and active_rev_flips < 12 and q_bbo["askQty"] >= q_bbo["bidQty"] * 0.40:
+                                cr_rf = api.request("DELETE", "/sapi/v1/margin/order", {"symbol": sym, "orderId": tr["sell_oid"]}, signed=True)
+                                if cr_rf.get("status") == "CANCELED":
+                                    rem_rf = round(math.floor((tr["qty"] - float(cr_rf.get("executedQty", 0))) / spec["step"] + 1e-9) * spec["step"], 6)
+                                    if rem_rf * q_bbo["ask"] >= 5.5:
+                                        rf_q = min(24.0, rem_rf)
+                                        left_rf = round(math.floor((rem_rf - rf_q) / spec["step"] + 1e-9) * spec["step"], 6)
+                                        if left_rf * q_bbo["ask"] >= 5.5:
+                                            # Re-post remainder at original target while $24 slice executes Reverse-Flip!
+                                            sr_rem = api.request("POST", "/sapi/v1/margin/order", {
+                                                "symbol": sym, "side": "SELL", "type": "LIMIT_MAKER",
+                                                "quantity": spec["q_fmt"].format(left_rf), "price": f"{tr['sell_px']:.{spec['dec']}f}"
+                                            }, signed=True)
+                                            if "orderId" in sr_rem:
+                                                still_tranches.append({
+                                                    "tid": f"{tr['tid']}_R", "symbol": sym, "iso": False, "lbl": tr["lbl"],
+                                                    "qty": left_rf, "buy_px": tr["buy_px"], "sell_px": tr["sell_px"],
+                                                    "buy_oid": tr["buy_oid"], "sell_oid": sr_rem["orderId"], "state": "SELL_OPEN", "ts": loop_ts, "pilot": True
+                                                })
+                                            else:
+                                                rf_q = rem_rf
+                                        rf_spx = round(q_bbo["ask"], spec["dec"])
+                                        sr_rf = api.request("POST", "/sapi/v1/margin/order", {
+                                            "symbol": sym, "side": "SELL", "type": "LIMIT_MAKER",
+                                            "quantity": spec["q_fmt"].format(rf_q), "price": f"{rf_spx:.{spec['dec']}f}"
+                                        }, signed=True)
+                                        if "orderId" in sr_rf:
+                                            tr["orig_bpx"] = tr.get("orig_bpx", tr["buy_px"])
+                                            tr["sell_oid"] = sr_rf["orderId"]
+                                            tr["sell_px"] = rf_spx
+                                            tr["qty"] = rf_q
+                                            tr["state"] = "SHORT_SELL_OPEN"
+                                            tr["ts"] = loop_ts
+                                            daily_orders_placed += 1
+                                            still_tranches.append(tr)
+                                            continue
+                                        else:
+                                            free_map["CM_USDC" if sym == "USDCUSDT" else "CM_USD1"] += rf_q
+                                            continue
                             if want_step_1tick or want_vault_unstick:
                                 cr = api.request("DELETE", "/sapi/v1/margin/order", {"symbol": sym, "orderId": tr["sell_oid"], **iso_param}, signed=True)
                                 if cr.get("status") == "CANCELED":
@@ -2153,9 +2195,9 @@ def main():
                             else:
                                 still_tranches.append(tr)
                         else:
-                            # SHORT_BUY_OPEN filled @ Bid -> completed SELL-First -> BUY-Back round-trip!
+                            # SHORT_BUY_OPEN filled @ Bid -> completed SELL-First -> BUY-Back Reverse-Flip round-trip!
                             pnl_v = tr["qty"] * max(spec["tick"], tr["sell_px"] - tr["buy_px"])
-                            unstick_vault_usd += pnl_v
+                            unstick_vault_usd += pnl_v * 0.50
                             session_live_pnl += pnl_v
                             session_live_fills += 2
                             api._s1_short_realized = getattr(api, "_s1_short_realized", 0.0) + pnl_v
@@ -2163,20 +2205,35 @@ def main():
                             rt_wins = getattr(api, "_rt_wins", [])
                             rt_wins.append((loop_ts, pnl_v))
                             api._rt_wins = [(t_w, p_w) for t_w, p_w in rt_wins if loop_ts - t_w <= 3600.0]
-                            w_15m = sum(p_w for t_w, p_w in api._rt_wins if loop_ts - t_w <= 900.0) * 4.0
                             w_1h = sum(p_w for t_w, p_w in api._rt_wins)
-                            live_hourly_rate_usd = round(max(w_1h, w_15m), 4)
+                            live_hourly_rate_usd = round(getattr(api, "_audit_1h_rate", w_1h), 4)
                             live_daily_rate_usd = round(live_hourly_rate_usd * 24.0, 4)
-                            realized_today_usd = round(realized_today_usd + pnl_v, 4)
                             today_fills_count += 2
-                            free_map[b_key_s] += tr["qty"]
-                            api._last_buy_map = getattr(api, "_last_buy_map", {})
-                            api._last_buy_map[sym] = tr["buy_px"]
+                            # Step down original stuck cost basis by the Reverse-Flip gain and re-post SELL at max(live Ask, stepped_bpx + 1 tick)!
+                            old_orig_bpx = tr.get("orig_bpx", round(tr["sell_px"] + spec["tick"], spec["dec"]))
+                            stepped_bpx = round(max(tr["buy_px"], old_orig_bpx - (tr["sell_px"] - tr["buy_px"])), spec["dec"])
+                            next_spx = round(max(q_bbo["ask"], stepped_bpx + spec["tick"]), spec["dec"])
+                            sr_next = api.request("POST", "/sapi/v1/margin/order", {
+                                "symbol": sym, "side": "SELL", "type": "LIMIT_MAKER",
+                                "quantity": spec["q_fmt"].format(tr["qty"]), "price": f"{next_spx:.{spec['dec']}f}"
+                            }, signed=True)
+                            if "orderId" in sr_next:
+                                tr["buy_px"] = stepped_bpx
+                                tr["orig_bpx"] = stepped_bpx
+                                tr["sell_px"] = next_spx
+                                tr["sell_oid"] = sr_next["orderId"]
+                                tr["state"] = "SELL_OPEN"
+                                tr["ts"] = loop_ts
+                                still_tranches.append(tr)
+                            else:
+                                free_map[b_key_s] += tr["qty"]
+                                api._last_buy_map = getattr(api, "_last_buy_map", {})
+                                api._last_buy_map[sym] = stepped_bpx
                             round_trips.insert(0, {
                                 "time": int(loop_ts * 1000),
-                                "symbol": f"{sym} (S1-SHORT)",
+                                "symbol": f"{sym} (REV-FLIP)",
                                 "type": "COMPLETED",
-                                "route": f"[{tr['tid']} • S1 BI-DIR SHORT] SELL {spec['q_fmt'].format(tr['qty'])} @ ${tr['sell_px']:.{spec['dec']}f} -> BUY @ ${tr['buy_px']:.{spec['dec']}f}",
+                                "route": f"[{tr['tid']} • REV-FLIP UNSTICK] SELL {spec['q_fmt'].format(tr['qty'])} @ ${tr['sell_px']:.{spec['dec']}f} -> BUY @ ${tr['buy_px']:.{spec['dec']}f}",
                                 "id": f"#{tr['sell_oid']}->{tr['buy_oid']}",
                                 "pnl": pnl_v,
                                 "eqAfter": cached_total_usd,
