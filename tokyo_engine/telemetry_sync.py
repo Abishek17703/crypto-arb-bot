@@ -1195,10 +1195,25 @@ def auto_compound_borrow(api, force_repay_all=False):
                 fv_b = math.floor(float(b["free"]) * 100) / 100.0
                 if fv_b >= 1.00:
                     api.request("POST", "/sapi/v1/margin/transfer", {"asset": ast_b, "amount": f"{fv_b:.2f}", "type": "1"}, signed=True)
+        if force_repay_all:
+            iso_rep_acc = api.request("GET", "/sapi/v1/margin/isolated/account", signed=True)
+            for ia_r in iso_rep_acc.get("assets", []) if isinstance(iso_rep_acc, dict) else []:
+                isym_r = ia_r.get("symbol", "")
+                for sk_r in ("quoteAsset", "baseAsset"):
+                    qa_r = ia_r.get(sk_r, {})
+                    ast_r = qa_r.get("asset", "")
+                    fv_r = float(qa_r.get("free", 0))
+                    bv_r = float(qa_r.get("borrowed", 0)) + float(qa_r.get("interest", 0))
+                    if bv_r > 0.001 and fv_r >= 0.01:
+                        amt_r = f"{math.floor(min(fv_r, bv_r) * 10000.0) / 10000.0:.4f}"
+                        if float(amt_r) > 0:
+                            api.request("POST", "/sapi/v1/margin/borrow-repay", {
+                                "asset": ast_r, "isIsolated": "TRUE", "symbol": isym_r, "amount": amt_r, "type": "REPAY"
+                            }, signed=True)
         iso_acc = api.request("GET", "/sapi/v1/margin/isolated/account", signed=True)
         for ia in iso_acc.get("assets", []):
             isym = ia.get("symbol", "")
-            if isym == "USDCUSDT":
+            if isym == "USDCUSDT" and not force_repay_all:
                 continue
             for side_k in ("quoteAsset", "baseAsset"):
                 qa_i = ia.get(side_k, {})
@@ -1737,19 +1752,19 @@ def main():
     except Exception:
         pass
     try:
-        s3.put_object(Bucket=S3_BUCKET, Key="pause-control.json", Body=json.dumps({"paused": False, "ts": int(time.time() * 1000)}).encode("utf-8"), ContentType="application/json")
+        s3.put_object(Bucket=S3_BUCKET, Key="pause-control.json", Body=json.dumps({"paused": True, "ts": int(time.time() * 1000)}).encode("utf-8"), ContentType="application/json")
     except Exception:
         pass
-    api._user_paused = False
+    api._user_paused = True
     api._cm_swarm_paused = False
     api._v13_spot_perp_only = False
 
     fapi = BinanceFuturesSession()
     start_futures_bbo_ws()
     setup_sol_spot_perp_pilot(api, fapi)
-    auto_compound_borrow(api, force_repay_all=False)
+    halt_all_orders_and_repay(api)
 
-    active_tranches = adopt_existing_tranches(api)
+    active_tranches = []
     trades_cache = {s: [] for s in ("USDCUSDT", "USDCUSDT_CM", "USD1USDT_CM", "USD1USDT_ISO", "USD1USDC_CM", "USD1U_CM", "UUSDT_CM", "FDUSDUSDT", "FDUSDUSDT_CM", "FDUSDUSDC", "FDUSDUSDC_CM", "BTCU_CM", "BTCUSD1_CM", "BNBU_CM", "ETHU_CM", "BNBFDUSD_CM", "SOLFDUSD_CM", "EURIUSDT", "BTCU", "ETHU")}
     trades_day_ms = 0
 
@@ -3841,8 +3856,8 @@ def main():
                         pass
                     try:
                         _p_url = s3.generate_presigned_url("put_object", Params={"Bucket": S3_BUCKET, "Key": "pause-control.json", "ContentType": "text/plain"}, ExpiresIn=604800)
-                        s3.put_object(Bucket=S3_BUCKET, Key="pause-control.json", Body=json.dumps({"paused": False, "ts": int(loop_ts * 1000)}), ContentType="text/plain")
-                        api._user_paused = False
+                        s3.put_object(Bucket=S3_BUCKET, Key="pause-control.json", Body=json.dumps({"paused": True, "ts": int(loop_ts * 1000)}), ContentType="text/plain")
+                        api._user_paused = True
                     except Exception:
                         _p_url = ""
                     api._pause_put_url = _p_url
