@@ -862,51 +862,61 @@ def setup_sol_spot_perp_pilot(api, fapi):
         q_ast = st["spot_quote"]
         sp_a3 = api.request("GET", "/api/v3/account", signed=True)
         sp_qf = float(next((b.get("free", 0) for b in sp_a3.get("balances", []) if b.get("asset") == q_ast), 0)) if isinstance(sp_a3, dict) else 0.0
-        sp_sol = float(next((b.get("free", 0) for b in sp_a3.get("balances", []) if b.get("asset") == "SOL"), 0)) if isinstance(sp_a3, dict) else 0.0
-        if sp_qf < 14.50 and sp_sol < 0.10:
+        sp_bals_map = {b.get("asset"): float(b.get("free", 0)) + float(b.get("locked", 0)) for b in sp_a3.get("balances", [])} if isinstance(sp_a3, dict) else {}
+        has_any_coin = any(sp_bals_map.get(ck, 0.0) >= MULTI_DN_SPECS[ck]["min_q"] for ck in MULTI_DN_SPECS)
+        if sp_qf < 14.50 and not has_any_coin:
             buy_q = int(math.ceil(16.0 - sp_qf))
             if buy_q >= 6:
                 api.request("POST", "/sapi/v1/margin/transfer", {"asset": "USDT", "amount": f"{buy_q + 0.50:.2f}", "type": "2"}, signed=True)
                 api.request("POST", "/api/v3/order", {"symbol": q_ast + "USDT", "side": "BUY", "type": "MARKET", "quantity": str(buy_q)}, signed=True)
 
-        # Cancel any stray open orders on SOLFDUSD Spot or SOLUSDC Perp before adopting state:
-        sp_oo = api.request("GET", "/api/v3/openOrders", {"symbol": st["spot_sym"]}, signed=True)
-        if isinstance(sp_oo, list):
-            for _o in sp_oo:
-                api.request("DELETE", "/api/v3/order", {"symbol": st["spot_sym"], "orderId": _o["orderId"]}, signed=True)
-        pp_oo = fapi.request("GET", "/fapi/v1/openOrders", {"symbol": "SOLUSDC"}, signed=True)
-        if isinstance(pp_oo, list):
-            for _o in pp_oo:
-                fapi.request("DELETE", "/fapi/v1/order", {"symbol": "SOLUSDC", "orderId": _o["orderId"]}, signed=True)
+        # Cancel any stray open orders across all 4 Spot-Perp symbols before adopting state:
+        for _ck, _csp in MULTI_DN_SPECS.items():
+            sp_oo = api.request("GET", "/api/v3/openOrders", {"symbol": _csp["spot"]}, signed=True)
+            if isinstance(sp_oo, list):
+                for _o in sp_oo:
+                    api.request("DELETE", "/api/v3/order", {"symbol": _csp["spot"], "orderId": _o["orderId"]}, signed=True)
+            pp_oo = fapi.request("GET", "/fapi/v1/openOrders", {"symbol": _csp["perp"]}, signed=True)
+            if isinstance(pp_oo, list):
+                for _o in pp_oo:
+                    fapi.request("DELETE", "/fapi/v1/order", {"symbol": _csp["perp"], "orderId": _o["orderId"]}, signed=True)
 
         sp_a4 = api.request("GET", "/api/v3/account", signed=True)
-        sp_qf_now = float(next((b.get("free", 0) for b in sp_a4.get("balances", []) if b.get("asset") == q_ast), 0)) if isinstance(sp_a4, dict) else 0.0
-        sp_sol_now = float(next((float(b.get("free", 0)) + float(b.get("locked", 0)) for b in sp_a4.get("balances", []) if b.get("asset") == "SOL"), 0)) if isinstance(sp_a4, dict) else 0.0
+        sp_map4 = {b.get("asset"): float(b.get("free", 0)) + float(b.get("locked", 0)) for b in sp_a4.get("balances", [])} if isinstance(sp_a4, dict) else {}
+        sp_qf_now = sp_map4.get(q_ast, 0.0)
         f_acc2 = fapi.request("GET", "/fapi/v2/account", signed=True)
         fut_uc_now = float(next((fa.get("walletBalance", 0) for fa in f_acc2.get("assets", []) if fa.get("asset") == "USDC"), 0)) if isinstance(f_acc2, dict) else 0.0
-        perp_pos_amt = 0.0
-        perp_entry_px = 0.0
+        adopted_c = None
         if isinstance(f_acc2, dict):
             for fp in f_acc2.get("positions", []):
-                if fp.get("symbol") == "SOLUSDC":
-                    perp_pos_amt = float(fp.get("positionAmt", 0.0))
-                    perp_entry_px = float(fp.get("entryPrice", 0.0))
-        st["spot_bal"] = round(sp_qf_now + sp_sol_now * (perp_entry_px or 71.80), 2)
+                p_amt = float(fp.get("positionAmt", 0.0))
+                p_epx = float(fp.get("entryPrice", 0.0))
+                p_sym = fp.get("symbol", "")
+                for _ck, _csp in MULTI_DN_SPECS.items():
+                    if _csp["perp"] == p_sym and abs(p_amt) >= _csp["min_q"] and sp_map4.get(_ck, 0.0) >= _csp["min_q"]:
+                        adopted_c = (_ck, _csp, sp_map4[_ck], p_amt, p_epx)
+                        break
+        st["spot_bal"] = round(sp_qf_now + (adopted_c[2] * adopted_c[4] if adopted_c else 0.0), 2)
         st["perp_bal"] = round(fut_uc_now, 2)
         st["ready"] = True
-        if sp_sol_now >= 0.08 and perp_pos_amt <= -0.08:
-            sp_tr = api.request("GET", "/api/v3/myTrades", {"symbol": st["spot_sym"], "limit": 5}, signed=True)
-            last_bpx = perp_entry_px + 0.30
+        if adopted_c:
+            _ck, _csp, _sp_q, _pp_q, _pp_epx = adopted_c
+            sp_tr = api.request("GET", "/api/v3/myTrades", {"symbol": _csp["spot"], "limit": 5}, signed=True)
+            last_bpx = _pp_epx
             if isinstance(sp_tr, list):
                 buys = [x for x in sp_tr if x.get("isBuyer")]
                 if buys:
                     last_bpx = float(buys[-1]["price"])
+            st["active_coin"] = _ck
+            st["spot_sym"] = _csp["spot"]
+            st["perp_sym"] = _csp["perp"]
             st["state"] = "HEDGED"
-            st["qty"] = math.floor(min(sp_sol_now, abs(perp_pos_amt)) * 100.0) / 100.0
-            st["spot_px"] = round(last_bpx, 2)
-            st["perp_px"] = round(perp_entry_px, 2)
+            st["qty"] = round(math.floor(min(_sp_q, abs(_pp_q)) / _csp["step"] + 1e-9) * _csp["step"], _csp["q_dec"])
+            st["spot_px"] = round(last_bpx, _csp["px_dec"])
+            st["perp_px"] = round(_pp_epx, _csp["px_dec"])
             st["entry_ts"] = time.time()
-            st["msg"] = f"HEDGED 1:1 ACTIVE: Long {st['qty']:.2f} {st['spot_sym']} @ ${st['spot_px']:.2f} / Short SOLUSDC Perp @ ${st['perp_px']:.2f}"
+            st["entry_was_ioc"] = True
+            st["msg"] = f"HEDGED 1:1 ACTIVE ({_ck}): Long {st['qty']:.{_csp['q_dec']}f} {_csp['spot']} @ ${st['spot_px']:.{_csp['px_dec']}f} / Short {_csp['perp']} @ ${st['perp_px']:.{_csp['px_dec']}f}"
         else:
             st["msg"] = f"ACTIVE $30 PILOT: {st['spot_sym']} (${sp_qf_now:.2f} {q_ast}, mkr={st['spot_maker_fee']*100:.3f}%) + SOLUSDC Perp (${fut_uc_now:.2f} USDC, mkr={st['perp_maker_fee']*100:.3f}%, tkr={st['perp_taker_fee']*100:.3f}%)"
     except Exception as e:
@@ -1086,15 +1096,17 @@ def run_sol_spot_perp_tick(api, fapi, bbos, loop_ts, round_trips, cached_total_u
     elif state == "PERP_HEDGE_MAKER":
         elapsed_h = time.time() - st["hedge_start_ts"]
         adv_drop_bps = ((st["hedge_ref_bid"] - pp_bbo["bid"]) / st["hedge_ref_bid"]) * 10000.0
-        need_bailout = (elapsed_h >= 0.500 and adv_drop_bps >= 2.0) or (elapsed_h >= 1.20)
+        # Exact 500ms AND >2.5 bps Bailout Rule (NEVER force a 4bps Taker bailout if price hasn't moved against us!):
+        need_bailout = (elapsed_h >= 0.500 and adv_drop_bps >= 2.5)
         if need_bailout or (loop_ts - st.get("last_poll_ts", 0.0) >= 0.08):
             st["last_poll_ts"] = loop_ts
             o_pp = fapi.request("GET", "/fapi/v1/order", {"symbol": pp_sym, "orderId": st["perp_oid"]}, signed=True)
             if isinstance(o_pp, dict) and o_pp.get("status") == "FILLED":
                 st["perp_px"] = float(o_pp.get("avgPrice") or st["perp_px"])
+                st["entry_was_ioc"] = False
                 st["state"] = "HEDGED"
                 st["entry_ts"] = loop_ts
-                st["msg"] = f"HEDGED 1:1 ({act_coin}): Long {st['qty']:.{q_dec}f} {sp_sym} @ ${st['spot_px']:.{px_dec}f} / Short {pp_sym} @ ${st['perp_px']:.{px_dec}f}"
+                st["msg"] = f"HEDGED 1:1 (0% MKR {act_coin}): Long {st['qty']:.{q_dec}f} {sp_sym} @ ${st['spot_px']:.{px_dec}f} / Short {pp_sym} @ ${st['perp_px']:.{px_dec}f}"
             elif need_bailout or (isinstance(o_pp, dict) and o_pp.get("status") in ("CANCELED", "EXPIRED")):
                 fapi.request("DELETE", "/fapi/v1/order", {"symbol": pp_sym, "orderId": st["perp_oid"]}, signed=True)
                 o_chk = fapi.request("GET", "/fapi/v1/order", {"symbol": pp_sym, "orderId": st["perp_oid"]}, signed=True)
@@ -1105,6 +1117,7 @@ def run_sol_spot_perp_tick(api, fapi, bbos, loop_ts, round_trips, cached_total_u
                     }, signed=True)
                     st["perp_px"] = float(r_ioc.get("avgPrice") or pp_bbo["bid"])
                     st["ioc_bailouts"] += 1
+                    st["entry_was_ioc"] = True
                 st["state"] = "HEDGED"
                 st["entry_ts"] = loop_ts
                 st["msg"] = f"HEDGED (500ms IOC BAILOUT): Long {st['qty']:.{q_dec}f} {sp_sym} / Short {pp_sym} @ ${st['perp_px']:.{px_dec}f}"
@@ -1117,8 +1130,9 @@ def run_sol_spot_perp_tick(api, fapi, bbos, loop_ts, round_trips, cached_total_u
         gross_pnl = ((sp_exit_u - sp_entry_u) + (pp_entry_u - pp_exit_u)) * st["qty"]
         st["unrealized_pnl"] = round(gross_pnl, 4)
         hold_s = loop_ts - st["entry_ts"]
-        # Trigger exit when basis converges back (gross_pnl >= +$0.0040) or after 30s at >= +$0.0010 (or unwind any >=45s held leg at 0% Maker if >= -$0.0120 so capital rotates across all 4 coins!):
-        if gross_pnl >= 0.0040 or (hold_s >= 30.0 and gross_pnl >= 0.0010) or (hold_s >= 45.0 and gross_pnl >= -0.0120):
+        min_req_pnl = 0.0080 if st.get("entry_was_ioc", False) else 0.0030
+        # STRICT ZERO-LOSS CONVERGENCE EXIT: Never exit below min_req_pnl (covers any entry IOC fee + net profit)!
+        if gross_pnl >= min_req_pnl:
             spx_sp = round(sp_bbo["ask"], px_dec)
             r_s_ex = api.request("POST", "/api/v3/order", {
                 "symbol": sp_sym, "side": "SELL", "type": "LIMIT_MAKER",
@@ -1148,28 +1162,38 @@ def run_sol_spot_perp_tick(api, fapi, bbos, loop_ts, round_trips, cached_total_u
                     st["perp_exit_px"] = bpx_pp
                     st["state"] = "EXIT_PERP_MAKER"
                 else:
-                    r_ioc_c = fapi.request("POST", "/fapi/v1/order", {
-                        "symbol": pp_sym, "side": "BUY", "type": "MARKET",
-                        "quantity": f"{st['qty']:.{q_dec}f}", "reduceOnly": "true"
+                    bpx_pp2 = round(pp_bbo["bid"], px_dec)
+                    r_pp_c2 = fapi.request("POST", "/fapi/v1/order", {
+                        "symbol": pp_sym, "side": "BUY", "type": "LIMIT", "timeInForce": "GTX",
+                        "quantity": f"{st['qty']:.{q_dec}f}", "price": f"{bpx_pp2:.{px_dec}f}", "reduceOnly": "true"
                     }, signed=True)
-                    p_ex = float(r_ioc_c.get("avgPrice") or pp_bbo["ask"])
-                    fee_est = (st["qty"] * p_ex * st["perp_taker_fee"])
-                    net_rt = round(((st["spot_exit_px"] - st["spot_px"]) * q_usdt + (st["perp_px"] - p_ex) * uc_usdt) * st["qty"] - fee_est, 5)
-                    st["realized_pnl"] = round(st["realized_pnl"] + net_rt, 4)
-                    st["unrealized_pnl"] = 0.0
-                    st["rts"] += 1
-                    st["ioc_bailouts"] += 1
-                    st["state"] = "IDLE"
-                    st["last_trade_ts"] = loop_ts
-                    round_trips.insert(0, {
-                        "time": int(loop_ts * 1000),
-                        "symbol": f"{sp_sym}+{pp_sym} ($30 DN)",
-                        "type": "COMPLETED",
-                        "route": f"[$30 DN ARB] Spot {st['spot_px']:.{px_dec}f}->{st['spot_exit_px']:.{px_dec}f} | Perp {st['perp_px']:.{px_dec}f}->{p_ex:.{px_dec}f}",
-                        "id": f"#DN_{st['rts']}",
-                        "pnl": net_rt,
-                        "eqAfter": cached_total_usd,
-                    })
+                    if "orderId" in r_pp_c2 and r_pp_c2.get("status") not in ("EXPIRED", "CANCELED", "REJECTED"):
+                        st["perp_oid"] = r_pp_c2["orderId"]
+                        st["perp_exit_px"] = bpx_pp2
+                        st["state"] = "EXIT_PERP_MAKER"
+                    else:
+                        r_ioc_c = fapi.request("POST", "/fapi/v1/order", {
+                            "symbol": pp_sym, "side": "BUY", "type": "MARKET",
+                            "quantity": f"{st['qty']:.{q_dec}f}", "reduceOnly": "true"
+                        }, signed=True)
+                        p_ex = float(r_ioc_c.get("avgPrice") or pp_bbo["ask"])
+                        fee_est = (st["qty"] * p_ex * st["perp_taker_fee"])
+                        net_rt = round(((st["spot_exit_px"] - st["spot_px"]) * q_usdt + (st["perp_px"] - p_ex) * uc_usdt) * st["qty"] - fee_est, 5)
+                        st["realized_pnl"] = round(st["realized_pnl"] + net_rt, 4)
+                        st["unrealized_pnl"] = 0.0
+                        st["rts"] += 1
+                        st["ioc_bailouts"] += 1
+                        st["state"] = "IDLE"
+                        st["last_trade_ts"] = loop_ts
+                        round_trips.insert(0, {
+                            "time": int(loop_ts * 1000),
+                            "symbol": f"{sp_sym}+{pp_sym} ($30 DN)",
+                            "type": "COMPLETED",
+                            "route": f"[$30 DN ARB] Spot {st['spot_px']:.{px_dec}f}->{st['spot_exit_px']:.{px_dec}f} | Perp {st['perp_px']:.{px_dec}f}->{p_ex:.{px_dec}f}",
+                            "id": f"#DN_{st['rts']}",
+                            "pnl": net_rt,
+                            "eqAfter": cached_total_usd,
+                        })
             elif (loop_ts - st.get("exit_ts", loop_ts)) >= 2.5 and abs(sp_bbo["ask"] - st.get("spot_exit_px", 0)) >= tick_c * 1.5:
                 cr_ex = api.request("DELETE", "/api/v3/order", {"symbol": sp_sym, "orderId": st["spot_oid"]}, signed=True)
                 if cr_ex.get("status") == "CANCELED" and float(cr_ex.get("executedQty", 0)) < min_q_c * 0.1:
@@ -1178,7 +1202,7 @@ def run_sol_spot_perp_tick(api, fapi, bbos, loop_ts, round_trips, cached_total_u
     elif state == "EXIT_PERP_MAKER":
         elapsed_c = time.time() - st["hedge_start_ts"]
         adv_jump_bps = ((pp_bbo["ask"] - st["hedge_ref_ask"]) / st["hedge_ref_ask"]) * 10000.0
-        need_bail_c = (elapsed_c >= 0.500 and adv_jump_bps >= 2.0) or (elapsed_c >= 1.20)
+        need_bail_c = (elapsed_c >= 0.500 and adv_jump_bps >= 2.5)
         if need_bail_c or (loop_ts - st.get("last_poll_ts", 0.0) >= 0.08):
             st["last_poll_ts"] = loop_ts
             o_ppc = fapi.request("GET", "/fapi/v1/order", {"symbol": pp_sym, "orderId": st["perp_oid"]}, signed=True)
@@ -3384,9 +3408,9 @@ def main():
                     ("USD1U",     False, "CM_U",     "CM_USD1",    0,                       0, 14.0,   0.0, "STOPPED"),
                     ("FDUSDUSDT", False, "CM_USDT",       "CM_FDUSD",      0,                       0,  24.0,   0.0, "STOPPED • 0-LOSS DRAIN"),
                     ("USD1USDC",  False, "CM_USDC",       "CM_USD1",      15 if allow_buys else 0,  0,  24.0, 360.0, "v12.6 10x-TICK • USD1/USDC $24"),
-                    ("UUSDT",     False, "CM_USDT",       "CM_U",         15 if allow_buys else 0,  0,  24.0, 360.0, "v12.6 10x-TICK • U/USDT $24"),
+                    ("UUSDT",     False, "CM_USDT",       "CM_U",         25 if allow_buys else 0,  0,  24.0, 600.0, "v12.6 10x-TICK • U/USDT $24"),
                     ("USDCUSDT",  True,  "ISO_USDC_USDT", "ISO_USDC_BASE", 16 if allow_buys else 0, 0,  60.0, 990.0, "v12.6 10x ISO • USDC $60"),
-                    ("USDCUSDT",  False, "CM_USDT",       "CM_USDC",      15 if allow_buys else 0,  0,  24.0, 360.0, "v12.6 100x$24 • USDC $24"),
+                    ("USDCUSDT",  False, "CM_USDT",       "CM_USDC",      55 if allow_buys else 0,  0,  24.0, 1320.0, "v12.6 100x$24 • USDC $24"),
                     ("USD1USDT",  False, "CM_USDT",       "CM_USD1",      88 if allow_buys else 0,  0,  24.0, 2150.0, "v12.6 100x$24 • USD1 $24"),
                 ):
                     q_bbo = bbos.get(sym_p)
@@ -3434,8 +3458,8 @@ def main():
                                     and q_bbo["bid"] <= 1.0005
                                     and q_bbo["bidQty"] >= q_bbo["askQty"] * 0.45
                                 )
-                                max_sym_legs = 15
-                                max_buy_slots = 12
+                                max_sym_legs = 25
+                                max_buy_slots = 18
                             elif sym_p == "USD1USDC":
                                 impulse_ok = (
                                     rem_2k_budget >= 20.0
@@ -3450,10 +3474,10 @@ def main():
                                     rem_2k_budget >= 20.0
                                     and free_map[f_key] >= 20.0
                                     and not cons_guards.get(sym_p, {}).get("falling", False)
-                                    and q_bbo["bidQty"] >= q_bbo["askQty"] * 0.25
+                                    and q_bbo["bidQty"] >= q_bbo["askQty"] * 0.15
                                 )
-                                max_sym_legs = 15
-                                max_buy_slots = 10
+                                max_sym_legs = 55
+                                max_buy_slots = 35
                         while len(p_tr) < max_sym_legs and len(p_buy_open) < max_buy_slots and rem_2k_budget >= 20.0 and free_map[f_key] >= 20.0 and impulse_ok:
                             # v12.3 Last-Look 0%-Fee IOC Ask Sniping + Bid+1 Spread Stepping (skips Bid queue when Ask <= 1200 is about to wipe out!):
                             can_snipe_ask = (
