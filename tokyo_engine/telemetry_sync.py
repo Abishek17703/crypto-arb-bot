@@ -1810,12 +1810,13 @@ def main():
                                                         tr["ts"] = loop_ts
                                                         still_tranches.append(tr)
                                                         continue
-                            if sym in ("FDUSDUSDC",) and float(o_live.get("executedQty", 0)) == 0:
-                                ref_ut_s = "FDUSDUSDT"
+                            if sym in ("FDUSDUSDC", "USD1USDC") and float(o_live.get("executedQty", 0)) == 0:
+                                ref_ut_s = "FDUSDUSDT" if sym == "FDUSDUSDC" else "USD1USDT"
                                 ref_dec_s = PAIRS[ref_ut_s]["dec"]
                                 ref_tick_s = PAIRS[ref_ut_s]["tick"]
-                                eff_bpx_ut = tr["buy_px"] if tr["buy_px"] >= 0.99800 else round(tr["sell_px"] * bbos.get("USDCUSDT", {}).get("bid", 1.00071) - 0.00001, ref_dec_s)
-                                if ref_ut_s in bbos and bbos[ref_ut_s]["ask"] >= eff_bpx_ut + ref_tick_s and bbos[ref_ut_s]["ask"] > (tr["sell_px"] * bbos.get("USDCUSDT", {}).get("bid", 1.0)) + 0.00001:
+                                eff_bpx_ut = tr["buy_px"] if (sym == "USD1USDC" and tr["buy_px"] >= 0.99850) or (sym == "FDUSDUSDC" and tr["buy_px"] >= 0.99600) else round(tr["sell_px"] * bbos.get("USDCUSDT", {}).get("bid", 1.00040) - ref_tick_s, ref_dec_s)
+                                # Flip stuck USD1USDC / FDUSDUSDC back to USD1USDT / FDUSDUSDT whenever live USDT Ask >= eff_bpx_ut + 1 tick and USD1USDC/FDUSDUSDC is above live Ask!
+                                if ref_ut_s in bbos and bbos[ref_ut_s]["ask"] >= eff_bpx_ut + ref_tick_s and (q_bbo["ask"] < tr["sell_px"] - spec["tick"] * 0.5 or bbos[ref_ut_s]["ask"] > (tr["sell_px"] * bbos.get("USDCUSDT", {}).get("bid", 1.0)) + ref_tick_s):
                                     cr = api.request("DELETE", "/sapi/v1/margin/order", {"symbol": sym, "orderId": tr["sell_oid"]}, signed=True)
                                     if cr.get("status") == "CANCELED":
                                         ns_px = round(max(eff_bpx_ut + ref_tick_s, bbos[ref_ut_s]["ask"]), ref_dec_s)
@@ -2525,9 +2526,9 @@ def main():
                     p_tr = [t for t in active_tranches if t["symbol"] == sym_p and t["iso"] == is_iso]
                     is_crypto_u1 = sym_p in ("BTCU", "BTCUSD1", "BNBU", "ETHU", "BNBFDUSD", "SOLFDUSD")
 
-                    # v11.4 High-Velocity 14x$142 Pool (11x$142 USD1USDT + 2x$142 USDCUSDT + 1x$142 USD1USDC [10x Tick] | Dynamic +2/+3 Tick | FDUSD 0-Loss Exit):
+                    # v11.4.2 High-Velocity 14x$142 Pool (Exclude 0-Loss FDUSD waiting orders from the 14-clip cap so 100% of free USDT deploys!):
                     if sym_p in ("USD1USDT", "USDCUSDT", "USD1USDC") and allow_buys and (not getattr(api, "_s1_cb_tripped", False)):
-                        tot_active_legs = [t for t in active_tranches if t["symbol"] in ("FDUSDUSDT", "FDUSDUSDC", "USD1USDT", "USDCUSDT", "USD1USDC") and t["state"] in ("BUY_OPEN", "SELL_OPEN")]
+                        tot_active_legs = [t for t in active_tranches if t["symbol"] in ("USD1USDT", "USDCUSDT", "USD1USDC") and t["state"] in ("BUY_OPEN", "SELL_OPEN")]
                         tot_deployed_usd = sum(t["qty"] * t["buy_px"] for t in tot_active_legs)
                         rem_2k_budget = max(0.0, 2000.0 - tot_deployed_usd)
                         if sym_p == "USD1USDC":
