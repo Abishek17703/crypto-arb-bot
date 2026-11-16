@@ -854,14 +854,46 @@ def setup_sol_spot_perp_pilot(api, fapi):
                 api.request("POST", "/sapi/v1/margin/transfer", {"asset": "USDT", "amount": f"{buy_q + 0.50:.2f}", "type": "2"}, signed=True)
                 api.request("POST", "/api/v3/order", {"symbol": q_ast + "USDT", "side": "BUY", "type": "MARKET", "quantity": str(buy_q)}, signed=True)
 
+        # Cancel any stray open orders on SOLFDUSD Spot or SOLUSDC Perp before adopting state:
+        sp_oo = api.request("GET", "/api/v3/openOrders", {"symbol": st["spot_sym"]}, signed=True)
+        if isinstance(sp_oo, list):
+            for _o in sp_oo:
+                api.request("DELETE", "/api/v3/order", {"symbol": st["spot_sym"], "orderId": _o["orderId"]}, signed=True)
+        pp_oo = fapi.request("GET", "/fapi/v1/openOrders", {"symbol": "SOLUSDC"}, signed=True)
+        if isinstance(pp_oo, list):
+            for _o in pp_oo:
+                fapi.request("DELETE", "/fapi/v1/order", {"symbol": "SOLUSDC", "orderId": _o["orderId"]}, signed=True)
+
         sp_a4 = api.request("GET", "/api/v3/account", signed=True)
         sp_qf_now = float(next((b.get("free", 0) for b in sp_a4.get("balances", []) if b.get("asset") == q_ast), 0)) if isinstance(sp_a4, dict) else 0.0
+        sp_sol_now = float(next((float(b.get("free", 0)) + float(b.get("locked", 0)) for b in sp_a4.get("balances", []) if b.get("asset") == "SOL"), 0)) if isinstance(sp_a4, dict) else 0.0
         f_acc2 = fapi.request("GET", "/fapi/v2/account", signed=True)
         fut_uc_now = float(next((fa.get("walletBalance", 0) for fa in f_acc2.get("assets", []) if fa.get("asset") == "USDC"), 0)) if isinstance(f_acc2, dict) else 0.0
-        st["spot_bal"] = round(sp_qf_now, 2)
+        perp_pos_amt = 0.0
+        perp_entry_px = 0.0
+        if isinstance(f_acc2, dict):
+            for fp in f_acc2.get("positions", []):
+                if fp.get("symbol") == "SOLUSDC":
+                    perp_pos_amt = float(fp.get("positionAmt", 0.0))
+                    perp_entry_px = float(fp.get("entryPrice", 0.0))
+        st["spot_bal"] = round(sp_qf_now + sp_sol_now * (perp_entry_px or 71.80), 2)
         st["perp_bal"] = round(fut_uc_now, 2)
         st["ready"] = True
-        st["msg"] = f"ACTIVE $30 PILOT: {st['spot_sym']} (${sp_qf_now:.2f} {q_ast}, mkr={st['spot_maker_fee']*100:.3f}%) + SOLUSDC Perp (${fut_uc_now:.2f} USDC, mkr={st['perp_maker_fee']*100:.3f}%, tkr={st['perp_taker_fee']*100:.3f}%)"
+        if sp_sol_now >= 0.08 and perp_pos_amt <= -0.08:
+            sp_tr = api.request("GET", "/api/v3/myTrades", {"symbol": st["spot_sym"], "limit": 5}, signed=True)
+            last_bpx = perp_entry_px + 0.30
+            if isinstance(sp_tr, list):
+                buys = [x for x in sp_tr if x.get("isBuyer")]
+                if buys:
+                    last_bpx = float(buys[-1]["price"])
+            st["state"] = "HEDGED"
+            st["qty"] = math.floor(min(sp_sol_now, abs(perp_pos_amt)) * 100.0) / 100.0
+            st["spot_px"] = round(last_bpx, 2)
+            st["perp_px"] = round(perp_entry_px, 2)
+            st["entry_ts"] = time.time()
+            st["msg"] = f"HEDGED 1:1 ACTIVE: Long {st['qty']:.2f} {st['spot_sym']} @ ${st['spot_px']:.2f} / Short SOLUSDC Perp @ ${st['perp_px']:.2f}"
+        else:
+            st["msg"] = f"ACTIVE $30 PILOT: {st['spot_sym']} (${sp_qf_now:.2f} {q_ast}, mkr={st['spot_maker_fee']*100:.3f}%) + SOLUSDC Perp (${fut_uc_now:.2f} USDC, mkr={st['perp_maker_fee']*100:.3f}%, tkr={st['perp_taker_fee']*100:.3f}%)"
     except Exception as e:
         st["msg"] = f"SETUP_ERR: {e}"
     api._sp_pilot = st
