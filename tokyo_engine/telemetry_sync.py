@@ -565,8 +565,8 @@ def auto_compound_borrow(api, force_repay_all=False):
                 continue
             if bv_u > 0.0001 and fv_u >= (0.0001 if ast_u == "ETH" else 0.05):
                 api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": ast_u, "isIsolated": "FALSE", "amount": f"{min(fv_u, bv_u):.4f}", "type": "REPAY"}, signed=True)
-        if not force_repay_all and ut_borrowed < 1495.0:
-            need_ut_loan = round(1502.0 - ut_borrowed, 2)
+        if not force_repay_all and ut_borrowed < 1945.0:
+            need_ut_loan = round(1950.0 - ut_borrowed, 2)
             if need_ut_loan >= 5.0:
                 api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "USDT", "isIsolated": "FALSE", "amount": f"{need_ut_loan:.2f}", "type": "BORROW"}, signed=True)
     except Exception:
@@ -1841,8 +1841,8 @@ def main():
                                 ref_tick_s = PAIRS[ref_ut_s]["tick"]
                                 uc_bid_conv = bbos.get("USDCUSDT", {}).get("bid", 1.00045)
                                 eff_bpx_ut = round(tr["buy_px"] * uc_bid_conv, ref_dec_s) if tr["buy_px"] <= 0.99890 else round(tr["buy_px"], ref_dec_s)
-                                # Flip stuck USD1USDC / FDUSDUSDC back to USD1USDT / FDUSDUSDT whenever live USDT Ask >= eff_bpx_ut + 1 tick!
-                                if ref_ut_s in bbos and bbos[ref_ut_s]["ask"] >= eff_bpx_ut + ref_tick_s and (q_bbo["ask"] < tr["sell_px"] - spec["tick"] * 0.5 or bbos[ref_ut_s]["ask"] > (tr["sell_px"] * uc_bid_conv) + ref_tick_s):
+                                # Optimization #3: Flip USD1USDC / FDUSDUSDC to USD1USDT / FDUSDUSDT after 12s whenever live USDT Ask >= eff_bpx_ut + 1 tick!
+                                if ref_ut_s in bbos and bbos[ref_ut_s]["ask"] >= eff_bpx_ut + ref_tick_s and (age_s >= 12.0 or q_bbo["ask"] < tr["sell_px"] - spec["tick"] * 0.5 or bbos[ref_ut_s]["ask"] > (tr["sell_px"] * uc_bid_conv) + ref_tick_s):
                                     cr = api.request("DELETE", "/sapi/v1/margin/order", {"symbol": sym, "orderId": tr["sell_oid"]}, signed=True)
                                     if cr.get("status") == "CANCELED":
                                         ns_px = round(max(eff_bpx_ut + ref_tick_s, bbos[ref_ut_s]["ask"]), ref_dec_s)
@@ -2573,9 +2573,9 @@ def main():
                     ("FDUSDUSDC", False, "CM_USDC",  "CM_FDUSD",   0,                       0, 20.0,   0.0, "STOPPED"),
                     ("USD1U",     False, "CM_U",     "CM_USD1",    0,                       0, 14.0,   0.0, "STOPPED"),
                     ("FDUSDUSDT", False, "CM_USDT",  "CM_FDUSD",   0,                       0, 140.0,  0.0, "STOPPED • DRAINED"),
-                    ("USD1USDC",  False, "CM_USDC",  "CM_USD1",    3 if allow_buys else 0,  0, 133.0, 450.0, "v11.5 20% WEIGHT • USD1USDC $133"),
-                    ("USD1USDT",  False, "CM_USDT",  "CM_USD1",   10 if allow_buys else 0,  0, 140.0, 1500.0, "v11.5 70% TOP-3 • USD1 $140"),
-                    ("USDCUSDT",  False, "CM_USDT",  "CM_USDC",    1 if allow_buys else 0,  0, 200.0, 250.0, "v11.5 10% #1-BID • USDC $200"),
+                    ("USD1USDC",  False, "CM_USDC",  "CM_USD1",    5 if allow_buys else 0,  0, 135.0, 750.0, "v11.7 10x-TICK • USD1USDC $135"),
+                    ("USD1USDT",  False, "CM_USDT",  "CM_USD1",   13 if allow_buys else 0,  0, 140.0, 1950.0, "v11.7 SPREAD-STEP • USD1 $140"),
+                    ("USDCUSDT",  False, "CM_USDT",  "CM_USDC",    2 if allow_buys else 0,  0, 200.0, 400.0, "v11.7 #1-BID • USDC $200"),
                     ("UUSDT",     False, "CM_USDT",  "CM_U",       0,                       0, 14.1,   0.0, "STOPPED"),
                 ):
                     q_bbo = bbos.get(sym_p)
@@ -2586,11 +2586,12 @@ def main():
                     p_tr = [t for t in active_tranches if t["symbol"] == sym_p and t["iso"] == is_iso]
                     is_crypto_u1 = sym_p in ("BTCU", "BTCUSD1", "BNBU", "ETHU", "BNBFDUSD", "SOLFDUSD")
 
-                    # v11.5 Max-Velocity Weightage: 70% USD1USDT Top-3 Ticks (10x$140=$1400) + 20% USD1USDC 10x-Tick (3x$133=$400) + 10% USDCUSDT #1-Bid (1x$200=$200):
+                    # v11.7 Full $2,450 5x Pool (18 Active Slots: 13x$140 USD1USDT + 4x$135 USD1USDC + 1x$200 USDCUSDT | Spread-Stepping Bid+1 | 0 Idle USDC):
                     if sym_p in ("USD1USDT", "USDCUSDT", "USD1USDC") and allow_buys and (not getattr(api, "_s1_cb_tripped", False)):
-                        # Cancel any USD1USDT BUY order sitting > 2 ticks below live Bid so all 10 clips pack into Bid, Bid-1, Bid-2!
+                        # Cancel any USD1USDT BUY order sitting > 2 ticks below live best entry so all clips pack into top 3 ticks (including Bid+1 when spread >= 2 ticks)!
+                        top_entry_ref = round(q_bbo["bid"] + spec["tick"], spec["dec"]) if (sym_p in ("USD1USDT", "USDCUSDT") and (q_bbo["ask"] - q_bbo["bid"]) >= spec["tick"] * 1.8) else round(q_bbo["bid"], spec["dec"])
                         if sym_p == "USD1USDT":
-                            for tx_deep in list([tx for tx in p_tr if tx["state"] == "BUY_OPEN" and (q_bbo["bid"] - tx["buy_px"]) > spec["tick"] * 2.3 and (loop_ts - tx.get("ts", 0)) >= 1.5]):
+                            for tx_deep in list([tx for tx in p_tr if tx["state"] == "BUY_OPEN" and (top_entry_ref - tx["buy_px"]) > spec["tick"] * 2.3 and (loop_ts - tx.get("ts", 0)) >= 1.2]):
                                 cr_dp = api.request("DELETE", "/sapi/v1/margin/order", {"symbol": sym_p, "orderId": tx_deep["buy_oid"]}, signed=True)
                                 if cr_dp.get("status") == "CANCELED":
                                     free_map[f_key] += max(0.0, tx_deep["qty"] - float(cr_dp.get("executedQty", 0))) * tx_deep["buy_px"]
@@ -2598,35 +2599,39 @@ def main():
                                     p_tr.remove(tx_deep)
                         tot_active_legs = [t for t in active_tranches if t["symbol"] in ("USD1USDT", "USDCUSDT", "USD1USDC") and t["state"] in ("BUY_OPEN", "SELL_OPEN")]
                         tot_deployed_usd = sum(t["qty"] * t["buy_px"] for t in tot_active_legs)
-                        rem_2k_budget = max(0.0, 2000.0 - tot_deployed_usd)
+                        rem_2k_budget = max(0.0, 2450.0 - tot_deployed_usd)
+                        p_buy_cnt = sum(1 for tx in p_tr if tx["state"] == "BUY_OPEN")
                         if sym_p == "USD1USDC":
-                            # 20% Weight: Zero-Fee USD1USDC Direct Maker-Maker ($0.0001 tick = +$0.0133 per $133 clip!)
-                            impulse_ok = (
-                                rem_2k_budget >= 25.0
-                                and free_map[f_key] >= 25.0
-                                and not cons_guards.get(sym_p, {}).get("falling", False)
-                                and q_bbo["bidQty"] >= q_bbo["askQty"] * 0.30
-                            )
-                            max_sym_legs = 3
-                        elif sym_p == "USD1USDT":
-                            # 70% Weight: 10x$140 packed into Top-3 Ticks (Bid, Bid-1, Bid-2)
-                            impulse_ok = (
-                                rem_2k_budget >= 25.0
-                                and free_map[f_key] >= 25.0
-                                and not cons_guards.get(sym_p, {}).get("falling", False)
-                            )
-                            max_sym_legs = 10
-                        else:
-                            # 10% Weight: 1x$200 USDCUSDT at #1 Bid (also seeds USDC when CM_USDC + USD1USDC legs < 380 so 20% USD1USDC stays funded!)
-                            uc_pool_now = free_map["CM_USDC"] + sum(tx["qty"] for tx in active_tranches if tx["symbol"] in ("USD1USDC", "USDCUSDT"))
-                            max_sym_legs = 2 if uc_pool_now < 350.0 else 1
+                            # Optimization #1: Deploy 100% of free CM_USDC into USD1USDC BUY orders (up to 4 open BUYs + 2 open SELLs = 6 legs) so $533 USDC never sits idle!
                             impulse_ok = (
                                 rem_2k_budget >= 25.0
                                 and free_map[f_key] >= 25.0
                                 and not cons_guards.get(sym_p, {}).get("falling", False)
                                 and q_bbo["bidQty"] >= q_bbo["askQty"] * 0.25
                             )
-                        while len(p_tr) < max_sym_legs and len(tot_active_legs) < 14 and rem_2k_budget >= 25.0 and free_map[f_key] >= 25.0 and impulse_ok:
+                            max_sym_legs = 6
+                            max_buy_legs = 4
+                        elif sym_p == "USD1USDT":
+                            # 13x$140 packed into Top-3 Ticks (steps inside to Bid+1 whenever 2-tick spread opens!)
+                            impulse_ok = (
+                                rem_2k_budget >= 25.0
+                                and free_map[f_key] >= 25.0
+                                and not cons_guards.get(sym_p, {}).get("falling", False)
+                            )
+                            max_sym_legs = 13
+                            max_buy_legs = 13
+                        else:
+                            # 1x$200 USDCUSDT at #1 Bid (or 2x when CM_USDC < 380):
+                            uc_pool_now = free_map["CM_USDC"] + sum(tx["qty"] for tx in active_tranches if tx["symbol"] in ("USD1USDC", "USDCUSDT"))
+                            max_sym_legs = 2 if uc_pool_now < 380.0 else 1
+                            max_buy_legs = max_sym_legs
+                            impulse_ok = (
+                                rem_2k_budget >= 25.0
+                                and free_map[f_key] >= 25.0
+                                and not cons_guards.get(sym_p, {}).get("falling", False)
+                                and q_bbo["bidQty"] >= q_bbo["askQty"] * 0.25
+                            )
+                        while len(p_tr) < max_sym_legs and p_buy_cnt < max_buy_legs and len(tot_active_legs) < 18 and rem_2k_budget >= 25.0 and free_map[f_key] >= 25.0 and impulse_ok:
                             # v11.6 Last-Look 0%-Fee IOC Ask Sniping + Triangular Dislocation Sniping (skips 16,000+ Bid queue when Ask < 800 is about to wipe out!):
                             can_snipe_ask = (
                                 sym_p not in getattr(api, "_disabled_fee_keys", set())
@@ -2640,7 +2645,7 @@ def main():
                             if can_snipe_ask:
                                 api._last_ioc_snipe_ts = loop_ts
                                 snipe_px = round(q_bbo["ask"], spec["dec"])
-                                clip_cap_s = 133.0 if sym_p == "USD1USDC" else 140.0
+                                clip_cap_s = 135.0 if sym_p == "USD1USDC" else 140.0
                                 pl_snipe_u = min(clip_cap_s, rem_2k_budget, free_map[f_key] * 0.99)
                                 bq_snipe = round(math.floor((pl_snipe_u / snipe_px) / spec["step"] + 1e-9) * spec["step"], 6)
                                 if bq_snipe * snipe_px >= 15.0:
@@ -2662,7 +2667,7 @@ def main():
                                         if "orderId" in sr_sn:
                                             nt_sn = {
                                                 "tid": f"SNIPE_{sym_p[:4]}{len(p_tr)+1}", "symbol": sym_p, "iso": False,
-                                                "lbl": f"v11.6 IOC-SNIPE • {sym_p[:4]} ${int(ex_sn)}",
+                                                "lbl": f"v11.7 IOC-SNIPE • {sym_p[:4]} ${int(ex_sn)}",
                                                 "qty": ex_sn, "buy_px": snipe_px, "sell_px": spx_sn, "buy_oid": "SNIPE", "sell_oid": sr_sn["orderId"],
                                                 "state": "SELL_OPEN", "ts": loop_ts, "pilot": True, "borrowed": False
                                             }
@@ -2676,13 +2681,13 @@ def main():
                                             api._last_buy_map = getattr(api, "_last_buy_map", {})
                                             api._last_buy_map[sym_p] = snipe_px
                                             break
-                            # Pack USD1USDT strictly into Top-3 Ticks (Bid, Bid-1, Bid-2: up to 4 clips/tick across 3 ticks = 10 clips):
+                            # Optimization #2: Step inside 2-tick spreads to Bid+1 (#1 alone at front of queue for instant 0.1s fills!):
                             bpx_entry = None
-                            pass_caps = (1, 2, 3, 4) if sym_p == "USD1USDT" else ((1, 2) if sym_p == "USD1USDC" else (1,))
+                            pass_caps = (1, 2, 3, 4, 5) if sym_p == "USD1USDT" else ((1, 2, 3) if sym_p == "USD1USDC" else (1,))
                             max_tick_depth = 3 if sym_p == "USD1USDT" else (2 if sym_p == "USD1USDC" else 1)
                             for _cap_pass in pass_caps:
                                 for _st_lvl in range(max_tick_depth):
-                                    cand_bpx = round(q_bbo["bid"] - spec["tick"] * _st_lvl, spec["dec"])
+                                    cand_bpx = round(top_entry_ref - spec["tick"] * _st_lvl, spec["dec"])
                                     same_tick_cnt = sum(1 for tx in p_tr if abs((tx["buy_px"] if tx["state"] == "BUY_OPEN" else (tx["sell_px"] - spec["tick"])) - cand_bpx) < spec["tick"] * 0.3)
                                     if same_tick_cnt < _cap_pass:
                                         bpx_entry = cand_bpx
@@ -2696,7 +2701,7 @@ def main():
                             imb_now = q_bbo["bidQty"] / max(1.0, ask_q_now)
                             t_ticks = 3 if (sym_p == "USD1USDT" and ask_q_now < 4500.0 and imb_now >= 2.50) else (2 if (sym_p == "USD1USDT" and (ask_q_now < 12000.0 or imb_now >= 2.20)) else 1)
                             spx_target = round(bpx_entry + spec["tick"] * t_ticks, spec["dec"])
-                            clip_cap_u = 133.0 if sym_p == "USD1USDC" else (200.0 if sym_p == "USDCUSDT" else 140.0)
+                            clip_cap_u = 135.0 if sym_p == "USD1USDC" else (200.0 if sym_p == "USDCUSDT" else 140.0)
                             pl_usd_sz = min(clip_cap_u, rem_2k_budget, free_map[f_key] * 0.99)
                             bq_pl = round(math.floor((pl_usd_sz / bpx_entry) / spec["step"] + 1e-9) * spec["step"], 6)
                             if bq_pl * bpx_entry < 15.0:
@@ -2711,10 +2716,10 @@ def main():
                                 free_map[f_key] -= spent_u
                                 rem_2k_budget = max(0.0, rem_2k_budget - spent_u)
                                 daily_orders_placed += 1
-                                # When USDCUSDT BUY fills and uc_pool_now < 380, let its USDC flow into USD1USDC (20% weight) instead of immediately selling back to USDT!
+                                p_buy_cnt += 1
                                 nt_pl = {
-                                    "tid": f"V115_{sym_p[:4]}{len(p_tr)+1}", "symbol": sym_p, "iso": False,
-                                    "lbl": f"v11.5 70/20/10 • {sym_p[:4]} ${int(bq_pl)}",
+                                    "tid": f"V117_{sym_p[:4]}{len(p_tr)+1}", "symbol": sym_p, "iso": False,
+                                    "lbl": f"v11.7 $2450 5x • {sym_p[:4]} ${int(bq_pl)}",
                                     "qty": bq_pl, "buy_px": bpx_pl, "sell_px": spx_target, "buy_oid": br_pl["orderId"], "sell_oid": None,
                                     "state": "BUY_OPEN", "ts": loop_ts, "pilot": True, "borrowed": False
                                 }
@@ -2934,7 +2939,7 @@ def main():
                 ethu_net_lbl = f"ETHU DN ${ethu_net_v:+.4f} ({int(getattr(api, '_ethu_rts', 0))} RTs)" if "ethu_net_v" in locals() else "ETHU DN $0.0000"
                 s1_rts_tot = int(getattr(api, "_s1_short_rts", 0)) + int(getattr(api, "_btcu_rts", 0))
                 s1_sc_tot = int(getattr(api, "_s1_short_scratches", 0))
-                s1_st_lbl = ("PILOT CB: " + getattr(api, "_s1_cb_reason", "")) if getattr(api, "_s1_cb_tripped", False) else f"v11.6 0%-FEE IOC BAILOUT + LAST-LOOK SNIPE (70% USD1 + 20% USD1USDC + 10% USDC) • 1h {'+$' if live_hourly_rate_usd>=0 else '-$'}{abs(live_hourly_rate_usd):.4f}/hr"
+                s1_st_lbl = ("PILOT CB: " + getattr(api, "_s1_cb_reason", "")) if getattr(api, "_s1_cb_tripped", False) else f"v11.7 $2450 5x FULL-POWER (SPREAD-STEP Bid+1 • 13x USD1 + 4x USD1USDC + 1x USDC) • 1h {'+$' if live_hourly_rate_usd>=0 else '-$'}{abs(live_hourly_rate_usd):.4f}/hr"
                 payload = {
                     "ts": int(loop_ts * 1000),
                     "startEquityUsd": start_equity_usd,
@@ -2974,10 +2979,10 @@ def main():
                             "active": not bool(getattr(api, "_s1_cb_tripped", False)),
                             "cbTripped": bool(getattr(api, "_s1_cb_tripped", False)),
                             "cbReason": getattr(api, "_s1_cb_reason", ""),
-                            "strategy": "v11.6_IOC_BREAKEVEN_BAILOUT_AND_LAST_LOOK_SNIPE",
-                            "budgetUsd": 2000.0,
+                            "strategy": "v11.7_2450USD_SPREAD_STEP_FULL_5X",
+                            "budgetUsd": 2450.0,
                             "idleReserveUsd": 0.0,
-                            "allocStr": "$2000 (70% USD1 Top-3 [10x$140] + 20% USD1USDC [3x$133] + 10% USDC [1x$200])",
+                            "allocStr": "$2450 Full 5x: 13xUSD1 (Bid+1 Step) + 4xUSD1USDC (10x Tick) + 1xUSDC",
                             "legCapUsd": 0.0,
                             "sessionCapUsd": -0.0100,
                             "btcEmaBasis": round(btc_ema_basis if "btc_ema_basis" in locals() else 0.0, 2),
