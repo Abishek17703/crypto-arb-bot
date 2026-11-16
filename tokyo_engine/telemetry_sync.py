@@ -1487,7 +1487,7 @@ def halt_all_orders_and_repay(api):
             oid = oo.get("orderId")
             if sym and oid:
                 api.request("DELETE", "/sapi/v1/margin/order", {"symbol": sym, "orderId": oid}, signed=True)
-    # 2. Cancel 100% of Isolated Margin open orders across all pools
+    # 2. Cancel 100% of Isolated Margin open orders across all pools & flatten/repay any Iso debt
     for iso_sym in ("USDCUSDT", "USD1USDT", "FDUSDUSDT", "FDUSDUSDC", "EURIUSDT"):
         open_i = api.request("GET", "/sapi/v1/margin/openOrders", {"symbol": iso_sym, "isIsolated": "TRUE"}, signed=True)
         if isinstance(open_i, list):
@@ -1495,6 +1495,28 @@ def halt_all_orders_and_repay(api):
                 oid = oo.get("orderId")
                 if oid:
                     api.request("DELETE", "/sapi/v1/margin/order", {"symbol": iso_sym, "isIsolated": "TRUE", "orderId": oid}, signed=True)
+    try:
+        iso_acc_f = api.request("GET", "/sapi/v1/margin/isolated/account", signed=True)
+        for ia_f in iso_acc_f.get("assets", []) if isinstance(iso_acc_f, dict) else []:
+            isym_f = ia_f.get("symbol", "")
+            ba_f = ia_f.get("baseAsset", {})
+            qa_f = ia_f.get("quoteAsset", {})
+            b_free = float(ba_f.get("free", 0))
+            q_free = float(qa_f.get("free", 0))
+            q_bor = float(qa_f.get("borrowed", 0)) + float(qa_f.get("interest", 0))
+            if b_free >= 6.0 and (q_bor > 0.01 or isym_f == "USDCUSDT"):
+                qty_s = str(int(math.floor(b_free)))
+                api.request("POST", "/sapi/v1/margin/order", {"symbol": isym_f, "isIsolated": "TRUE", "side": "SELL", "type": "MARKET", "quantity": qty_s}, signed=True)
+                iso_r2 = api.request("GET", "/sapi/v1/margin/isolated/account", {"symbols": isym_f}, signed=True)
+                ia2_f = (iso_r2.get("assets") or [{}])[0] if isinstance(iso_r2, dict) else {}
+                qa2_f = ia2_f.get("quoteAsset", {})
+                q_free = float(qa2_f.get("free", 0))
+                q_bor = float(qa2_f.get("borrowed", 0)) + float(qa2_f.get("interest", 0))
+            if q_bor > 0.001 and q_free >= 0.01:
+                rep_amt = min(q_free, q_bor)
+                api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": qa_f.get("asset", "USDT"), "isIsolated": "TRUE", "symbol": isym_f, "amount": f"{rep_amt:.4f}", "type": "REPAY"}, signed=True)
+    except Exception:
+        pass
     auto_compound_borrow(api, force_repay_all=True)
     # 2b. PRIORITY STEP: Flatten Cross-Margin USD1/USDC & repay $828.73 USDT loan via Manual-Liquidation / Convert-Margin / Spot-Trade-Unlock:
     try:
@@ -1828,10 +1850,10 @@ def main():
     except Exception:
         pass
     try:
-        s3.put_object(Bucket=S3_BUCKET, Key="pause-control.json", Body=json.dumps({"paused": False, "ts": int(time.time() * 1000)}).encode("utf-8"), ContentType="application/json")
+        s3.put_object(Bucket=S3_BUCKET, Key="pause-control.json", Body=json.dumps({"paused": True, "ts": int(time.time() * 1000)}).encode("utf-8"), ContentType="application/json")
     except Exception:
         pass
-    api._user_paused = False
+    api._user_paused = True
     api._test_stop_ts = 0.0
     api._stablecoin_only_5m = True
     api._cm_swarm_paused = False
