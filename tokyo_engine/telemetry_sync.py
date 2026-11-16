@@ -3462,7 +3462,7 @@ def main():
                     ("FDUSDUSDT", False, "CM_USDT",       "CM_FDUSD",      0,                       0,  24.0,   0.0, "STOPPED • 0-LOSS DRAIN"),
                     ("USD1USDC",  False, "CM_USDC",       "CM_USD1",      15 if allow_buys else 0,  0,  24.0, 360.0, "v12.6 10x-TICK • USD1/USDC $24"),
                     ("UUSDT",     False, "CM_USDT",       "CM_U",         25 if allow_buys else 0,  0,  24.0, 600.0, "v12.6 10x-TICK • U/USDT $24"),
-                    ("USDCUSDT",  True,  "ISO_USDC_USDT", "ISO_USDC_BASE", 70 if allow_buys else 0, 0,  60.0, 4200.0, "v13.3 10x ISO • USDC $60"),
+                    ("USDCUSDT",  True,  "ISO_USDC_USDT", "ISO_USDC_BASE", 70 if allow_buys else 0, 0, 140.0, 4940.0, "v13.7 10x ISO • USDC $140"),
                     ("USDCUSDT",  False, "CM_USDT",       "CM_USDC",      55 if allow_buys else 0,  0,  24.0, 1320.0, "v12.6 100x$24 • USDC $24"),
                     ("USD1USDT",  False, "CM_USDT",       "CM_USD1",      88 if allow_buys else 0,  0,  24.0, 2150.0, "v12.6 100x$24 • USD1 $24"),
                 ):
@@ -3480,10 +3480,10 @@ def main():
                         if is_iso:
                             tot_iso_legs = [t for t in active_tranches if t["symbol"] == "USDCUSDT" and t["iso"] and t["state"] in ("BUY_OPEN", "SELL_OPEN")]
                             tot_deployed_usd = sum(t["qty"] * t["buy_px"] for t in tot_iso_legs)
-                            rem_2k_budget = max(0.0, 4200.0 - tot_deployed_usd)
+                            rem_2k_budget = max(0.0, 4940.0 - tot_deployed_usd)
                             max_sym_legs = 70
                             max_buy_slots = 35
-                            clip_sz_u = 60.0
+                            clip_sz_u = 140.0
                             impulse_ok = (
                                 rem_2k_budget >= 20.0
                                 and free_map[f_key] >= 20.0
