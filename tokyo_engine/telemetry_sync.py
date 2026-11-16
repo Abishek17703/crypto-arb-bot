@@ -776,101 +776,10 @@ MULTI_DN_SPECS = {
 }
 
 
-def setup_sol_spot_perp_pilot(api, fapi):
-    # v13.0 $30 ($15 Spot + $15 Perp) Pre-Flight Gap Verification & Seeding:
-    st = {
-        "ready": False,
-        "spot_sym": "SOLFDUSD",
-        "spot_quote": "FDUSD",
-        "perp_sym": "SOLUSDC",
-        "spot_maker_fee": 0.0,
-        "perp_maker_fee": 0.0,
-        "perp_taker_fee": 0.0004,
-        "state": "IDLE",
-        "ema_basis_bps": None,
-        "last_basis_bps": 0.0,
-        "last_edge_bps": 0.0,
-        "qty": 0.0,
-        "spot_oid": None,
-        "perp_oid": None,
-        "spot_px": 0.0,
-        "perp_px": 0.0,
-        "entry_basis_bps": 0.0,
-        "hedge_start_ts": 0.0,
-        "hedge_ref_bid": 0.0,
-        "entry_ts": 0.0,
-        "realized_pnl": 0.0,
-        "unrealized_pnl": 0.0,
-        "rts": 0,
-        "ioc_bailouts": 0,
-        "msg": "Initializing $30 Spot-Perp Pilot...",
-    }
+def flatten_spot_perp_to_pool(api, fapi):
+    # v13.3: Flatten 100% of Spot-Perp Pilot (SOL/XRP/DOGE/BNB + FDUSD + UMFUTURE USDC) back into USDT/USDC and sweep to Margin pool!
     try:
-        # Gap 3: Verify 0% Maker Fee across SOL Spot candidates (SOLFDUSD, SOLU, SOLUSD1):
-        tf_res = api.request("GET", "/sapi/v1/asset/tradeFee", signed=True)
-        fee_map = {x.get("symbol"): float(x.get("makerCommission", 0.001)) for x in tf_res} if isinstance(tf_res, list) else {}
-        chosen_sp = None
-        for cand_sym, cand_q in (("SOLFDUSD", "FDUSD"), ("SOLU", "U"), ("SOLUSD1", "USD1")):
-            if fee_map.get(cand_sym, 0.0) <= 0.00001:
-                chosen_sp = (cand_sym, cand_q, fee_map.get(cand_sym, 0.0))
-                break
-        if chosen_sp is None:
-            chosen_sp = ("SOLFDUSD", "FDUSD", fee_map.get("SOLFDUSD", 0.0))
-        st["spot_sym"], st["spot_quote"], st["spot_maker_fee"] = chosen_sp
-
-        # Gap 5: Verify Futures API permission & commissionRate on SOLUSDC Perp:
-        f_acc = fapi.request("GET", "/fapi/v2/account", signed=True)
-        if "_error" in f_acc:
-            st["msg"] = f"FUTURES_API_CHECK: {f_acc.get('msg', f_acc)[:140]}"
-            api._sp_pilot = st
-            return st
-        f_comm = fapi.request("GET", "/fapi/v1/commissionRate", {"symbol": "SOLUSDC"}, signed=True)
-        if isinstance(f_comm, dict) and "makerCommissionRate" in f_comm:
-            st["perp_maker_fee"] = float(f_comm.get("makerCommissionRate", 0.0))
-            st["perp_taker_fee"] = float(f_comm.get("takerCommissionRate", 0.0004))
-
-        for _c_k, _c_sp in MULTI_DN_SPECS.items():
-            fapi.request("POST", "/fapi/v1/leverage", {"symbol": _c_sp["perp"], "leverage": 2}, signed=True)
-        st["scan"] = {k: {"ema_bps": None, "basis_bps": 0.0, "edge_bps": 0.0, "prev_pp_bid": 0.0, "pp_up": False} for k in MULTI_DN_SPECS}
-        st["active_coin"] = "SOL"
-
-        # Gap 4: Seed exactly $15.50 USDC in UMFUTURE + $15.50 Quote (FDUSD/U/USD1) in Spot while leaving ~$467.85 USDT untouched in Cross-Margin!
-        fut_usdc = 0.0
-        for fa in f_acc.get("assets", []):
-            if fa.get("asset") == "USDC":
-                fut_usdc = float(fa.get("walletBalance", 0.0))
-        if fut_usdc < 14.50:
-            need_uc = round(15.50 - fut_usdc, 2)
-            # Move 5.00 USDC from Cross-Margin to Spot if available:
-            api.request("POST", "/sapi/v1/margin/transfer", {"asset": "USDC", "amount": "5.00", "type": "2"}, signed=True)
-            sp_a = api.request("GET", "/api/v3/account", signed=True)
-            sp_uc = float(next((b.get("free", 0) for b in sp_a.get("balances", []) if b.get("asset") == "USDC"), 0)) if isinstance(sp_a, dict) else 0.0
-            if sp_uc < need_uc:
-                buy_uc = int(math.ceil(need_uc - sp_uc + 1.0))
-                if buy_uc >= 6:
-                    api.request("POST", "/sapi/v1/margin/transfer", {"asset": "USDT", "amount": f"{buy_uc + 0.50:.2f}", "type": "2"}, signed=True)
-                    api.request("POST", "/api/v3/order", {"symbol": "USDCUSDT", "side": "BUY", "type": "MARKET", "quantity": str(buy_uc)}, signed=True)
-            sp_a2 = api.request("GET", "/api/v3/account", signed=True)
-            sp_uc2 = float(next((b.get("free", 0) for b in sp_a2.get("balances", []) if b.get("asset") == "USDC"), 0)) if isinstance(sp_a2, dict) else 0.0
-            tr_uc = min(round(need_uc, 2), math.floor(sp_uc2 * 100.0) / 100.0)
-            if tr_uc >= 1.0:
-                r_trf = api.request("POST", "/sapi/v1/asset/transfer", {"type": "MAIN_UMFUTURE", "asset": "USDC", "amount": f"{tr_uc:.2f}"}, signed=True)
-                if "tranId" not in r_trf:
-                    api.request("POST", "/sapi/v1/futures/transfer", {"asset": "USDC", "amount": f"{tr_uc:.2f}", "type": "1"}, signed=True)
-
-        # Ensure $15.50 of Spot quote asset (FDUSD / U / USD1) in Spot:
-        q_ast = st["spot_quote"]
-        sp_a3 = api.request("GET", "/api/v3/account", signed=True)
-        sp_qf = float(next((b.get("free", 0) for b in sp_a3.get("balances", []) if b.get("asset") == q_ast), 0)) if isinstance(sp_a3, dict) else 0.0
-        sp_bals_map = {b.get("asset"): float(b.get("free", 0)) + float(b.get("locked", 0)) for b in sp_a3.get("balances", [])} if isinstance(sp_a3, dict) else {}
-        has_any_coin = any(sp_bals_map.get(ck, 0.0) >= MULTI_DN_SPECS[ck]["min_q"] for ck in MULTI_DN_SPECS)
-        if sp_qf < 14.50 and not has_any_coin:
-            buy_q = int(math.ceil(16.0 - sp_qf))
-            if buy_q >= 6:
-                api.request("POST", "/sapi/v1/margin/transfer", {"asset": "USDT", "amount": f"{buy_q + 0.50:.2f}", "type": "2"}, signed=True)
-                api.request("POST", "/api/v3/order", {"symbol": q_ast + "USDT", "side": "BUY", "type": "MARKET", "quantity": str(buy_q)}, signed=True)
-
-        # Cancel any stray open orders across all 4 Spot-Perp symbols before adopting state:
+        # 1. Cancel any open Spot & UMFUTURE orders on the 4 pilot pairs:
         for _ck, _csp in MULTI_DN_SPECS.items():
             sp_oo = api.request("GET", "/api/v3/openOrders", {"symbol": _csp["spot"]}, signed=True)
             if isinstance(sp_oo, list):
@@ -881,54 +790,72 @@ def setup_sol_spot_perp_pilot(api, fapi):
                 for _o in pp_oo:
                     fapi.request("DELETE", "/fapi/v1/order", {"symbol": _csp["perp"], "orderId": _o["orderId"]}, signed=True)
 
-        sp_a4 = api.request("GET", "/api/v3/account", signed=True)
-        sp_map4 = {b.get("asset"): float(b.get("free", 0)) + float(b.get("locked", 0)) for b in sp_a4.get("balances", [])} if isinstance(sp_a4, dict) else {}
-        sp_qf_now = sp_map4.get(q_ast, 0.0)
-        f_acc2 = fapi.request("GET", "/fapi/v2/account", signed=True)
-        fut_uc_now = float(next((fa.get("walletBalance", 0) for fa in f_acc2.get("assets", []) if fa.get("asset") == "USDC"), 0)) if isinstance(f_acc2, dict) else 0.0
-        adopted_c = None
-        if isinstance(f_acc2, dict):
-            for fp in f_acc2.get("positions", []):
+        # 2. Close any open UMFUTURE positions:
+        f_acc = fapi.request("GET", "/fapi/v2/account", signed=True)
+        if isinstance(f_acc, dict):
+            for fp in f_acc.get("positions", []):
                 p_amt = float(fp.get("positionAmt", 0.0))
-                p_epx = float(fp.get("entryPrice", 0.0))
                 p_sym = fp.get("symbol", "")
                 for _ck, _csp in MULTI_DN_SPECS.items():
                     if _csp["perp"] == p_sym and abs(p_amt) >= _csp["min_q"]:
-                        if sp_map4.get(_ck, 0.0) >= _csp["min_q"]:
-                            adopted_c = (_ck, _csp, sp_map4[_ck], p_amt, p_epx)
-                            break
-                        else:
-                            # Close any orphan Perp position where Spot is already flat:
-                            q_cl = round(math.floor(abs(p_amt) / _csp["step"] + 1e-9) * _csp["step"], _csp["q_dec"])
-                            fapi.request("POST", "/fapi/v1/order", {
-                                "symbol": p_sym, "side": "BUY" if p_amt < 0 else "SELL", "type": "MARKET",
-                                "quantity": f"{q_cl:.{_csp['q_dec']}f}", "reduceOnly": "true"
-                            }, signed=True)
-        st["spot_bal"] = round(sp_qf_now + (adopted_c[2] * adopted_c[4] if adopted_c else 0.0), 2)
-        st["perp_bal"] = round(fut_uc_now, 2)
-        st["ready"] = True
-        if adopted_c:
-            _ck, _csp, _sp_q, _pp_q, _pp_epx = adopted_c
-            sp_tr = api.request("GET", "/api/v3/myTrades", {"symbol": _csp["spot"], "limit": 5}, signed=True)
-            last_bpx = _pp_epx
-            if isinstance(sp_tr, list):
-                buys = [x for x in sp_tr if x.get("isBuyer")]
-                if buys:
-                    last_bpx = float(buys[-1]["price"])
-            st["active_coin"] = _ck
-            st["spot_sym"] = _csp["spot"]
-            st["perp_sym"] = _csp["perp"]
-            st["state"] = "HEDGED"
-            st["qty"] = round(math.floor(min(_sp_q, abs(_pp_q)) / _csp["step"] + 1e-9) * _csp["step"], _csp["q_dec"])
-            st["spot_px"] = round(last_bpx, _csp["px_dec"])
-            st["perp_px"] = round(_pp_epx, _csp["px_dec"])
-            st["entry_ts"] = time.time()
-            st["entry_was_ioc"] = True
-            st["msg"] = f"HEDGED 1:1 ACTIVE ({_ck}): Long {st['qty']:.{_csp['q_dec']}f} {_csp['spot']} @ ${st['spot_px']:.{_csp['px_dec']}f} / Short {_csp['perp']} @ ${st['perp_px']:.{_csp['px_dec']}f}"
-        else:
-            st["msg"] = f"ACTIVE $30 PILOT: {st['spot_sym']} (${sp_qf_now:.2f} {q_ast}, mkr={st['spot_maker_fee']*100:.3f}%) + SOLUSDC Perp (${fut_uc_now:.2f} USDC, mkr={st['perp_maker_fee']*100:.3f}%, tkr={st['perp_taker_fee']*100:.3f}%)"
-    except Exception as e:
-        st["msg"] = f"SETUP_ERR: {e}"
+                        q_cl = round(math.floor(abs(p_amt) / _csp["step"] + 1e-9) * _csp["step"], _csp["q_dec"])
+                        fapi.request("POST", "/fapi/v1/order", {
+                            "symbol": p_sym, "side": "BUY" if p_amt < 0 else "SELL", "type": "MARKET",
+                            "quantity": f"{q_cl:.{_csp['q_dec']}f}", "reduceOnly": "true"
+                        }, signed=True)
+
+        # 3. Transfer all UMFUTURE USDC & USDT back to Spot:
+        f_acc2 = fapi.request("GET", "/fapi/v2/account", signed=True)
+        if isinstance(f_acc2, dict):
+            for fa in f_acc2.get("assets", []):
+                f_ast = fa.get("asset", "")
+                f_av = math.floor(float(fa.get("availableBalance", 0.0)) * 100.0) / 100.0
+                if f_ast in ("USDC", "USDT") and f_av >= 0.50:
+                    r_tr = api.request("POST", "/sapi/v1/asset/transfer", {"type": "UMFUTURE_MAIN", "asset": f_ast, "amount": f"{f_av:.2f}"}, signed=True)
+                    if "tranId" not in r_tr:
+                        api.request("POST", "/sapi/v1/futures/transfer", {"asset": f_ast, "amount": f"{f_av:.2f}", "type": "2"}, signed=True)
+
+        # 4. Sell any Spot SOL/XRP/DOGE/BNB & FDUSD into USDT/USDC, then sweep all Spot USDT/USDC to Cross Margin:
+        sp_a = api.request("GET", "/api/v3/account", signed=True)
+        if isinstance(sp_a, dict):
+            sp_map = {b.get("asset"): float(b.get("free", 0.0)) for b in sp_a.get("balances", [])}
+            for _ck, _csp in MULTI_DN_SPECS.items():
+                q_sp = sp_map.get(_ck, 0.0)
+                if q_sp >= _csp["min_q"]:
+                    q_sell = round(math.floor(q_sp / _csp["step"] + 1e-9) * _csp["step"], _csp["q_dec"])
+                    api.request("POST", "/api/v3/order", {"symbol": _ck + "USDT", "side": "SELL", "type": "MARKET", "quantity": f"{q_sell:.{_csp['q_dec']}f}"}, signed=True)
+            fd_sp = math.floor(sp_map.get("FDUSD", 0.0))
+            if fd_sp >= 6:
+                api.request("POST", "/api/v3/order", {"symbol": "FDUSDUSDT", "side": "SELL", "type": "MARKET", "quantity": str(fd_sp)}, signed=True)
+            uc_sp = math.floor(sp_map.get("USDC", 0.0))
+            if uc_sp >= 6:
+                api.request("POST", "/api/v3/order", {"symbol": "USDCUSDT", "side": "SELL", "type": "MARKET", "quantity": str(uc_sp)}, signed=True)
+
+        sp_a2 = api.request("GET", "/api/v3/account", signed=True)
+        if isinstance(sp_a2, dict):
+            for b in sp_a2.get("balances", []):
+                ast_s = b.get("asset", "")
+                fv_s = math.floor(float(b.get("free", 0.0)) * 100.0) / 100.0
+                if ast_s in ("USDT", "USDC") and fv_s >= 0.50:
+                    api.request("POST", "/sapi/v1/margin/transfer", {"asset": ast_s, "amount": f"{fv_s:.2f}", "type": "1"}, signed=True)
+    except Exception:
+        pass
+
+
+def setup_sol_spot_perp_pilot(api, fapi):
+    flatten_spot_perp_to_pool(api, fapi)
+    st = {
+        "ready": False,
+        "spot_sym": "SOLFDUSD",
+        "spot_quote": "FDUSD",
+        "perp_sym": "SOLUSDC",
+        "state": "FLATTENED",
+        "realized_pnl": 0.0,
+        "unrealized_pnl": 0.0,
+        "rts": 0,
+        "ioc_bailouts": 0,
+        "msg": "FLATTENED TO POOL — $30 merged into Stablecoin 10x Isolated + 5x Cross Swarm",
+    }
     api._sp_pilot = st
     return st
 
@@ -1259,8 +1186,15 @@ def run_sol_spot_perp_tick(api, fapi, bbos, loop_ts, round_trips, cached_total_u
 
 
 def auto_compound_borrow(api, force_repay_all=False):
-    # v13.2 Dual-Engine Mode: Keep Spot ($16 FDUSD) + UMFUTURE ($15.50 USDC) isolated for the $30 Spot-Perp Pilot while compounding Cross-Margin + 10x Isolated!
+    # v13.3: Sweep any Spot USDT/USDC (>= $1.00) into Cross-Margin, then scale 10x Isolated USDCUSDT to $440 seed (~$4,400 pool)!
     try:
+        spot_s = api.request("GET", "/api/v3/account", signed=True)
+        for b in spot_s.get("balances", []):
+            ast_b = b.get("asset", "")
+            if ast_b in ("USDT", "USDC") and float(b.get("free", 0)) >= 1.00:
+                fv_b = math.floor(float(b["free"]) * 100) / 100.0
+                if fv_b >= 1.00:
+                    api.request("POST", "/sapi/v1/margin/transfer", {"asset": ast_b, "amount": f"{fv_b:.2f}", "type": "1"}, signed=True)
         iso_acc = api.request("GET", "/sapi/v1/margin/isolated/account", signed=True)
         for ia in iso_acc.get("assets", []):
             isym = ia.get("symbol", "")
@@ -1309,15 +1243,15 @@ def auto_compound_borrow(api, force_repay_all=False):
                 ba_uc = ia_uc.get("baseAsset", {})
                 iso_net_u = float(qa_uc.get("netAsset", 0)) + float(ba_uc.get("netAsset", 0))
                 iso_bor_u = float(qa_uc.get("borrowed", 0)) + float(qa_uc.get("interest", 0))
-                # Repay idle Cross-Margin USDT debt first so we can seed $350 USDT into 10x Isolated USDCUSDT ($3,490 10x Pool!):
-                if iso_net_u < 345.0 and ut_borrowed > 10.0 and cm_ut_free >= 100.0:
+                # Repay idle Cross-Margin USDT debt first so we can seed $420 USDT into 10x Isolated USDCUSDT ($4,180 10x Pool!):
+                if iso_net_u < 415.0 and ut_borrowed > 10.0 and cm_ut_free >= 100.0:
                     rep_cm = min(cm_ut_free, ut_borrowed)
                     api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "USDT", "isIsolated": "FALSE", "amount": f"{rep_cm:.2f}", "type": "REPAY"}, signed=True)
                     cm_acc_r = api.request("GET", "/sapi/v1/margin/account", signed=True)
                     cm_ut_free = float(next((a.get("free", 0) for a in cm_acc_r.get("userAssets", []) if a.get("asset") == "USDT"), 0)) if isinstance(cm_acc_r, dict) else 0.0
                     ut_borrowed = float(next((float(a.get("borrowed", 0)) + float(a.get("interest", 0)) for a in cm_acc_r.get("userAssets", []) if a.get("asset") == "USDT"), 0)) if isinstance(cm_acc_r, dict) else 0.0
-                if iso_net_u < 345.0 and cm_ut_free >= 25.0 and ut_borrowed < 50.0:
-                    need_seed = min(round(350.0 - iso_net_u, 2), math.floor((cm_ut_free - 10.0) * 100) / 100.0)
+                if iso_net_u < 415.0 and cm_ut_free >= 15.0 and ut_borrowed < 50.0:
+                    need_seed = min(round(420.0 - iso_net_u, 2), math.floor((cm_ut_free - 5.0) * 100) / 100.0)
                     if need_seed >= 10.0:
                         r_u1 = api.request("POST", "/sapi/v1/asset/transfer", {"type": "MARGIN_ISOLATEDMARGIN", "asset": "USDT", "amount": f"{need_seed:.2f}", "toSymbol": "USDCUSDT"}, signed=True)
                         if "tranId" in r_u1:
@@ -3423,7 +3357,7 @@ def main():
                     ("FDUSDUSDT", False, "CM_USDT",       "CM_FDUSD",      0,                       0,  24.0,   0.0, "STOPPED • 0-LOSS DRAIN"),
                     ("USD1USDC",  False, "CM_USDC",       "CM_USD1",      15 if allow_buys else 0,  0,  24.0, 360.0, "v12.6 10x-TICK • USD1/USDC $24"),
                     ("UUSDT",     False, "CM_USDT",       "CM_U",         25 if allow_buys else 0,  0,  24.0, 600.0, "v12.6 10x-TICK • U/USDT $24"),
-                    ("USDCUSDT",  True,  "ISO_USDC_USDT", "ISO_USDC_BASE", 58 if allow_buys else 0, 0,  60.0, 3480.0, "v13.2 10x ISO • USDC $60"),
+                    ("USDCUSDT",  True,  "ISO_USDC_USDT", "ISO_USDC_BASE", 70 if allow_buys else 0, 0,  60.0, 4200.0, "v13.3 10x ISO • USDC $60"),
                     ("USDCUSDT",  False, "CM_USDT",       "CM_USDC",      55 if allow_buys else 0,  0,  24.0, 1320.0, "v12.6 100x$24 • USDC $24"),
                     ("USD1USDT",  False, "CM_USDT",       "CM_USD1",      88 if allow_buys else 0,  0,  24.0, 2150.0, "v12.6 100x$24 • USD1 $24"),
                 ):
@@ -3441,9 +3375,9 @@ def main():
                         if is_iso:
                             tot_iso_legs = [t for t in active_tranches if t["symbol"] == "USDCUSDT" and t["iso"] and t["state"] in ("BUY_OPEN", "SELL_OPEN")]
                             tot_deployed_usd = sum(t["qty"] * t["buy_px"] for t in tot_iso_legs)
-                            rem_2k_budget = max(0.0, 3480.0 - tot_deployed_usd)
-                            max_sym_legs = 58
-                            max_buy_slots = 30
+                            rem_2k_budget = max(0.0, 4200.0 - tot_deployed_usd)
+                            max_sym_legs = 70
+                            max_buy_slots = 35
                             clip_sz_u = 60.0
                             impulse_ok = (
                                 rem_2k_budget >= 20.0
