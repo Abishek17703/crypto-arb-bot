@@ -855,54 +855,39 @@ def halt_all_orders_and_repay(api):
                 if oid:
                     api.request("DELETE", "/sapi/v1/margin/order", {"symbol": iso_sym, "isIsolated": "TRUE", "orderId": oid}, signed=True)
     auto_compound_borrow(api, force_repay_all=True)
-    # 2b. PRIORITY STEP: Repay 100% of Cross-Margin USDT debt using Collateral Repay (/sapi/v1/margin/repay-debt) + Spot/Convert sweep (bypasses Margin -1015 order limit!):
+    # 2b. PRIORITY STEP: Flatten Cross-Margin USD1/USDC & repay $828.73 USDT loan via Manual-Liquidation / Convert-Margin / Spot-Trade-Unlock:
     try:
         dbg_msgs = []
         cm_fast = api.request("GET", "/sapi/v1/margin/account", signed=True)
         amap_f = {a.get("asset"): a for a in cm_fast.get("userAssets", [])} if isinstance(cm_fast, dict) else {}
         ut_d = float(amap_f.get("USDT", {}).get("borrowed", 0)) + float(amap_f.get("USDT", {}).get("interest", 0))
-        if ut_d > 0.01:
-            # Method A: Native Binance Margin Collateral Repay (/sapi/v1/margin/repay-debt)
-            rd1 = api.request("POST", "/sapi/v1/margin/repay-debt", {
-                "asset": "USDT", "amount": f"{ut_d:.4f}", "specifyRepayAssets": "USD1,USDC,U,FDUSD", "isIsolated": "FALSE"
-            }, signed=True)
-            dbg_msgs.append(f"RD1:{rd1}")
-            if "tranId" not in str(rd1) and "success" not in str(rd1).lower():
-                rd2 = api.request("POST", "/sapi/v1/margin/repay-debt", {
-                    "asset": "USDT", "specifyRepayAssets": "USD1,USDC", "isIsolated": "FALSE"
-                }, signed=True)
-                dbg_msgs.append(f"RD2:{rd2}")
-        # Method B: Iterative maxTransferable -> Spot SELL (/api/v3/order + Convert) -> Margin USDT Transfer -> REPAY loop:
-        for _step in range(6):
-            cm_now = api.request("GET", "/sapi/v1/margin/account", signed=True)
-            amap_n = {a.get("asset"): a for a in cm_now.get("userAssets", [])} if isinstance(cm_now, dict) else {}
-            for s_ast, s_sym in (("USD1", "USD1USDT"), ("USDC", "USDCUSDT"), ("U", "UUSDT"), ("FDUSD", "FDUSDUSDT")):
-                fv_n = float(amap_n.get(s_ast, {}).get("free", 0))
-                if fv_n >= 1.0:
-                    mx_t = api.request("GET", "/sapi/v1/margin/maxTransferable", {"asset": s_ast}, signed=True)
-                    can_t = min(fv_n, float(mx_t.get("amount", 0))) if isinstance(mx_t, dict) else 0.0
-                    if can_t >= 1.0:
-                        amt_t = f"{math.floor(can_t * 100.0) / 100.0:.2f}"
-                        tr_r = api.request("POST", "/sapi/v1/margin/transfer", {"asset": s_ast, "amount": amt_t, "type": "2"}, signed=True)
-                        dbg_msgs.append(f"TR_{s_ast}:{amt_t}:{tr_r.get('tranId') or tr_r.get('msg')}")
-                        sp_q = int(math.floor(can_t))
-                        if sp_q >= 6:
-                            sp_o = api.request("POST", "/api/v3/order", {"symbol": s_sym, "side": "SELL", "type": "MARKET", "quantity": str(sp_q)}, signed=True)
-                            dbg_msgs.append(f"SP_{s_sym}:{sp_o.get('status') or sp_o.get('msg')}")
-                        # Also try Convert API for any Spot balance:
-                        qt = api.request("POST", "/sapi/v1/convert/getQuote", {"fromAsset": s_ast, "toAsset": "USDT", "fromAmount": amt_t}, signed=True)
-                        if isinstance(qt, dict) and "quoteId" in qt:
-                            api.request("POST", "/sapi/v1/convert/acceptQuote", {"quoteId": qt["quoteId"]}, signed=True)
-            sp_acc = api.request("GET", "/api/v3/account", signed=True)
-            sp_ut = float(next((b.get("free", 0) for b in sp_acc.get("balances", []) if b.get("asset") == "USDT"), 0)) if isinstance(sp_acc, dict) else 0.0
-            if sp_ut >= 0.50:
-                ut_amt = f"{math.floor(sp_ut * 100.0) / 100.0:.2f}"
-                api.request("POST", "/sapi/v1/margin/transfer", {"asset": "USDT", "amount": ut_amt, "type": "1"}, signed=True)
-                auto_compound_borrow(api, force_repay_all=True)
-            else:
-                break
+        u1_f = int(math.floor(float(amap_f.get("USD1", {}).get("free", 0))))
+        uc_f = int(math.floor(float(amap_f.get("USDC", {}).get("free", 0))))
+        if ut_d > 0.01 or u1_f >= 6 or uc_f >= 6:
+            # 1) Try Margin Manual Liquidation (/sapi/v1/margin/manual-liquidation):
+            ml_r = api.request("POST", "/sapi/v1/margin/manual-liquidation", {"type": "MARGIN"}, signed=True)
+            dbg_msgs.append(f"ML:{ml_r.get('msg') or ml_r}")
+            # 2) Try Binance Convert with walletType=MARGIN:
+            for c_ast, c_qty in (("USD1", u1_f), ("USDC", uc_f)):
+                if c_qty >= 6:
+                    qt_m = api.request("POST", "/sapi/v1/convert/getQuote", {
+                        "fromAsset": c_ast, "toAsset": "USDT", "fromAmount": str(c_qty), "walletType": "MARGIN"
+                    }, signed=True)
+                    if isinstance(qt_m, dict) and "quoteId" in qt_m:
+                        ac_m = api.request("POST", "/sapi/v1/convert/acceptQuote", {"quoteId": qt_m["quoteId"], "walletType": "MARGIN"}, signed=True)
+                        dbg_msgs.append(f"CV_{c_ast}:{ac_m}")
+                    else:
+                        dbg_msgs.append(f"CV_{c_ast}:{qt_m.get('msg') or qt_m}")
+            # 3) Try USDCUSDT & USD1USDT Market Sell directly (and check if USDCUSDT works or if -1015 is account-wide):
+            if uc_f >= 6:
+                r_uc = api.request("POST", "/sapi/v1/margin/order", {"symbol": "USDCUSDT", "side": "SELL", "type": "MARKET", "quantity": str(uc_f)}, signed=True)
+                dbg_msgs.append(f"UC:{r_uc.get('status') or r_uc.get('msg')}")
+            if u1_f >= 6:
+                r_u1 = api.request("POST", "/sapi/v1/margin/order", {"symbol": "USD1USDT", "side": "SELL", "type": "MARKET", "quantity": str(u1_f)}, signed=True)
+                dbg_msgs.append(f"U1:{r_u1.get('status') or r_u1.get('msg')}")
+            auto_compound_borrow(api, force_repay_all=True)
         if dbg_msgs:
-            api._s1_cb_reason = " | ".join(dbg_msgs)[:240]
+            api._s1_cb_reason = " | ".join(dbg_msgs)[:280]
     except Exception as e_f:
         api._s1_cb_reason = f"FLAT_EXC:{e_f}"[:200]
     # 3. Sweep 100% of ALL non-USDT assets (Cross Margin, Isolated Margin, and Spot — even 0.00001 fractional dust) into pure USDT:
