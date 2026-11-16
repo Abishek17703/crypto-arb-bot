@@ -1954,15 +1954,21 @@ def main():
                                     or (age_s >= step_wait_s and tr["sell_px"] >= tr["buy_px"] + min_step_gain * 1.8 and q_bbo["ask"] <= tr["buy_px"] + min_step_gain * 1.2)
                                 )
                             )
-                            # Strictly >= Breakeven ($0.00 loss) Step-Down ONLY (NEVER step down below buy_px!):
+                            # 50% Profit-Vault Waterfall Unstick + Breakeven Step-Down (keeps 50% of every realized win permanently in wallet while unsticking the cheapest stuck tranche!):
                             want_vault_unstick = False
                             vault_target_px = tr["sell_px"]
                             vault_subsidy_need = 0.0
                             if not want_step_1tick and sym in ("USD1USDT", "USDCUSDT", "FDUSDUSDT") and float(o_live.get("executedQty", 0)) == 0 and q_bbo["ask"] < tr["sell_px"] - spec["tick"] * 0.5:
-                                if age_s >= 12.0 and q_bbo["ask"] >= tr["buy_px"] - spec["tick"] * 0.2:
+                                if age_s >= 10.0 and q_bbo["ask"] >= tr["buy_px"] - spec["tick"] * 0.2:
                                     want_vault_unstick = True
                                     vault_target_px = round(max(tr["buy_px"], q_bbo["ask"]), spec["dec"])
                                     vault_subsidy_need = 0.0
+                                elif age_s >= 25.0 and sym in ("USD1USDT", "USDCUSDT") and unstick_vault_usd >= 0.00020:
+                                    need_u = max(0.0, (tr["buy_px"] - q_bbo["ask"]) * tr["qty"])
+                                    if 0.0 < need_u <= unstick_vault_usd + 1e-6 and need_u <= 0.0060:
+                                        want_vault_unstick = True
+                                        vault_target_px = round(q_bbo["ask"], spec["dec"])
+                                        vault_subsidy_need = need_u
                             if want_step_1tick or want_vault_unstick:
                                 cr = api.request("DELETE", "/sapi/v1/margin/order", {"symbol": sym, "orderId": tr["sell_oid"], **iso_param}, signed=True)
                                 if cr.get("status") == "CANCELED":
@@ -2007,7 +2013,7 @@ def main():
                                 else:
                                     pnl_v = tr["qty"] * (tr["sell_px"] - tr["buy_px"])
                                 if pnl_v > 0:
-                                    unstick_vault_usd += pnl_v
+                                    unstick_vault_usd += pnl_v * 0.50
                                     session_live_pnl += pnl_v
                                     if tr.get("pilot") or sym in ("USD1USDT", "USDCUSDT"):
                                         api._s1_short_realized = getattr(api, "_s1_short_realized", 0.0) + pnl_v
@@ -2618,11 +2624,11 @@ def main():
                     ("ETHU",      False, "CM_U",     "CM_ETH",     0,                       0, 30.0,   0.0, "STOPPED"),
                     ("FDUSDUSDC", False, "CM_USDC",  "CM_FDUSD",   0,                       0, 20.0,   0.0, "STOPPED"),
                     ("USD1U",     False, "CM_U",     "CM_USD1",    0,                       0, 14.0,   0.0, "STOPPED"),
-                    ("FDUSDUSDT", False, "CM_USDT",       "CM_FDUSD",      0,                       0,  60.0,   0.0, "STOPPED • 0-LOSS DRAIN"),
-                    ("USD1USDC",  False, "CM_USDC",       "CM_USD1",       0,                       0,  60.0,   0.0, "STOPPED • PURE USDT"),
-                    ("USDCUSDT",  True,  "ISO_USDC_USDT", "ISO_USDC_BASE", 8 if allow_buys else 0,  0, 120.0, 990.0, "v12.2 10x ISO • USDC $120"),
-                    ("USD1USDT",  False, "CM_USDT",       "CM_USD1",      35 if allow_buys else 0,  0,  60.0, 2100.0, "v12.2 40x$60 • USD1 $60"),
-                    ("USDCUSDT",  False, "CM_USDT",       "CM_USDC",       5 if allow_buys else 0,  0,  60.0, 350.0, "v12.2 40x$60 • USDC $60"),
+                    ("FDUSDUSDT", False, "CM_USDT",       "CM_FDUSD",      0,                       0,  24.0,   0.0, "STOPPED • 0-LOSS DRAIN"),
+                    ("USD1USDC",  False, "CM_USDC",       "CM_USD1",       0,                       0,  24.0,   0.0, "STOPPED • PURE USDT"),
+                    ("USDCUSDT",  True,  "ISO_USDC_USDT", "ISO_USDC_BASE", 8 if allow_buys else 0,  0, 120.0, 990.0, "v12.3 10x ISO • USDC $120"),
+                    ("USD1USDT",  False, "CM_USDT",       "CM_USD1",      88 if allow_buys else 0,  0,  24.0, 2150.0, "v12.3 100x$24 • USD1 $24"),
+                    ("USDCUSDT",  False, "CM_USDT",       "CM_USDC",      12 if allow_buys else 0,  0,  24.0, 350.0, "v12.3 100x$24 • USDC $24"),
                     ("UUSDT",     False, "CM_USDT",       "CM_U",          0,                       0,  14.1,   0.0, "STOPPED"),
                 ):
                     q_bbo = bbos.get(sym_p)
@@ -2633,7 +2639,7 @@ def main():
                     p_tr = [t for t in active_tranches if t["symbol"] == sym_p and t["iso"] == is_iso]
                     is_crypto_u1 = sym_p in ("BTCU", "BTCUSD1", "BNBU", "ETHU", "BNBFDUSD", "SOLFDUSD")
 
-                    # v12.2 40x$60 Fast-Turnover Pool (BUY slots independent of waiting SELLs so 100% of free USDT deploys!):
+                    # v12.3 100x$24 Micro-Tranches + 50% Profit-Vault Waterfall Unstick + Strict $498.50 CB:
                     if sym_p in ("USD1USDT", "USDCUSDT") and allow_buys and (not getattr(api, "_s1_cb_tripped", False)):
                         p_buy_open = [t for t in p_tr if t["state"] == "BUY_OPEN"]
                         if is_iso:
@@ -2644,8 +2650,8 @@ def main():
                             max_buy_slots = 8
                             clip_sz_u = 120.0
                             impulse_ok = (
-                                rem_2k_budget >= 25.0
-                                and free_map[f_key] >= 25.0
+                                rem_2k_budget >= 20.0
+                                and free_map[f_key] >= 20.0
                                 and not cons_guards.get(sym_p, {}).get("falling", False)
                                 and q_bbo["bidQty"] >= q_bbo["askQty"] * 0.25
                             )
@@ -2654,25 +2660,25 @@ def main():
                             tot_deployed_usd = sum(t["qty"] * t["buy_px"] for t in tot_active_legs)
                             cm_pool_cap = 1980.0 if free_map.get("ISO_USDC_USDT", 0) + free_map.get("ISO_USDC_BASE", 0) >= 50.0 else 2440.0
                             rem_2k_budget = max(0.0, cm_pool_cap - tot_deployed_usd)
-                            clip_sz_u = 60.0
+                            clip_sz_u = 24.0
                             if sym_p == "USD1USDT":
                                 impulse_ok = (
-                                    rem_2k_budget >= 25.0
-                                    and free_map[f_key] >= 25.0
+                                    rem_2k_budget >= 20.0
+                                    and free_map[f_key] >= 20.0
                                 )
-                                max_sym_legs = 35
-                                max_buy_slots = 15
+                                max_sym_legs = 88
+                                max_buy_slots = 35
                             else:
                                 impulse_ok = (
-                                    rem_2k_budget >= 25.0
-                                    and free_map[f_key] >= 25.0
+                                    rem_2k_budget >= 20.0
+                                    and free_map[f_key] >= 20.0
                                     and not cons_guards.get(sym_p, {}).get("falling", False)
                                     and q_bbo["bidQty"] >= q_bbo["askQty"] * 0.25
                                 )
-                                max_sym_legs = 5
-                                max_buy_slots = 4
-                        while len(p_tr) < max_sym_legs and len(p_buy_open) < max_buy_slots and rem_2k_budget >= 25.0 and free_map[f_key] >= 25.0 and impulse_ok:
-                            # v12.2 Last-Look 0%-Fee IOC Ask Sniping + Bid+1 Spread Stepping (skips Bid queue when Ask <= 1200 is about to wipe out!):
+                                max_sym_legs = 12
+                                max_buy_slots = 10
+                        while len(p_tr) < max_sym_legs and len(p_buy_open) < max_buy_slots and rem_2k_budget >= 20.0 and free_map[f_key] >= 20.0 and impulse_ok:
+                            # v12.3 Last-Look 0%-Fee IOC Ask Sniping + Bid+1 Spread Stepping (skips Bid queue when Ask <= 1200 is about to wipe out!):
                             can_snipe_ask = (
                                 (not is_iso)
                                 and sym_p not in getattr(api, "_disabled_fee_keys", set())
@@ -2705,7 +2711,7 @@ def main():
                                         if "orderId" in sr_sn:
                                             nt_sn = {
                                                 "tid": f"SNIPE_{sym_p[:4]}{len(p_tr)+1}", "symbol": sym_p, "iso": False,
-                                                "lbl": f"v12.2 IOC-SNIPE • {sym_p[:4]} ${int(ex_sn)}",
+                                                "lbl": f"v12.3 IOC-SNIPE • {sym_p[:4]} ${int(ex_sn)}",
                                                 "qty": ex_sn, "buy_px": snipe_px, "sell_px": spx_sn, "buy_oid": "SNIPE", "sell_oid": sr_sn["orderId"],
                                                 "state": "SELL_OPEN", "ts": loop_ts, "pilot": True, "borrowed": False
                                             }
@@ -2718,11 +2724,11 @@ def main():
                                             api._last_buy_map = getattr(api, "_last_buy_map", {})
                                             api._last_buy_map[sym_p] = snipe_px
                                             break
-                            # Stagger $60 clips across top 5 ticks (only count BUY_OPEN at cand_bpx so waiting high SELLs never block new BUYs at the live Bid!):
+                            # Stagger $24 micro-clips across top 6 ticks (up to 6 clips/tick = 35 BUY slots):
                             top_bpx_ref = round(q_bbo["bid"] + spec["tick"], spec["dec"]) if (q_bbo["ask"] - q_bbo["bid"]) >= spec["tick"] * 1.8 else round(q_bbo["bid"], spec["dec"])
                             bpx_entry = None
-                            for _cap_pass in (1, 2, 3 if sym_p == "USD1USDT" else 2):
-                                for _st_lvl in range(5 if sym_p == "USD1USDT" else 2):
+                            for _cap_pass in (1, 2, 3, 4, 5, 6 if sym_p == "USD1USDT" else 4):
+                                for _st_lvl in range(6 if sym_p == "USD1USDT" else 3):
                                     cand_bpx = round(top_bpx_ref - spec["tick"] * _st_lvl, spec["dec"])
                                     same_tick_cnt = sum(1 for tx in p_buy_open if abs(tx["buy_px"] - cand_bpx) < spec["tick"] * 0.3)
                                     if same_tick_cnt < _cap_pass:
@@ -2752,8 +2758,8 @@ def main():
                                 rem_2k_budget = max(0.0, rem_2k_budget - spent_u)
                                 daily_orders_placed += 1
                                 nt_pl = {
-                                    "tid": f"V122_{'ISO' if is_iso else 'CM'}_{sym_p[:4]}{len(p_tr)+1}", "symbol": sym_p, "iso": is_iso,
-                                    "lbl": f"v12.2 40x$60 • {sym_p[:4]} ${int(bq_pl)}",
+                                    "tid": f"V123_{'ISO' if is_iso else 'CM'}_{sym_p[:4]}{len(p_tr)+1}", "symbol": sym_p, "iso": is_iso,
+                                    "lbl": f"v12.3 100x$24 • {sym_p[:4]} ${int(bq_pl)}",
                                     "qty": bq_pl, "buy_px": bpx_pl, "sell_px": spx_target, "buy_oid": br_pl["orderId"], "sell_oid": None,
                                     "state": "BUY_OPEN", "ts": loop_ts, "pilot": True, "borrowed": False
                                 }
@@ -2959,7 +2965,7 @@ def main():
                     else:
                         active_tr_cnt += 1
 
-                free_tr_cnt = int(round(free_map.get("CM_USDT", 0.0) / 60.0))
+                free_tr_cnt = int(round(free_map.get("CM_USDT", 0.0) / 24.0))
                 tot_tr_cnt = active_tr_cnt + stuck_tr_cnt + free_tr_cnt
 
                 btcu_net_val = btcu_net_pnl if "btcu_net_pnl" in locals() else 0.0
@@ -2972,7 +2978,7 @@ def main():
                 ethu_net_lbl = f"ETHU DN ${ethu_net_v:+.4f} ({int(getattr(api, '_ethu_rts', 0))} RTs)" if "ethu_net_v" in locals() else "ETHU DN $0.0000"
                 s1_rts_tot = int(getattr(api, "_s1_short_rts", 0)) + int(getattr(api, "_btcu_rts", 0))
                 s1_sc_tot = int(getattr(api, "_s1_short_scratches", 0))
-                s1_st_lbl = ("PILOT CB: " + getattr(api, "_s1_cb_reason", "")) if getattr(api, "_s1_cb_tripped", False) else f"v12.2 40x$60 FAST-TURNOVER (35x$60 USD1 + 5x$60 USDC • STRICT $498.50 CB) • Net ${s1_net_v:+.4f} ({s1_rts_tot} RTs)"
+                s1_st_lbl = ("PILOT CB: " + getattr(api, "_s1_cb_reason", "")) if getattr(api, "_s1_cb_tripped", False) else f"v12.3 100x$24 MICRO-SWARM + 50% VAULT UNSTICK (88x$24 USD1 + 12x$24 USDC • HARD $498.50 CB) • Net ${s1_net_v:+.4f} ({s1_rts_tot} RTs)"
                 payload = {
                     "ts": int(loop_ts * 1000),
                     "startEquityUsd": start_equity_usd,
@@ -3012,10 +3018,10 @@ def main():
                             "active": not bool(getattr(api, "_s1_cb_tripped", False)),
                             "cbTripped": bool(getattr(api, "_s1_cb_tripped", False)),
                             "cbReason": getattr(api, "_s1_cb_reason", ""),
-                            "strategy": "v12.2_40x60_FAST_TURNOVER",
+                            "strategy": "v12.3_100x24_MICRO_SWARM_50PCT_VAULT",
                             "budgetUsd": 2440.0,
                             "idleReserveUsd": 0.0,
-                            "allocStr": "$2440 (40x$60 Clips) 35xUSD1 + 5xUSDC (Fast Single-Swipe Fills)",
+                            "allocStr": "$2440 (100x$24 Micro-Tranches) 88xUSD1 + 12xUSDC + 50% Vault Unstick",
                             "legCapUsd": 0.0,
                             "sessionCapUsd": -0.0100,
                             "btcEmaBasis": round(btc_ema_basis if "btc_ema_basis" in locals() else 0.0, 2),
