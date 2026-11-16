@@ -1334,16 +1334,16 @@ def auto_compound_borrow(api, force_repay_all=False):
                 ba_uc = ia_uc.get("baseAsset", {})
                 iso_net_u = float(qa_uc.get("netAsset", 0)) + float(ba_uc.get("netAsset", 0))
                 iso_bor_u = float(qa_uc.get("borrowed", 0)) + float(qa_uc.get("interest", 0))
-                # Repay idle Cross-Margin USDT debt first so we can seed $420 USDT into 10x Isolated USDCUSDT ($4,180 10x Pool!):
-                if iso_net_u < 415.0 and ut_borrowed > 10.0 and cm_ut_free >= 100.0:
+                # Repay idle Cross-Margin USDT debt first so we can seed max ~$495 USDT into 10x Isolated USDCUSDT (~$4,940 10x Pool!):
+                if iso_net_u < 490.0 and ut_borrowed > 10.0 and cm_ut_free >= 100.0:
                     rep_cm = min(cm_ut_free, ut_borrowed)
                     api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "USDT", "isIsolated": "FALSE", "amount": f"{rep_cm:.2f}", "type": "REPAY"}, signed=True)
                     cm_acc_r = api.request("GET", "/sapi/v1/margin/account", signed=True)
                     cm_ut_free = float(next((a.get("free", 0) for a in cm_acc_r.get("userAssets", []) if a.get("asset") == "USDT"), 0)) if isinstance(cm_acc_r, dict) else 0.0
                     ut_borrowed = float(next((float(a.get("borrowed", 0)) + float(a.get("interest", 0)) for a in cm_acc_r.get("userAssets", []) if a.get("asset") == "USDT"), 0)) if isinstance(cm_acc_r, dict) else 0.0
-                if iso_net_u < 415.0 and cm_ut_free >= 15.0 and ut_borrowed < 50.0:
-                    need_seed = min(round(420.0 - iso_net_u, 2), math.floor((cm_ut_free - 5.0) * 100) / 100.0)
-                    if need_seed >= 10.0:
+                if iso_net_u < 490.0 and cm_ut_free >= 5.0 and ut_borrowed < 50.0:
+                    need_seed = min(round(495.0 - iso_net_u, 2), math.floor((cm_ut_free - 1.5) * 100) / 100.0)
+                    if need_seed >= 5.0:
                         r_u1 = api.request("POST", "/sapi/v1/asset/transfer", {"type": "MARGIN_ISOLATEDMARGIN", "asset": "USDT", "amount": f"{need_seed:.2f}", "toSymbol": "USDCUSDT"}, signed=True)
                         if "tranId" in r_u1:
                             iso_net_u += need_seed
@@ -1352,9 +1352,9 @@ def auto_compound_borrow(api, force_repay_all=False):
                             r_u2 = api.request("POST", "/sapi/v1/margin/isolated/transfer", {"asset": "USDT", "symbol": "USDCUSDT", "transFrom": "SPOT", "transTo": "ISOLATED_MARGIN", "amount": f"{need_seed:.2f}"}, signed=True)
                             if "tranId" in r_u2:
                                 iso_net_u += need_seed
-                if iso_net_u >= 25.0 and iso_bor_u < iso_net_u * 8.9:
+                if iso_net_u >= 25.0 and iso_bor_u < iso_net_u * 8.95:
                     mx_b = api.request("GET", "/sapi/v1/margin/maxBorrowable", {"asset": "USDT", "isolatedSymbol": "USDCUSDT"}, signed=True)
-                    can_b = min(round(iso_net_u * 8.95 - iso_bor_u, 2), float(mx_b.get("amount", 0)) * 0.96) if isinstance(mx_b, dict) else 0.0
+                    can_b = min(round(iso_net_u * 8.99 - iso_bor_u, 2), float(mx_b.get("amount", 0)) * 0.99) if isinstance(mx_b, dict) else 0.0
                     if can_b >= 10.0:
                         api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "USDT", "isIsolated": "TRUE", "symbol": "USDCUSDT", "amount": f"{can_b:.2f}", "type": "BORROW"}, signed=True)
             # Keep remaining ~$114 Cross-Margin USDT debt-free ($0.00 interest bleed while CM -1015 resets):
@@ -1832,7 +1832,7 @@ def main():
     except Exception:
         pass
     api._user_paused = False
-    api._test_stop_ts = time.time() + 300.0
+    api._test_stop_ts = 0.0
     api._stablecoin_only_5m = True
     api._cm_swarm_paused = False
     api._v13_spot_perp_only = False
