@@ -1115,8 +1115,8 @@ def run_sol_spot_perp_tick(api, fapi, bbos, loop_ts, round_trips, cached_total_u
         gross_pnl = ((sp_exit_u - sp_entry_u) + (pp_entry_u - pp_exit_u)) * st["qty"]
         st["unrealized_pnl"] = round(gross_pnl, 4)
         hold_s = loop_ts - st["entry_ts"]
-        # Trigger exit when basis converges back (gross_pnl >= +$0.0040) or after 30s at >= +$0.0010 (or unwind legacy restart-trapped leg at >= -$0.0060 after 45s):
-        if gross_pnl >= 0.0040 or (hold_s >= 30.0 and gross_pnl >= 0.0010) or (hold_s >= 45.0 and gross_pnl >= -0.0060):
+        # Trigger exit when basis converges back (gross_pnl >= +$0.0040) or after 30s at >= +$0.0010 (or unwind any >=45s held leg at 0% Maker if >= -$0.0120 so capital rotates across all 4 coins!):
+        if gross_pnl >= 0.0040 or (hold_s >= 30.0 and gross_pnl >= 0.0010) or (hold_s >= 45.0 and gross_pnl >= -0.0120):
             spx_sp = round(sp_bbo["ask"], px_dec)
             r_s_ex = api.request("POST", "/api/v3/order", {
                 "symbol": sp_sym, "side": "SELL", "type": "LIMIT_MAKER",
