@@ -1939,6 +1939,8 @@ def main():
                                                 daily_orders_placed += 1
                                             left_ioc = round(math.floor((rem_ioc - ex_ioc_q) / spec["step"] + 1e-9) * spec["step"], 6)
                                             if left_ioc * q_bbo["ask"] >= 5.5:
+                                                api._partial_buy_map = getattr(api, "_partial_buy_map", {})
+                                                api._partial_buy_map[sym] = (tr["buy_px"], loop_ts)
                                                 free_map["CM_USDC" if sym == "USDCUSDT" else "CM_USD1"] += left_ioc
                                             continue
                             # Mechanism 1: Smart +2/+3 -> +1 Tick Profit Step-Down (after 5.0s) + Strictly >= Breakeven Step-Down (ZERO negative step-downs ever!)
@@ -2058,15 +2060,17 @@ def main():
                                         free_map["CM_USDT"] += pnl_v
                                     else:
                                         free_map["CM_USDT"] += tr["qty"] * tr["sell_px"]
-                                round_trips.insert(0, {
-                                    "time": int(loop_ts * 1000),
-                                    "symbol": sym if not tr["iso"] else f"{sym} ({tr['lbl'].split('•')[0].strip()})",
-                                    "type": "COMPLETED",
-                                    "route": f"[{tr['tid']} • {tr['lbl']}] BUY {spec['q_fmt'].format(tr['qty'])} @ ${tr['buy_px']:.{spec['dec']}f} -> SELL @ ${tr['sell_px']:.{spec['dec']}f}",
-                                    "id": f"#{tr['buy_oid']}->{tr['sell_oid']}",
-                                    "pnl": pnl_v,
-                                    "eqAfter": cached_total_usd,
-                                })
+                                # Record ONLY verified real fills (exclude #INV restocking orders from closed-trade feed; myTrades audit records real Binance fills!):
+                                if str(tr.get("buy_oid", "")) != "INV":
+                                    round_trips.insert(0, {
+                                        "time": int(loop_ts * 1000),
+                                        "symbol": sym if not tr["iso"] else f"{sym} ({tr['lbl'].split('•')[0].strip()})",
+                                        "type": "COMPLETED",
+                                        "route": f"[{tr['tid']} • {tr['lbl']}] BUY {spec['q_fmt'].format(tr['qty'])} @ ${tr['buy_px']:.{spec['dec']}f} -> SELL @ ${tr['sell_px']:.{spec['dec']}f}",
+                                        "id": f"#{tr['buy_oid']}->{tr['sell_oid']}",
+                                        "pnl": pnl_v,
+                                        "eqAfter": cached_total_usd,
+                                    })
                             elif False:
                                 pass
                             else:
@@ -2760,9 +2764,9 @@ def main():
                             else:
                                 break
 
-                    # Immediately post maker SELL for any free non-hedged base inventory (keep at least 28 USDC reserved for FDUSDUSDC latency arb when edge >= +0.70 bps!)
+                    # Immediately post maker SELL for any free non-hedged base inventory (excluding USD1USDC when stopped!):
                     max_inv_sells = 6 if sym_p == "FDUSDUSDT" else (max_tr + 2)
-                    while sym_p not in ("FDUSDUSDC", "USD1U", "UUSDT") and (free_map[b_key] - (28.5 if (sym_p == "USDCUSDT" and fd_tri_edge_ok) else 0.0)) * q_bbo["ask"] >= 5.6 and len(p_tr) < max_inv_sells:
+                    while sym_p not in ("USD1USDC", "FDUSDUSDC", "USD1U", "UUSDT") and (free_map[b_key] - (28.5 if (sym_p == "USDCUSDT" and fd_tri_edge_ok) else 0.0)) * q_bbo["ask"] >= 5.6 and len(p_tr) < max_inv_sells:
                         if (sym_p == "USD1USDT" and cm_u1_debt >= 1.0) or (sym_p == "USDCUSDT" and cm_uc_debt >= 1.0):
                             break
                         max_base_s = max(0.0, free_map[b_key] - (28.5 if (sym_p == "USDCUSDT" and fd_tri_edge_ok) else 0.0))
@@ -2932,7 +2936,7 @@ def main():
             if loop_ts - last_s3_push >= 2.0:
                 last_s3_push = loop_ts
                 display_rts = sorted(
-                    [r for r in round_trips if r.get("type") == "COMPLETED" and float(r.get("pnl", 0)) > 1e-7],
+                    [r for r in round_trips if r.get("type") == "COMPLETED" and float(r.get("pnl", 0)) > 1e-7 and "#INV->" not in str(r.get("id", ""))],
                     key=lambda r: int(r.get("time", 0)),
                     reverse=True
                 )[:20]
