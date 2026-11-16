@@ -842,19 +842,95 @@ def flatten_spot_perp_to_pool(api, fapi):
         pass
 
 
+def run_single_stable_spot_test(api):
+    # v13.4: Execute ONE single $24 0%-fee Spot round-trip (USDT -> U -> USDT) and return exact latency & profit, then sweep back to Cross-Margin!
+    flag_p = "/tmp/v134_single_test_v1.json"
+    if os.path.exists(flag_p):
+        try:
+            with open(flag_p) as _f:
+                return json.load(_f)
+        except Exception:
+            pass
+    res = {"done": True, "symbol": "UUSDT", "qty": 24, "pnl": 0.0, "fee": 0.0, "elapsed_s": 0.0, "msg": "Init"}
+    try:
+        t0 = time.time()
+        # 1. Verify 0% maker/taker fee on UUSDT:
+        tf = api.request("GET", "/sapi/v1/asset/tradeFee", {"symbol": "UUSDT"}, signed=True)
+        mkr_f = float(tf[0].get("makerCommission", 0.0)) if isinstance(tf, list) and tf else 0.0
+        tkr_f = float(tf[0].get("takerCommission", 0.0)) if isinstance(tf, list) and tf else 0.0
+        # 2. Move $25.00 USDT from Cross-Margin -> Spot:
+        api.request("POST", "/sapi/v1/margin/transfer", {"asset": "USDT", "amount": "25.00", "type": "2"}, signed=True)
+        # 3. Get live UUSDT BBO & execute 1 single $24 BUY (IOC @ Ask if 0% taker, else LIMIT_MAKER @ Bid):
+        tk = api.request("GET", "/api/v3/ticker/bookTicker", {"symbol": "UUSDT"})
+        bid_p, ask_p = float(tk["bidPrice"]), float(tk["askPrice"])
+        if tkr_f <= 0.000001 and mkr_f <= 0.000001:
+            # Test 0% taker/maker instant fill @ Bid->Ask or Ask->Bid:
+            br = api.request("POST", "/api/v3/order", {"symbol": "UUSDT", "side": "BUY", "type": "LIMIT_MAKER", "quantity": "24", "price": f"{bid_p:.4f}"}, signed=True)
+            bpx = bid_p
+            if "orderId" in br:
+                for _ in range(40):
+                    time.sleep(0.25)
+                    chk = api.request("GET", "/api/v3/order", {"symbol": "UUSDT", "orderId": br["orderId"]}, signed=True)
+                    if chk.get("status") == "FILLED":
+                        break
+                else:
+                    api.request("DELETE", "/api/v3/order", {"symbol": "UUSDT", "orderId": br["orderId"]}, signed=True)
+                    chk2 = api.request("GET", "/api/v3/order", {"symbol": "UUSDT", "orderId": br["orderId"]}, signed=True)
+                    if float(chk2.get("executedQty", 0)) < 6:
+                        br2 = api.request("POST", "/api/v3/order", {"symbol": "UUSDT", "side": "BUY", "type": "LIMIT", "timeInForce": "IOC", "quantity": "24", "price": f"{ask_p:.4f}"}, signed=True)
+                        bpx = ask_p
+            # Sell 24 U back to USDT at Ask (LIMIT_MAKER) or Bid (if 0% taker timeout):
+            sp_a = api.request("GET", "/api/v3/account", signed=True)
+            u_q = int(math.floor(float(next((b.get("free", 0) for b in sp_a.get("balances", []) if b.get("asset") == "U"), 0))))
+            spx = round(max(ask_p, bpx + 0.0001), 4)
+            if u_q >= 6:
+                sr = api.request("POST", "/api/v3/order", {"symbol": "UUSDT", "side": "SELL", "type": "LIMIT_MAKER", "quantity": str(u_q), "price": f"{spx:.4f}"}, signed=True)
+                if "orderId" in sr:
+                    for _ in range(40):
+                        time.sleep(0.25)
+                        chks = api.request("GET", "/api/v3/order", {"symbol": "UUSDT", "orderId": sr["orderId"]}, signed=True)
+                        if chks.get("status") == "FILLED":
+                            break
+                    else:
+                        api.request("DELETE", "/api/v3/order", {"symbol": "UUSDT", "orderId": sr["orderId"]}, signed=True)
+                        tk2 = api.request("GET", "/api/v3/ticker/bookTicker", {"symbol": "UUSDT"})
+                        spx = float(tk2.get("bidPrice", bpx))
+                        api.request("POST", "/api/v3/order", {"symbol": "UUSDT", "side": "SELL", "type": "LIMIT", "timeInForce": "IOC", "quantity": str(u_q), "price": f"{spx:.4f}"}, signed=True)
+                pnl_u = round((spx - bpx) * u_q, 4)
+                res["qty"] = u_q
+                res["pnl"] = pnl_u
+                res["elapsed_s"] = round(time.time() - t0, 2)
+                res["msg"] = f"1-TX TEST DONE: BUY {u_q} U @ {bpx:.4f} -> SELL @ {spx:.4f} | PnL ${pnl_u:+.4f} | Fee $0.0000 | {res['elapsed_s']}s (mkr={mkr_f*100:.2f}% tkr={tkr_f*100:.2f}%)"
+            else:
+                res["msg"] = f"1-TX TEST: Spot BUY unfilled in 10s (mkr={mkr_f*100:.2f}% tkr={tkr_f*100:.2f}%)"
+        else:
+            res["msg"] = f"1-TX SKIPPED: UUSDT mkr={mkr_f*100:.2f}% tkr={tkr_f*100:.2f}%"
+        # 4. Sweep Spot USDT back to Cross-Margin:
+        sp_end = api.request("GET", "/api/v3/account", signed=True)
+        ut_end = math.floor(float(next((b.get("free", 0) for b in sp_end.get("balances", []) if b.get("asset") == "USDT"), 0)) * 100.0) / 100.0
+        if ut_end >= 1.0:
+            api.request("POST", "/sapi/v1/margin/transfer", {"asset": "USDT", "amount": f"{ut_end:.2f}", "type": "1"}, signed=True)
+        with open(flag_p, "w") as _f:
+            json.dump(res, _f)
+    except Exception as e:
+        res["msg"] = f"1-TX ERR: {e}"
+    return res
+
+
 def setup_sol_spot_perp_pilot(api, fapi):
     flatten_spot_perp_to_pool(api, fapi)
+    t_res = run_single_stable_spot_test(api)
     st = {
         "ready": False,
-        "spot_sym": "SOLFDUSD",
-        "spot_quote": "FDUSD",
-        "perp_sym": "SOLUSDC",
-        "state": "FLATTENED",
-        "realized_pnl": 0.0,
+        "spot_sym": "UUSDT",
+        "spot_quote": "USDT",
+        "perp_sym": "NONE",
+        "state": "1TX_TEST_DONE",
+        "realized_pnl": t_res.get("pnl", 0.0),
         "unrealized_pnl": 0.0,
-        "rts": 0,
+        "rts": 1 if t_res.get("pnl", 0.0) != 0 else 0,
         "ioc_bailouts": 0,
-        "msg": "FLATTENED TO POOL — $30 merged into Stablecoin 10x Isolated + 5x Cross Swarm",
+        "msg": t_res.get("msg", "FLATTENED TO POOL"),
     }
     api._sp_pilot = st
     return st
