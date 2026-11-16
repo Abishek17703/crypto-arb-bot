@@ -923,8 +923,8 @@ def run_sol_spot_perp_tick(api, fapi, bbos, loop_ts, round_trips, cached_total_u
 
     state = st["state"]
     if state == "IDLE":
-        # Pre-position at #1 FIFO queue priority when Perp leads Spot by >= +1.50 bps above 60s EMA basis:
-        if edge_bps >= 1.50 and (loop_ts - st.get("last_trade_ts", 0.0)) >= 0.5:
+        # Proactively hold #1 FIFO queue priority on SOLFDUSD Bid whenever basis edge >= -0.20 bps (and step back if Perp drops < -1.20 bps):
+        if edge_bps >= -0.20 and (loop_ts - st.get("last_trade_ts", 0.0)) >= 0.3:
             # Gap 1: Force exact 0.01 SOL step size ($15 clip = ~0.21 SOL) so Spot & Perp match 1:1 with zero dust:
             qty_sol = math.floor((15.0 / target_sp_bpx) * 100.0) / 100.0
             if qty_sol >= 0.08:
@@ -951,7 +951,7 @@ def run_sol_spot_perp_tick(api, fapi, bbos, loop_ts, round_trips, cached_total_u
                 our_sp_u = st["spot_px"] * q_usdt
                 our_order_edge_bps = (((pp_bid_u - our_sp_u) / our_sp_u) * 10000.0) - st["ema_basis_bps"]
                 st["last_edge_bps"] = round(our_order_edge_bps, 2)
-                if st_o == "FILLED" or (ex_q >= 0.08 and (our_order_edge_bps < 0.0 or loop_ts - st["entry_ts"] >= 15.0)):
+                if st_o == "FILLED" or (ex_q >= 0.08 and (our_order_edge_bps < -0.80 or loop_ts - st["entry_ts"] >= 15.0)):
                     if st_o != "FILLED":
                         api.request("DELETE", "/api/v3/order", {"symbol": sp_sym, "orderId": st["spot_oid"]}, signed=True)
                     h_qty = math.floor(ex_q * 100.0) / 100.0
@@ -993,7 +993,7 @@ def run_sol_spot_perp_tick(api, fapi, bbos, loop_ts, round_trips, cached_total_u
                 elif st_o in ("CANCELED", "EXPIRED", "REJECTED"):
                     st["state"] = "IDLE"
                     st["spot_oid"] = None
-                elif ex_q < 0.08 and (our_order_edge_bps < -0.50 or (target_sp_bpx > st["spot_px"] + 0.005 and edge_bps >= 1.50) or (loop_ts - st["entry_ts"]) >= 45.0):
+                elif ex_q < 0.08 and (our_order_edge_bps < -1.20 or (target_sp_bpx > st["spot_px"] + 0.005 and edge_bps >= -0.20) or (loop_ts - st["entry_ts"]) >= 90.0):
                     cr_s = api.request("DELETE", "/api/v3/order", {"symbol": sp_sym, "orderId": st["spot_oid"]}, signed=True)
                     if cr_s.get("status") == "CANCELED" and float(cr_s.get("executedQty", 0)) < 0.08:
                         st["state"] = "IDLE"
