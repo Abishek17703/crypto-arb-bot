@@ -934,10 +934,7 @@ def adopt_existing_tranches(api):
                                     f_pool.pop(0)
                         else:
                             true_bpx = round(px - spec_o["tick"], spec_o["dec"])
-                    # v11.1 Fix: Correct any legacy ladder-inflated USD1USDT or FDUSDUSDT cost basis back to true fill cost!
-                    if sym_o == "USD1USDT" and px >= 0.99898 and true_bpx >= 0.99897:
-                        true_bpx = 0.99895
-                    elif sym_o == "FDUSDUSDT" and px >= 0.9968 and true_bpx >= 0.9967:
+                    if sym_o == "FDUSDUSDT" and px >= 0.9968 and true_bpx >= 0.9967:
                         true_bpx = 0.9966
                 lbl_o = f"ZERO-FEE • {sym_o}" if sym_o in ("BTCU", "ETHU", "BNBU", "BNBFDUSD", "SOLFDUSD") else ("TRI-IOC • USD1/U" if sym_o == "USD1U" else ("TRI-IOC • USD1/USDC" if sym_o == "USD1USDC" else ("TRI-IOC • FDUSD/USDC" if sym_o == "FDUSDUSDC" else ("10x YIELD • FDUSD" if sym_o == "FDUSDUSDT" else ("TURBO • USDC 5x CM" if sym_o == "USDCUSDT" else "50% CORE • 5x CM")))))
                 tranches.append({
@@ -986,7 +983,7 @@ def main():
     try:
         prev = json.loads(s3.get_object(Bucket=S3_BUCKET, Key=S3_KEY)["Body"].read().decode())
         daily_orders_placed = max(42150, int(prev.get("dailyOrdersPlaced", 42150)))
-        round_trips = [r for r in prev.get("roundTrips", []) if r.get("type") == "COMPLETED"][:30]
+        round_trips = [r for r in prev.get("roundTrips", []) if r.get("type") == "COMPLETED" and float(r.get("pnl", 0)) <= 0.015][:30]
         prev_vault_seed = float(prev.get("trancheStats", {}).get("vaultUsd", 0.0))
     except Exception:
         pass
@@ -1804,10 +1801,10 @@ def main():
                         o_live = live_oid_map.get(tr["sell_oid"])
                         if o_live is not None:
                             age_s = loop_ts - tr["ts"]
-                            if sym == "USD1USDT" and tr["sell_px"] >= 0.99898 and tr["buy_px"] >= 0.99897:
-                                tr["buy_px"] = 0.99895
-                            elif sym == "FDUSDUSDT" and tr["sell_px"] >= 0.9968 and tr["buy_px"] >= 0.9967:
+                            if sym == "FDUSDUSDT" and tr["sell_px"] >= 0.9968 and tr["buy_px"] >= 0.9967:
                                 tr["buy_px"] = 0.9966
+                            elif sym == "USD1USDT" and tr["buy_px"] < tr["sell_px"] - 0.00004:
+                                tr["buy_px"] = round(tr["sell_px"] - spec["tick"], spec["dec"])
                             # Mechanism 2: Cross-Pair Triangular Profit Exit (USD1/FDUSD -> USDC -> USDT at >= cost basis or +profit!)
                             if (not tr["iso"]) and sym in ("USD1USDT", "FDUSDUSDT") and age_s > 10.0 and "USDCUSDT" in bbos:
                                 uc_pair_s = "USD1USDC" if sym == "USD1USDT" else "FDUSDUSDC"
@@ -1825,6 +1822,7 @@ def main():
                                                     sr_uc = api.request("POST", "/sapi/v1/margin/order", {"symbol": uc_pair_s, "side": "SELL", "type": "LIMIT_MAKER", "quantity": str(q_int), "price": f"{u1_uc_ask:.{PAIRS[uc_pair_s]['dec']}f}"}, signed=True)
                                                     if "orderId" in sr_uc:
                                                         tr["symbol"] = uc_pair_s
+                                                        tr["buy_px"] = round(tr["buy_px"] / uc_ut_bid, PAIRS[uc_pair_s]["dec"])
                                                         tr["sell_oid"] = sr_uc["orderId"]
                                                         tr["sell_px"] = u1_uc_ask
                                                         tr["qty"] = q_int
@@ -1835,9 +1833,10 @@ def main():
                                 ref_ut_s = "FDUSDUSDT" if sym == "FDUSDUSDC" else "USD1USDT"
                                 ref_dec_s = PAIRS[ref_ut_s]["dec"]
                                 ref_tick_s = PAIRS[ref_ut_s]["tick"]
-                                eff_bpx_ut = tr["buy_px"] if (sym == "USD1USDC" and tr["buy_px"] >= 0.99850) or (sym == "FDUSDUSDC" and tr["buy_px"] >= 0.99600) else round(tr["sell_px"] * bbos.get("USDCUSDT", {}).get("bid", 1.00040) - ref_tick_s, ref_dec_s)
-                                # Flip stuck USD1USDC / FDUSDUSDC back to USD1USDT / FDUSDUSDT whenever live USDT Ask >= eff_bpx_ut + 1 tick and USD1USDC/FDUSDUSDC is above live Ask!
-                                if ref_ut_s in bbos and bbos[ref_ut_s]["ask"] >= eff_bpx_ut + ref_tick_s and (q_bbo["ask"] < tr["sell_px"] - spec["tick"] * 0.5 or bbos[ref_ut_s]["ask"] > (tr["sell_px"] * bbos.get("USDCUSDT", {}).get("bid", 1.0)) + ref_tick_s):
+                                uc_bid_conv = bbos.get("USDCUSDT", {}).get("bid", 1.00045)
+                                eff_bpx_ut = round(tr["buy_px"] * uc_bid_conv, ref_dec_s) if tr["buy_px"] <= 0.99890 else round(tr["buy_px"], ref_dec_s)
+                                # Flip stuck USD1USDC / FDUSDUSDC back to USD1USDT / FDUSDUSDT whenever live USDT Ask >= eff_bpx_ut + 1 tick!
+                                if ref_ut_s in bbos and bbos[ref_ut_s]["ask"] >= eff_bpx_ut + ref_tick_s and (q_bbo["ask"] < tr["sell_px"] - spec["tick"] * 0.5 or bbos[ref_ut_s]["ask"] > (tr["sell_px"] * uc_bid_conv) + ref_tick_s):
                                     cr = api.request("DELETE", "/sapi/v1/margin/order", {"symbol": sym, "orderId": tr["sell_oid"]}, signed=True)
                                     if cr.get("status") == "CANCELED":
                                         ns_px = round(max(eff_bpx_ut + ref_tick_s, bbos[ref_ut_s]["ask"]), ref_dec_s)
