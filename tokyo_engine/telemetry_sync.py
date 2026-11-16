@@ -2607,9 +2607,10 @@ def main():
                         else:
                             tot_active_legs = [t for t in active_tranches if (not t["iso"]) and t["symbol"] in ("USD1USDT", "USDCUSDT", "USD1USDC") and t["state"] in ("BUY_OPEN", "SELL_OPEN")]
                             tot_deployed_usd = sum(t["qty"] * t["buy_px"] for t in tot_active_legs)
-                            rem_2k_budget = max(0.0, 1980.0 - tot_deployed_usd)
-                            max_pool_legs = 14
-                            clip_sz_u = 142.0
+                            cm_pool_cap = 1980.0 if free_map.get("ISO_USDC_USDT", 0) + free_map.get("ISO_USDC_BASE", 0) >= 50.0 else 2440.0
+                            rem_2k_budget = max(0.0, cm_pool_cap - tot_deployed_usd)
+                            max_pool_legs = 17
+                            clip_sz_u = 162.0
                             if sym_p == "USD1USDT":
                                 impulse_ok = (
                                     rem_2k_budget >= 25.0
@@ -2624,7 +2625,7 @@ def main():
                                     and not cons_guards.get(sym_p, {}).get("falling", False)
                                     and q_bbo["bidQty"] >= q_bbo["askQty"] * 0.25
                                 )
-                                max_sym_legs = 2
+                                max_sym_legs = 3
                         while len(p_tr) < max_sym_legs and rem_2k_budget >= 25.0 and free_map[f_key] >= 25.0 and impulse_ok:
                             # Stagger across top ticks (up to 2 clips/tick on 10x ISO USDCUSDT and 5x CM USD1USDT):
                             bpx_entry = None
