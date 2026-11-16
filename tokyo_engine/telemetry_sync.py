@@ -946,15 +946,16 @@ def run_sol_spot_perp_tick(api, fapi, bbos, loop_ts, round_trips, cached_total_u
         if sc_i["ema_bps"] is None:
             sc_i["ema_bps"] = m_bps
             sc_i["prev_pp_bid"] = p_b["bid"]
+            sc_i["pp_up"] = True
         elif do_ema_step:
             if st["state"] == "IDLE":
-                sc_i["ema_bps"] = sc_i["ema_bps"] * 0.967 + m_bps * 0.033
-            sc_i["pp_up"] = (p_b["bid"] >= sc_i["prev_pp_bid"] + c_spec["tick"] * 0.8)
+                sc_i["ema_bps"] = sc_i["ema_bps"] * 0.980 + m_bps * 0.020
+            sc_i["pp_up"] = (p_b["bid"] >= sc_i["prev_pp_bid"] - c_spec["tick"] * 0.2)
             sc_i["prev_pp_bid"] = p_b["bid"]
-        elif p_b["bid"] >= sc_i["prev_pp_bid"] + c_spec["tick"] * 0.8:
-            sc_i["pp_up"] = True
         elif p_b["bid"] < sc_i["prev_pp_bid"] - c_spec["tick"] * 0.5:
             sc_i["pp_up"] = False
+        elif p_b["bid"] >= sc_i["prev_pp_bid"]:
+            sc_i["pp_up"] = True
 
         t_bpx = round(s_b["ask"] - c_spec["tick"], c_spec["px_dec"]) if (s_b["ask"] - s_b["bid"]) >= c_spec["tick"] * 1.9 else round(s_b["bid"], c_spec["px_dec"])
         t_sp_u = t_bpx * q_usdt
@@ -1007,8 +1008,8 @@ def run_sol_spot_perp_tick(api, fapi, bbos, loop_ts, round_trips, cached_total_u
 
     state = st["state"]
     if state == "IDLE":
-        # Anti-Adverse-Selection Gate: Only enter when Perp leads Spot upward by >= +2.80 bps AND Perp Bid is rising (never buy Spot during a Perp dip!):
-        if edge_bps >= 2.80 and sc_act.get("pp_up", False) and sp_bbo["bidQty"] >= sp_bbo["askQty"] * 0.70 and (loop_ts - st.get("last_trade_ts", 0.0)) >= 0.5:
+        # Enter when Perp leads Spot by >= +1.10 bps AND Perp Bid is not falling:
+        if edge_bps >= 1.10 and sc_act.get("pp_up", True) and sp_bbo["bidQty"] >= sp_bbo["askQty"] * 0.45 and (loop_ts - st.get("last_trade_ts", 0.0)) >= 0.4:
             qty_c = round(math.floor((15.0 / target_sp_bpx) / step_c + 1e-9) * step_c, q_dec)
             if qty_c >= min_q_c:
                 bpx_sp = target_sp_bpx
@@ -1026,7 +1027,9 @@ def run_sol_spot_perp_tick(api, fapi, bbos, loop_ts, round_trips, cached_total_u
                     st["msg"] = f"SPOT_BUY_OPEN ({act_coin}): {qty_c:.{q_dec}f} {sp_sym} @ ${bpx_sp:.{px_dec}f} (edge={edge_bps:+.2f}bps)"
 
     elif state == "SPOT_BUY_OPEN":
-        if loop_ts - st.get("last_poll_ts", 0.0) >= 0.08:
+        # Instant <5ms Pre-Fill Shield: Cancel immediately if Perp Bid ticks down below entry_pp_bid so we never get filled on a Perp dump!
+        perp_dipped = (pp_bbo["bid"] < st.get("entry_pp_bid", pp_bbo["bid"]) - tick_c * 0.4)
+        if perp_dipped or (loop_ts - st.get("last_poll_ts", 0.0) >= 0.08):
             st["last_poll_ts"] = loop_ts
             o_sp = api.request("GET", "/api/v3/order", {"symbol": sp_sym, "orderId": st["spot_oid"]}, signed=True)
             if isinstance(o_sp, dict) and "status" in o_sp:
@@ -1035,7 +1038,7 @@ def run_sol_spot_perp_tick(api, fapi, bbos, loop_ts, round_trips, cached_total_u
                 our_sp_u = st["spot_px"] * q_usdt
                 our_order_edge_bps = (((pp_bid_u - our_sp_u) / our_sp_u) * 10000.0) - (sc_act["ema_bps"] or 0.0)
                 st["last_edge_bps"] = round(our_order_edge_bps, 2)
-                if st_o == "FILLED" or (ex_q >= min_q_c and (our_order_edge_bps < 0.50 or loop_ts - st["entry_ts"] >= 1.50)):
+                if st_o == "FILLED" or (ex_q >= min_q_c and (perp_dipped or our_order_edge_bps < 0.20 or loop_ts - st["entry_ts"] >= 25.0)):
                     if st_o != "FILLED":
                         api.request("DELETE", "/api/v3/order", {"symbol": sp_sym, "orderId": st["spot_oid"]}, signed=True)
                     h_qty = round(math.floor(ex_q / step_c + 1e-9) * step_c, q_dec)
@@ -1074,8 +1077,7 @@ def run_sol_spot_perp_tick(api, fapi, bbos, loop_ts, round_trips, cached_total_u
                 elif st_o in ("CANCELED", "EXPIRED", "REJECTED"):
                     st["state"] = "IDLE"
                     st["spot_oid"] = None
-                # Strict 1.5s Anti-Adverse-Selection Cancel: if Perp stops rising or 1.5s passes without fill, cancel immediately so a Perp dump never runs over our Spot Bid!
-                elif ex_q < min_q_c and (pp_bbo["bid"] < st.get("entry_pp_bid", pp_bbo["bid"]) or our_order_edge_bps < 1.20 or (loop_ts - st["entry_ts"]) >= 1.50):
+                elif ex_q < min_q_c and (perp_dipped or our_order_edge_bps < 0.20 or (target_sp_bpx > st["spot_px"] + tick_c * 0.5 and edge_bps >= 1.10) or (loop_ts - st["entry_ts"]) >= 25.0):
                     cr_s = api.request("DELETE", "/api/v3/order", {"symbol": sp_sym, "orderId": st["spot_oid"]}, signed=True)
                     if cr_s.get("status") == "CANCELED" and float(cr_s.get("executedQty", 0)) < min_q_c:
                         st["state"] = "IDLE"
