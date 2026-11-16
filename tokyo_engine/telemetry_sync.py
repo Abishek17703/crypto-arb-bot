@@ -2795,26 +2795,26 @@ def main():
                                     and free_map[f_key] >= 20.0
                                 )
                                 max_sym_legs = 88
-                                max_buy_slots = 35
+                                max_buy_slots = 55
                             elif sym_p == "UUSDT":
                                 impulse_ok = (
                                     rem_2k_budget >= 20.0
                                     and free_map[f_key] >= 20.0
                                     and not cons_guards.get(sym_p, {}).get("falling", False)
                                     and q_bbo["bid"] <= 1.0005
-                                    and q_bbo["bidQty"] >= q_bbo["askQty"] * 0.85
+                                    and q_bbo["bidQty"] >= q_bbo["askQty"] * 0.45
                                 )
                                 max_sym_legs = 15
-                                max_buy_slots = 6
+                                max_buy_slots = 12
                             elif sym_p == "USD1USDC":
                                 impulse_ok = (
                                     rem_2k_budget >= 20.0
                                     and free_map[f_key] >= 20.0
                                     and not cons_guards.get(sym_p, {}).get("falling", False)
-                                    and q_bbo["bidQty"] >= q_bbo["askQty"] * 0.65
+                                    and q_bbo["bidQty"] >= q_bbo["askQty"] * 0.45
                                 )
                                 max_sym_legs = 15
-                                max_buy_slots = 6
+                                max_buy_slots = 10
                             else:
                                 impulse_ok = (
                                     rem_2k_budget >= 20.0
