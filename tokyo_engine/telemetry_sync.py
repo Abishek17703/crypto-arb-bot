@@ -1487,7 +1487,9 @@ def main():
                         api._static_dust_usd = getattr(api, "_static_dust_usd", 0.0005)
                     exact_acct_eq = round(wb_sum if wb_sum > 450.0 else (total_net + spot_net + api._static_dust_usd), 4)
                     prev_valid_eq = getattr(api, "_last_valid_eq", 498.4450)
-                    # Use EXACT direct USDT ledger valuation (total_net + spot_net + static_dust) as primary truth so BTC->USDT double-conversion noise in /wallet/balance NEVER causes fake +/-$0.005 drops!
+                    # Use EXACT direct USDT ledger valuation (total_net + spot_net) so BTC->USDT double-conversion noise in /wallet/balance on $1,502 debt NEVER causes fake -$0.07 drops!
+                    if total_net > 85.0:
+                        exact_acct_eq = round(total_net + spot_net, 4)
                     if exact_acct_eq > 85.0:
                         wb_sum = exact_acct_eq
                     if wb_sum > 85.0 and prev_valid_eq > 450.0 and abs(prev_valid_eq - wb_sum) > 25.0 and getattr(api, "_lag_drop_ticks", 0) < 4:
