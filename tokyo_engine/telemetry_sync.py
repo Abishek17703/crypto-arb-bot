@@ -901,11 +901,17 @@ def run_sol_spot_perp_tick(api, fapi, bbos, loop_ts, round_trips, cached_total_u
     mid_basis_bps = ((pp_mid_u - sp_mid_u) / sp_mid_u) * 10000.0
     if st["ema_basis_bps"] is None:
         st["ema_basis_bps"] = mid_basis_bps
-    else:
-        st["ema_basis_bps"] = st["ema_basis_bps"] * 0.997 + mid_basis_bps * 0.003
+        st["last_ema_ts"] = loop_ts
+    elif loop_ts - st.get("last_ema_ts", 0.0) >= 1.0:
+        # True 60-second rolling EMA (updated 1x/sec with alpha=0.033 instead of 200x/sec so dislocations don't decay in 1.1s!):
+        st["last_ema_ts"] = loop_ts
+        if st["state"] == "IDLE":
+            st["ema_basis_bps"] = st["ema_basis_bps"] * 0.967 + mid_basis_bps * 0.033
 
     # Entry basis (buying Spot @ sp_bid, hedging Perp @ pp_bid) vs EMA:
-    entry_basis_bps = ((pp_bid_u - sp_bid_u) / sp_bid_u) * 10000.0
+    target_sp_bpx = round(sp_bbo["ask"] - 0.01, 2) if (sp_bbo["ask"] - sp_bbo["bid"]) >= 0.019 else round(sp_bbo["bid"], 2)
+    target_sp_u = target_sp_bpx * q_usdt
+    entry_basis_bps = ((pp_bid_u - target_sp_u) / target_sp_u) * 10000.0
     edge_bps = entry_basis_bps - st["ema_basis_bps"]
     st["last_basis_bps"] = round(entry_basis_bps, 2)
     st["last_edge_bps"] = round(edge_bps, 2)
@@ -917,12 +923,12 @@ def run_sol_spot_perp_tick(api, fapi, bbos, loop_ts, round_trips, cached_total_u
 
     state = st["state"]
     if state == "IDLE":
-        # Trigger entry when Perp leads Spot upward by >= +3.5 bps above 60s EMA basis:
-        if edge_bps >= 3.50 and (loop_ts - st.get("last_trade_ts", 0.0)) >= 1.0:
+        # Pre-position at #1 FIFO queue priority when Perp leads Spot by >= +1.50 bps above 60s EMA basis:
+        if edge_bps >= 1.50 and (loop_ts - st.get("last_trade_ts", 0.0)) >= 0.5:
             # Gap 1: Force exact 0.01 SOL step size ($15 clip = ~0.21 SOL) so Spot & Perp match 1:1 with zero dust:
-            qty_sol = math.floor((15.0 / sp_bbo["bid"]) * 100.0) / 100.0
+            qty_sol = math.floor((15.0 / target_sp_bpx) * 100.0) / 100.0
             if qty_sol >= 0.08:
-                bpx_sp = round(sp_bbo["bid"], 2)
+                bpx_sp = target_sp_bpx
                 r_sp = api.request("POST", "/api/v3/order", {
                     "symbol": sp_sym, "side": "BUY", "type": "LIMIT_MAKER",
                     "quantity": f"{qty_sol:.2f}", "price": f"{bpx_sp:.2f}"
@@ -942,12 +948,15 @@ def run_sol_spot_perp_tick(api, fapi, bbos, loop_ts, round_trips, cached_total_u
             if isinstance(o_sp, dict) and "status" in o_sp:
                 st_o = o_sp["status"]
                 ex_q = float(o_sp.get("executedQty", 0.0))
-                if st_o == "FILLED" or (ex_q >= 0.08 and (edge_bps < 1.0 or loop_ts - st["entry_ts"] >= 5.0)):
+                our_sp_u = st["spot_px"] * q_usdt
+                our_order_edge_bps = (((pp_bid_u - our_sp_u) / our_sp_u) * 10000.0) - st["ema_basis_bps"]
+                st["last_edge_bps"] = round(our_order_edge_bps, 2)
+                if st_o == "FILLED" or (ex_q >= 0.08 and (our_order_edge_bps < 0.0 or loop_ts - st["entry_ts"] >= 15.0)):
                     if st_o != "FILLED":
                         api.request("DELETE", "/api/v3/order", {"symbol": sp_sym, "orderId": st["spot_oid"]}, signed=True)
                     h_qty = math.floor(ex_q * 100.0) / 100.0
                     st["qty"] = h_qty
-                    st["entry_basis_bps"] = entry_basis_bps
+                    st["entry_basis_bps"] = ((pp_bid_u - our_sp_u) / our_sp_u) * 10000.0
                     # Exact millisecond Spot fill confirms -> Post LIMIT_MAKER (GTX) hedge on SOLUSDC Perp 1 tick inside ask/at bid:
                     spx_pp = round(max(pp_bbo["bid"], pp_bbo["ask"] - 0.01), 2)
                     r_pp = fapi.request("POST", "/fapi/v1/order", {
@@ -984,7 +993,7 @@ def run_sol_spot_perp_tick(api, fapi, bbos, loop_ts, round_trips, cached_total_u
                 elif st_o in ("CANCELED", "EXPIRED", "REJECTED"):
                     st["state"] = "IDLE"
                     st["spot_oid"] = None
-                elif ex_q < 0.08 and (edge_bps < 0.80 or (loop_ts - st["entry_ts"]) >= 6.0):
+                elif ex_q < 0.08 and (our_order_edge_bps < -0.50 or (target_sp_bpx > st["spot_px"] + 0.005 and edge_bps >= 1.50) or (loop_ts - st["entry_ts"]) >= 45.0):
                     cr_s = api.request("DELETE", "/api/v3/order", {"symbol": sp_sym, "orderId": st["spot_oid"]}, signed=True)
                     if cr_s.get("status") == "CANCELED" and float(cr_s.get("executedQty", 0)) < 0.08:
                         st["state"] = "IDLE"
@@ -1026,8 +1035,8 @@ def run_sol_spot_perp_tick(api, fapi, bbos, loop_ts, round_trips, cached_total_u
         gross_pnl = ((sp_exit_u - sp_entry_u) + (pp_entry_u - pp_exit_u)) * st["qty"]
         st["unrealized_pnl"] = round(gross_pnl, 4)
         hold_s = loop_ts - st["entry_ts"]
-        # Trigger exit when basis converges back (gross_pnl >= +$0.008 = ~5.3 bps on $15) or after 45s at >= +$0.003:
-        if gross_pnl >= 0.0080 or (hold_s >= 45.0 and gross_pnl >= 0.0025) or (hold_s >= 180.0 and gross_pnl >= 0.0005):
+        # Trigger exit when basis converges back (gross_pnl >= +$0.0040 = ~2.7 bps on $15) or after 30s at >= +$0.0015:
+        if gross_pnl >= 0.0040 or (hold_s >= 30.0 and gross_pnl >= 0.0015) or (hold_s >= 90.0 and gross_pnl >= 0.0002):
             spx_sp = round(sp_bbo["ask"], 2)
             r_s_ex = api.request("POST", "/api/v3/order", {
                 "symbol": sp_sym, "side": "SELL", "type": "LIMIT_MAKER",
