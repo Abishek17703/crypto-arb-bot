@@ -483,6 +483,125 @@ def start_ws_bbo_stream():
     threading.Thread(target=_run, daemon=True).start()
 
 
+WS_FILLED_OIDS = set()
+WS_CANCELED_OIDS = set()
+WS_EXEC_MAP = {}
+
+
+def start_margin_user_ws():
+    def _run_u():
+        last_ka = 0.0
+        lk = None
+        while True:
+            s = None
+            try:
+                sess = BinanceMarginSession()
+                r_lk = sess.request("POST", "/sapi/v1/userDataStream")
+                lk = r_lk.get("listenKey") if isinstance(r_lk, dict) else None
+                if not lk:
+                    time.sleep(2.0)
+                    continue
+                last_ka = time.time()
+                ctx = ssl.create_default_context()
+                raw = socket.create_connection(("stream.binance.com", 443), timeout=8)
+                s = ctx.wrap_socket(raw, server_hostname="stream.binance.com")
+                key = base64.b64encode(os.urandom(16)).decode()
+                req = "\r\n".join([
+                    f"GET /ws/{lk} HTTP/1.1",
+                    "Host: stream.binance.com",
+                    "Upgrade: websocket",
+                    "Connection: Upgrade",
+                    f"Sec-WebSocket-Key: {key}",
+                    "Sec-WebSocket-Version: 13",
+                    "", ""
+                ])
+                s.sendall(req.encode())
+                hdr = b""
+                while b"\r\n\r\n" not in hdr:
+                    c = s.recv(1024)
+                    if not c:
+                        break
+                    hdr += c
+                buf = hdr.split(b"\r\n\r\n", 1)[1] if b"\r\n\r\n" in hdr else b""
+                while True:
+                    if time.time() - last_ka >= 1500.0:
+                        last_ka = time.time()
+                        try:
+                            BinanceMarginSession().request("PUT", "/sapi/v1/userDataStream", {"listenKey": lk})
+                        except Exception:
+                            pass
+                    while len(buf) < 2:
+                        c = s.recv(4096)
+                        if not c:
+                            raise ConnectionError("User WS closed")
+                        buf += c
+                    b0, b1 = buf[0], buf[1]
+                    opcode = b0 & 0x0f
+                    plen = b1 & 0x7f
+                    idx = 2
+                    if plen == 126:
+                        while len(buf) < 4:
+                            buf += s.recv(4096)
+                        plen = struct.unpack(">H", buf[2:4])[0]
+                        idx = 4
+                    elif plen == 127:
+                        while len(buf) < 10:
+                            buf += s.recv(4096)
+                        plen = struct.unpack(">Q", buf[2:10])[0]
+                        idx = 10
+                    while len(buf) < idx + plen:
+                        c = s.recv(4096)
+                        if not c:
+                            raise ConnectionError("User WS closed mid")
+                        buf += c
+                    payload = buf[idx:idx + plen]
+                    buf = buf[idx + plen:]
+                    if opcode == 0x9:
+                        pong = bytearray([0x8a, 0x80 | len(payload)])
+                        mask = os.urandom(4)
+                        pong.extend(mask)
+                        pong.extend(bytes(b ^ mask[i % 4] for i, b in enumerate(payload)))
+                        s.sendall(bytes(pong))
+                    elif opcode == 0x1:
+                        msg = json.loads(payload.decode("utf-8", errors="ignore"))
+                        if msg.get("e") == "executionReport":
+                            oid_u = msg.get("i")
+                            st_u = msg.get("X")
+                            ex_u = msg.get("z", "0")
+                            with WS_LOCK:
+                                if st_u == "FILLED":
+                                    WS_FILLED_OIDS.add(oid_u)
+                                elif st_u in ("CANCELED", "EXPIRED", "REJECTED"):
+                                    WS_CANCELED_OIDS.add(oid_u)
+                                else:
+                                    WS_EXEC_MAP[oid_u] = ex_u
+                    elif opcode == 0x8:
+                        break
+            except Exception:
+                time.sleep(1.0)
+            finally:
+                try:
+                    if s:
+                        s.close()
+                except Exception:
+                    pass
+
+    threading.Thread(target=_run_u, daemon=True).start()
+
+
+from concurrent.futures import ThreadPoolExecutor
+_ORDER_POOL = ThreadPoolExecutor(max_workers=6)
+_THREAD_LOCAL = threading.local()
+
+
+def _fast_parallel_post(params):
+    sess = getattr(_THREAD_LOCAL, "api", None)
+    if sess is None:
+        sess = BinanceMarginSession()
+        _THREAD_LOCAL.api = sess
+    return sess.request("POST", "/sapi/v1/margin/order", params, signed=True)
+
+
 class BinanceMarginSession:
     def __init__(self):
         self.conn = None
@@ -1032,6 +1151,7 @@ def main():
     s3 = boto3.client("s3", region_name="ap-northeast-1")
     api = BinanceMarginSession()
     start_ws_bbo_stream()
+    start_margin_user_ws()
 
     start_equity_usd = 497.2800
     today_start_equity_usd = 498.4870
@@ -1366,22 +1486,19 @@ def main():
                 auto_compound_borrow(api, force_repay_all=bool(getattr(api, "_paused_495", False) or getattr(api, "_user_paused", False)))
                 api._last_full_acct = 0.0
 
-            # 3. Single-Call Bulk Open Orders Diff every 0.10s (1-Call Zero-Drop Guard + <100ms Flip Speed)
-            if loop_ts - last_acct_poll >= 0.10:
+            # 3. Single-Call Bulk Open Orders Diff every 0.04s + <2ms Real-Time Margin User-Data WS Push!
+            if loop_ts - last_acct_poll >= 0.04:
                 do_full_acct = (loop_ts - getattr(api, "_last_full_acct", 0.0)) >= 4.0
                 last_acct_poll = loop_ts
 
                 _all_cm = api.request("GET", "/sapi/v1/margin/openOrders", signed=True)
                 if not isinstance(_all_cm, list):
-                    time.sleep(0.05)
+                    time.sleep(0.01)
                     continue
-                _all_iso_uc = api.request("GET", "/sapi/v1/margin/openOrders", {"symbol": "USDCUSDT", "isIsolated": "TRUE"}, signed=True)
-                if isinstance(_all_iso_uc, list):
-                    for _io in _all_iso_uc:
-                        _io["isIsolated"] = True
-                else:
-                    _all_iso_uc = []
-                cached_open_orders = [o for o in _all_cm if o.get("symbol") in PAIRS] + _all_iso_uc
+                with WS_LOCK:
+                    WS_FILLED_OIDS.intersection_update({o.get("orderId") for o in _all_cm})
+                    WS_CANCELED_OIDS.intersection_update({o.get("orderId") for o in _all_cm})
+                cached_open_orders = [o for o in _all_cm if o.get("symbol") in PAIRS and o.get("orderId") not in WS_FILLED_OIDS]
 
                 # Orphan Adoption Self-Heal every 8.0s: adopt any live open order missing from active_tranches!
                 if not getattr(api, "_paused_495", False) and not getattr(api, "_user_paused", False) and loop_ts - getattr(api, "_last_orphan_heal", 0.0) >= 8.0:
@@ -1658,9 +1775,15 @@ def main():
                 live_hourly_rate_usd = 0.0
                 live_daily_rate_usd = 0.0
             else:
-                # 4A. Ultra-Fast Bulk-Diff Tranche Engine (<150ms Order Flip + Dynamic +1/+2/+3 Tick Imbalance Ladder)
+                # 4A. Ultra-Fast <2ms WS Push + Bulk-Diff Tranche Engine
                 compute_composite_regime(api, bbos, last_1h_fills_count, tot_5m_pnl if "tot_5m_pnl" in locals() else 0.0, tot_15m_pnl if "tot_15m_pnl" in locals() else 0.0)
-                live_oid_map = {o.get("orderId"): o for o in cached_open_orders}
+                with WS_LOCK:
+                    _ws_filled_now = set(WS_FILLED_OIDS)
+                    _ws_exec_now = dict(WS_EXEC_MAP)
+                live_oid_map = {o.get("orderId"): o for o in cached_open_orders if o.get("orderId") not in _ws_filled_now}
+                for _oid_e, _ex_v in _ws_exec_now.items():
+                    if _oid_e in live_oid_map:
+                        live_oid_map[_oid_e]["executedQty"] = _ex_v
                 if getattr(api, "_open_orders_fetch_failed", False):
                     # Never treat a transient HTTP timeout on openOrders as a phantom fill!
                     for t_keep in active_tranches:
@@ -3162,7 +3285,7 @@ def main():
         except Exception as e:
             api._last_loop_err = f"{type(e).__name__}: {e}"
             print("Loop err:", e)
-        time.sleep(0.04)
+        time.sleep(0.005)
 
 
 if __name__ == "__main__":
