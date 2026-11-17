@@ -3949,7 +3949,7 @@ def main():
                             else (
                                 f"PAUSED AT <=$495.00 — ALL TRADING STOPPED UNTIL USER REPLY (Eq ${cached_total_usd:.4f})"
                                 if getattr(api, "_paused_495", False)
-                                else f"{s1_st_lbl} • Placed {round(placed_hr_val / 60.0, 1)}/min vs Fills {fpm_val:.2f}/min (Target 6.0/min, {conv_pct_val}%) • 1h {'+$' if equity_changes.get('1h', 0)>=0 else '-$'}{abs(equity_changes.get('1h', 0)):.4f}" + ((" • Stuck " + str(stuck_tr_cnt) + " (" + " / ".join(sx[:4] + " $" + f"{bbos[sx]['ask']:.5f}" for sx in sorted({o.get("symbol", "") for o in cached_open_orders if o.get("side") == "SELL" and float(o.get("price", 0)) > float(bbos.get(o.get("symbol", ""), {}).get("ask", 0)) + PAIRS.get(o.get("symbol", ""), {}).get("tick", 0.00001) * 1.5}) if sx in bbos) + ")") if stuck_tr_cnt > 0 else "")
+                                else f"{s1_st_lbl} • Placed {round(placed_hr_val / 60.0, 1)}/min vs Fills {fpm_val:.2f}/min (Target 6.0/min, {conv_pct_val}%) • 1h {'+$' if equity_changes.get('1h', 0)>=0 else '-$'}{abs(equity_changes.get('1h', 0)):.4f}" + ((" • Stuck " + str(stuck_tr_cnt) + " (" + " / ".join(sx[:4] + " $" + f"{bbos[sx]['bid']:.5f}" for sx in sorted({o.get("symbol", "") for o in cached_open_orders if o.get("side") == "SELL" and float(o.get("price", 0)) > float(bbos.get(o.get("symbol", ""), {}).get("ask", 0)) + PAIRS.get(o.get("symbol", ""), {}).get("tick", 0.00001) * 1.5}) if sx in bbos) + ")") if stuck_tr_cnt > 0 else "")
                             )
                         ),
                         "paused": bool(getattr(api, "_paused_495", False) or getattr(api, "_user_paused", False)),
