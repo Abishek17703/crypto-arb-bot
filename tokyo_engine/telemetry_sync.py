@@ -2135,9 +2135,9 @@ def main():
                 round_trips = sorted(round_trips, key=lambda r: int(r.get("time", 0)), reverse=True)[:40]
                 pool_pnl_summary = new_pool_pnl
                 hrs_elapsed = max(0.25, (now_ms - day_start_ms) / 3600000.0)
-                # True Realized Profit Today: Anchored to actual net wallet gain today (or FIFO matched net realized PnL) so it never overstates!
-                true_wallet_gain_today = round(max(0.0, cached_total_usd - today_start_equity_usd), 4) if cached_total_usd > 480.0 else round(tot_today_pnl, 4)
-                realized_today_usd = round(max(true_wallet_gain_today, min(tot_today_pnl, true_wallet_gain_today + 0.15)), 4)
+                # Pure 1:1 Binance myTrades FIFO Realized PnL (zero clamping, zero in-memory reset):
+                realized_today_usd = round(tot_today_pnl, 4)
+                api._binance_1h_pnl = round(tot_1h_pnl, 4)
                 today_fills_count = tot_fills
                 last_1h_fills_count = tot_1h_fills
                 # Steady Past 1-Hour Actual Equity Climb (zero short-fill burst inflation!):
@@ -3879,7 +3879,7 @@ def main():
                 s1_rts_tot = int(getattr(api, "_s1_short_rts", 0)) + int(getattr(api, "_btcu_rts", 0))
                 s1_sc_tot = int(getattr(api, "_s1_short_scratches", 0))
                 sp_st = getattr(api, "_sp_pilot", {})
-                s1_st_lbl = sp_st.get("msg", "v13.0 $30 Spot-Perp Pilot") if getattr(api, "_cm_swarm_paused", True) else (("PILOT CB: " + getattr(api, "_s1_cb_reason", "")) if getattr(api, "_s1_cb_tripped", False) else f"v12.3 100x$24 MICRO-SWARM + 50% VAULT UNSTICK (88x$24 USD1 + 12x$24 USDC • HARD $498.50 CB) • Net ${s1_net_v:+.4f} ({s1_rts_tot} RTs)")
+                s1_st_lbl = sp_st.get("msg", "v13.0 $30 Spot-Perp Pilot") if getattr(api, "_cm_swarm_paused", True) else (("PILOT CB: " + getattr(api, "_s1_cb_reason", "")) if getattr(api, "_s1_cb_tripped", False) else f"v17.1 BINANCE 1:1 • Binance 1h PnL ${getattr(api, '_binance_1h_pnl', 0.0):+.4f} • Epoch Realized ${realized_today_usd:+.4f}")
                 payload = {
                     "ts": int(loop_ts * 1000),
                     "startEquityUsd": start_equity_usd,
