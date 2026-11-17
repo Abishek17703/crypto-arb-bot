@@ -1846,7 +1846,8 @@ def main():
     fapi = BinanceFuturesSession()
     start_futures_bbo_ws()
     setup_sol_spot_perp_pilot(api, fapi)
-    halt_all_orders_and_repay(api)
+    if getattr(api, "_user_paused", False) or getattr(api, "_paused_495", False):
+        halt_all_orders_and_repay(api)
     if not getattr(api, "_user_paused", False):
         auto_compound_borrow(api)
 
@@ -3475,8 +3476,8 @@ def main():
                     ("USD1USDC",  False, "CM_USDC",       "CM_USD1",       0,                       0, 140.0,    0.0, "STOPPED • LOCKED USDC"),
                     ("UUSDT",     False, "CM_USDT",       "CM_U",          0,                       0,  24.0,    0.0, "STOPPED • SAFE MODE"),
                     ("USDCUSDT",  True,  "ISO_USDC_USDT", "ISO_USDC_BASE", 0,                       0, 140.0,    0.0, "STOPPED • $0-DEBT SAFE MODE"),
-                    ("USDCUSDT",  False, "CM_USDT",       "CM_USDC",       4 if allow_buys else 0,  0,  24.0,   96.0, "v16.3 AB • USDC $24x4"),
-                    ("USD1USDT",  False, "CM_USDT",       "CM_USD1",      16 if allow_buys else 0,  0,  24.0,  384.0, "v16.3 AB • USD1 $24x16 (12A+4B)"),
+                    ("USDCUSDT",  False, "CM_USDT",       "CM_USDC",       8 if allow_buys else 0,  0,  24.0,  192.0, "v16.5 SAFE • USDC $24x8"),
+                    ("USD1USDT",  False, "CM_USDT",       "CM_USD1",      12 if allow_buys else 0,  0,  24.0,  288.0, "v16.5 SAFE • USD1 $24x12 (6Top+6Dip)"),
                 ):
                     q_bbo = bbos.get(sym_p)
                     if not q_bbo or q_bbo["bid"] <= 0:
@@ -3513,10 +3514,10 @@ def main():
                                     rem_2k_budget >= 20.0
                                     and free_map[f_key] >= 20.0
                                     and not cons_guards.get(sym_p, {}).get("falling", False)
-                                    and q_bbo["bidQty"] >= q_bbo["askQty"] * 0.50
+                                    and q_bbo["bidQty"] >= q_bbo["askQty"] * 0.85
                                 )
-                                max_sym_legs = 16
-                                max_buy_slots = 12
+                                max_sym_legs = 12
+                                max_buy_slots = 8
                             elif sym_p == "UUSDT":
                                 impulse_ok = (
                                     rem_2k_budget >= 20.0
@@ -3552,10 +3553,10 @@ def main():
                                     rem_2k_budget >= 20.0
                                     and free_map[f_key] >= 20.0
                                     and not cons_guards.get(sym_p, {}).get("falling", False)
-                                    and q_bbo["bidQty"] >= q_bbo["askQty"] * 0.50
+                                    and q_bbo["bidQty"] >= q_bbo["askQty"] * 0.85
                                 )
-                                max_sym_legs = 4
-                                max_buy_slots = 3
+                                max_sym_legs = 8
+                                max_buy_slots = 6
                         while len(p_tr) < max_sym_legs and len(p_buy_open) < max_buy_slots and rem_2k_budget >= 20.0 and free_map[f_key] >= 20.0 and impulse_ok:
                             # v16.0 Safe Mode: LIMIT_MAKER ONLY (zero IOC taker slippage)
                             can_snipe_ask = False
@@ -3600,7 +3601,8 @@ def main():
                             is_ab_b = (sym_p in ("USD1USDT", "USDCUSDT"))
                             top_bpx_ref = round(q_bbo["bid"] + spec["tick"], spec["dec"]) if (q_bbo["ask"] - q_bbo["bid"]) >= spec["tick"] * 1.8 else round(q_bbo["bid"], spec["dec"])
                             bpx_entry = None
-                            lvl_range = range(2) if is_ab_b else range(6 if sym_p in ("USD1USDT", "USDCUSDT") else 3)
+                            u1_top_cnt = sum(1 for tx in p_tr if tx["buy_px"] >= q_bbo["bid"] - spec["tick"] * 1.5)
+                            lvl_range = (range(2) if (sym_p == "USDCUSDT" or u1_top_cnt < 6) else range(3, 9))
                             for _cap_pass in (1, 2, 3, 4, 5, 6 if sym_p in ("USD1USDT", "USDCUSDT") else 4):
                                 for _st_lvl in lvl_range:
                                     cand_bpx = round(top_bpx_ref - spec["tick"] * _st_lvl, spec["dec"])
