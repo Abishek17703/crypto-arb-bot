@@ -3510,6 +3510,26 @@ def main():
                             rem_2k_budget = max(0.0, cm_pool_cap - tot_deployed_usd)
                             clip_sz_u = 24.0
                             if sym_p == "USD1USDT":
+                                _u1_mid = 0.5 * (q_bbo["bid"] + q_bbo["ask"])
+                                api._u1_ema_1h = _u1_mid if not hasattr(api, "_u1_ema_1h") else (api._u1_ema_1h * 0.9997 + _u1_mid * 0.0003)
+                                # v16.6 MTM-Advantage: Small $48 (2x$24) Short USD1 test when USD1 > ema_1h + 4 ticks
+                                _sh_u1_cnt = sum(1 for tx in p_tr if tx.get("state") in ("SHORT_SELL_OPEN", "SHORT_BUY_OPEN"))
+                                if allow_buys and _sh_u1_cnt < 2 and q_bbo["ask"] >= api._u1_ema_1h + spec["tick"] * 4.0 and q_bbo["askQty"] >= q_bbo["bidQty"] * 0.85:
+                                    _sh_px = round(q_bbo["ask"], spec["dec"])
+                                    _sh_r = api.request("POST", "/sapi/v1/margin/order", {
+                                        "symbol": "USD1USDT", "side": "SELL", "type": "LIMIT_MAKER",
+                                        "quantity": "24", "price": f"{_sh_px:.{spec['dec']}f}", "sideEffectType": "MARGIN_BUY"
+                                    }, signed=True)
+                                    if "orderId" in _sh_r:
+                                        daily_orders_placed += 1
+                                        _nt_sh = {
+                                            "tid": f"SH_USD1_{len(p_tr)+1}", "symbol": "USD1USDT", "iso": False,
+                                            "lbl": "v16.6 MTM-SHORT • USD1 $24", "qty": 24.0,
+                                            "buy_px": round(_sh_px - spec["tick"] * 2, spec["dec"]), "sell_px": _sh_px,
+                                            "buy_oid": None, "sell_oid": _sh_r["orderId"], "state": "SHORT_SELL_OPEN", "ts": loop_ts, "ab_test": True
+                                        }
+                                        active_tranches.append(_nt_sh)
+                                        p_tr.append(_nt_sh)
                                 impulse_ok = (
                                     rem_2k_budget >= 20.0
                                     and free_map[f_key] >= 20.0
@@ -3602,7 +3622,8 @@ def main():
                             top_bpx_ref = round(q_bbo["bid"] + spec["tick"], spec["dec"]) if (q_bbo["ask"] - q_bbo["bid"]) >= spec["tick"] * 1.8 else round(q_bbo["bid"], spec["dec"])
                             bpx_entry = None
                             u1_top_cnt = sum(1 for tx in p_tr if tx["buy_px"] >= q_bbo["bid"] - spec["tick"] * 1.5)
-                            lvl_range = (range(2) if (sym_p == "USDCUSDT" or u1_top_cnt < 6) else range(3, 9))
+                            u1_below_ema = (q_bbo["bid"] <= getattr(api, "_u1_ema_1h", q_bbo["bid"]) + spec["tick"] * 1.5)
+                            lvl_range = (range(2) if (sym_p == "USDCUSDT" or (u1_top_cnt < 6 and u1_below_ema)) else range(3, 9))
                             for _cap_pass in (1, 2, 3, 4, 5, 6 if sym_p in ("USD1USDT", "USDCUSDT") else 4):
                                 for _st_lvl in lvl_range:
                                     cand_bpx = round(top_bpx_ref - spec["tick"] * _st_lvl, spec["dec"])
