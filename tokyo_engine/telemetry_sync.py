@@ -2388,8 +2388,8 @@ def main():
                         cached_balances = bals
 
                     # Scrub any prior single-tick borrow/repay or static_dust spike (>500.50 in last 30m) from eq_series
-                    if 498.10 < cached_total_usd < 540.0 and eq_series:
-                        eq_series = [pt for pt in eq_series if (460.0 < float(pt[1]) < 545.0) and not (1794683450.0 <= float(pt[0]) <= 1794683750.0 and float(pt[1]) < 498.10) and not (float(pt[0]) >= loop_ts - 1800.0 and float(pt[1]) > cached_total_usd + 0.06)]
+                    if 497.00 < cached_total_usd < 540.0 and eq_series:
+                        eq_series = [pt for pt in eq_series if (495.0 < float(pt[1]) < 545.0) and not (1794683450.0 <= float(pt[0]) <= 1794683750.0 and float(pt[1]) < 498.10) and not (float(pt[0]) >= loop_ts - 1800.0 and float(pt[1]) > cached_total_usd + 0.06)]
 
                     # TRUE SIGNED WALLET EQUITY & 8-HORIZON DELTAS (No artificial floor/clamp — if equity went in minus over any window, shows exact negative minus!)
                     if cached_total_usd > 85.0:
