@@ -3597,8 +3597,7 @@ def main():
                                             api._last_buy_map[sym_p] = snipe_px
                                             break
                             # Stagger $24 micro-clips across top 6 ticks (up to 6 clips/tick = 35 BUY slots):
-                            b_test_cnt = sum(1 for tx in p_tr if tx.get("ab_test"))
-                            is_ab_b = (sym_p == "USD1USDT" and b_test_cnt < 4)
+                            is_ab_b = (sym_p in ("USD1USDT", "USDCUSDT"))
                             top_bpx_ref = round(q_bbo["bid"] + spec["tick"], spec["dec"]) if (q_bbo["ask"] - q_bbo["bid"]) >= spec["tick"] * 1.8 else round(q_bbo["bid"], spec["dec"])
                             bpx_entry = None
                             lvl_range = range(2) if is_ab_b else range(6 if sym_p in ("USD1USDT", "USDCUSDT") else 3)
