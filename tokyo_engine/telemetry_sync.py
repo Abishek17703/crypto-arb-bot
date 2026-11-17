@@ -2774,9 +2774,9 @@ def main():
                             vault_target_px = tr["sell_px"]
                             vault_subsidy_need = 0.0
                             if not want_step_1tick and sym in ("USD1USDT", "USDCUSDT", "FDUSDUSDT") and float(o_live.get("executedQty", 0)) == 0 and q_bbo["ask"] < tr["sell_px"] - spec["tick"] * 0.5:
-                                if age_s >= 45.0 and tr["sell_px"] > tr["buy_px"] + spec["tick"] * 0.5 and q_bbo["ask"] >= tr["buy_px"] - spec["tick"] * 0.2:
+                                if age_s >= 45.0 and tr["sell_px"] > tr["buy_px"] + spec["tick"] * 1.5 and q_bbo["ask"] >= tr["buy_px"] + spec["tick"] * 0.8:
                                     want_vault_unstick = True
-                                    vault_target_px = round(max(tr["buy_px"], q_bbo["ask"]), spec["dec"])
+                                    vault_target_px = round(max(tr["buy_px"] + spec["tick"], q_bbo["ask"]), spec["dec"])
                                     vault_subsidy_need = 0.0
                                 elif False and age_s >= 25.0 and sym in ("USD1USDT", "USDCUSDT") and unstick_vault_usd >= 0.00020:
                                     need_u = max(0.0, (tr["buy_px"] - q_bbo["ask"]) * tr["qty"])
@@ -3470,8 +3470,8 @@ def main():
                     ("USD1USDC",  False, "CM_USDC",       "CM_USD1",       0,                       0, 140.0,    0.0, "STOPPED • LOCKED USDC"),
                     ("UUSDT",     False, "CM_USDT",       "CM_U",          0,                       0,  24.0,    0.0, "STOPPED • SAFE MODE"),
                     ("USDCUSDT",  True,  "ISO_USDC_USDT", "ISO_USDC_BASE", 0,                       0, 140.0,    0.0, "STOPPED • $0-DEBT SAFE MODE"),
-                    ("USDCUSDT",  False, "CM_USDT",       "CM_USDC",       8 if allow_buys else 0,  0,  24.0,  192.0, "v16.5 SAFE • USDC $24x8"),
-                    ("USD1USDT",  False, "CM_USDT",       "CM_USD1",      12 if allow_buys else 0,  0,  24.0,  288.0, "v16.5 SAFE • USD1 $24x12 (6Top+6Dip)"),
+                    ("USDCUSDT",  False, "CM_USDT",       "CM_USDC",       6 if allow_buys else 0,  0,  60.0,  360.0, "v17.6 SAFE • USDC $60x6"),
+                    ("USD1USDT",  False, "CM_USDT",       "CM_USD1",       6 if allow_buys else 0,  0,  48.0,  288.0, "v17.6 SAFE • USD1 $48x6"),
                 ):
                     q_bbo = bbos.get(sym_p)
                     if not q_bbo or q_bbo["bid"] <= 0:
@@ -3525,14 +3525,15 @@ def main():
                                         }
                                         active_tranches.append(_nt_sh)
                                         p_tr.append(_nt_sh)
+                                clip_sz_u = 48.0
                                 impulse_ok = (
                                     rem_2k_budget >= 20.0
                                     and free_map[f_key] >= 20.0
                                     and not cons_guards.get(sym_p, {}).get("falling", False)
                                     and q_bbo["bidQty"] >= q_bbo["askQty"] * 0.85
                                 )
-                                max_sym_legs = 12
-                                max_buy_slots = 8
+                                max_sym_legs = 6
+                                max_buy_slots = 4
                             elif sym_p == "UUSDT":
                                 impulse_ok = (
                                     rem_2k_budget >= 20.0
@@ -3564,14 +3565,15 @@ def main():
                                 max_sym_legs = 6
                                 max_buy_slots = 4
                             else:
+                                clip_sz_u = 60.0
                                 impulse_ok = (
                                     rem_2k_budget >= 20.0
                                     and free_map[f_key] >= 20.0
                                     and not cons_guards.get(sym_p, {}).get("falling", False)
                                     and q_bbo["bidQty"] >= q_bbo["askQty"] * 0.35
                                 )
-                                max_sym_legs = 8
-                                max_buy_slots = 6
+                                max_sym_legs = 6
+                                max_buy_slots = 4
                         while len(p_tr) < max_sym_legs and len(p_buy_open) < max_buy_slots and rem_2k_budget >= 20.0 and free_map[f_key] >= 20.0 and impulse_ok:
                             # v16.0 Safe Mode: LIMIT_MAKER ONLY (zero IOC taker slippage)
                             can_snipe_ask = False
@@ -3640,7 +3642,8 @@ def main():
                             if bq_pl * bpx_entry < 15.0:
                                 break
                             _lb_map = getattr(api, "_last_buy_pl_ts", {})
-                            if loop_ts - _lb_map.get(sym_p, 0.0) < 2.0:
+                            _lb_cd = 0.5 if sym_p == "USDCUSDT" else 2.0
+                            if loop_ts - _lb_map.get(sym_p, 0.0) < _lb_cd:
                                 break
                             _lb_map[sym_p] = loop_ts
                             api._last_buy_pl_ts = _lb_map
