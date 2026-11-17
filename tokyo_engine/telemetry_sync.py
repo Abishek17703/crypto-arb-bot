@@ -3366,7 +3366,7 @@ def main():
                         api.request("DELETE", "/sapi/v1/margin/order", {"symbol": "USDCUSDT", "orderId": uc_seed_ord[1]}, signed=True)
                         api._uc_seed_oid = None
                 # Convert any free USDC >= 6 directly to USDT on USDCUSDT:
-                elif False and "USDCUSDT" in bbos and free_map["CM_USDC"] >= 6.0 and cm_uc_debt < 1.0 and (soft_delev or not any(t["symbol"] == "USDCUSDT" for t in active_tranches)):
+                elif "USDCUSDT" in bbos and free_map["CM_USDC"] >= 6.0 and cm_uc_debt < 1.0 and (soft_delev or not any(t["symbol"] == "USDCUSDT" and not t["iso"] for t in active_tranches)):
                     uc_s_mkr = min(250, math.floor(free_map["CM_USDC"]))
                     if uc_s_mkr >= 6:
                         uc_ask_now = bbos["USDCUSDT"]["ask"]
