@@ -3865,6 +3865,16 @@ def main():
                     "last1hFillsCount": last_1h_fills_count,
                     "fillRateHr": last_1h_fills_count,
                     "fillRateMin": round(last_1h_fills_count / 60.0, 2),
+                    "placed1hRate": (placed_hr_val := (lambda: (
+                        setattr(api, "_placed_ts_1h", [t for t in (getattr(api, "_placed_ts_1h", []) + ([loop_ts] * max(0, daily_orders_placed - getattr(api, "_prev_dop_1h", daily_orders_placed)))) if loop_ts - t <= 3600.0]),
+                        setattr(api, "_prev_dop_1h", daily_orders_placed),
+                        setattr(api, "_closed_ts_1h", [t for t in (getattr(api, "_closed_ts_1h", []) + ([loop_ts] * max(0, getattr(api, "_s1_short_rts", 0) - getattr(api, "_prev_rts_1h", 0)))) if loop_ts - t <= 3600.0]),
+                        setattr(api, "_prev_rts_1h", getattr(api, "_s1_short_rts", 0)),
+                        round(len(getattr(api, "_placed_ts_1h", [])) / min(1.0, max(1.0 / 60.0, (loop_ts - getattr(api, "_s1_pilot_start_ts", loop_ts)) / 3600.0)))
+                    )[-1])()),
+                    "closed1hRate": (closed_hr_val := round((len(getattr(api, "_closed_ts_1h", [])) * 2) / min(1.0, max(1.0 / 60.0, (loop_ts - getattr(api, "_s1_pilot_start_ts", loop_ts)) / 3600.0)))),
+                    "closedRts1hRate": round(len(getattr(api, "_closed_ts_1h", [])) / min(1.0, max(1.0 / 60.0, (loop_ts - getattr(api, "_s1_pilot_start_ts", loop_ts)) / 3600.0))),
+                    "fillConvPct": (conv_pct_val := round(min(100.0, 100.0 * (len(getattr(api, "_closed_ts_1h", [])) * 2) / max(1, len(getattr(api, "_placed_ts_1h", [])))), 1)),
                     "solSpotPerpPilot": sp_st,
                     "trancheStats": {
                         "total": tot_tr_cnt,
@@ -3880,7 +3890,7 @@ def main():
                             else (
                                 f"PAUSED AT <=$495.00 — ALL TRADING STOPPED UNTIL USER REPLY (Eq ${cached_total_usd:.4f})"
                                 if getattr(api, "_paused_495", False)
-                                else f"{s1_st_lbl} • Fill Rate {last_1h_fills_count}/hr ({last_1h_fills_count/60.0:.1f}/min) • 1h {'+$' if equity_changes.get('1h', 0)>=0 else '-$'}{abs(equity_changes.get('1h', 0)):.4f}"
+                                else f"{s1_st_lbl} • Placed {placed_hr_val}/hr vs Closed {closed_hr_val}/hr ({conv_pct_val}%) • Fill Rate {last_1h_fills_count}/hr • 1h {'+$' if equity_changes.get('1h', 0)>=0 else '-$'}{abs(equity_changes.get('1h', 0)):.4f}"
                             )
                         ),
                         "paused": bool(getattr(api, "_paused_495", False) or getattr(api, "_user_paused", False)),
