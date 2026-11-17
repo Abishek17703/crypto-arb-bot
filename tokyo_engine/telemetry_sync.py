@@ -1334,31 +1334,15 @@ def auto_compound_borrow(api, force_repay_all=False):
                 ba_uc = ia_uc.get("baseAsset", {})
                 iso_net_u = float(qa_uc.get("netAsset", 0)) + float(ba_uc.get("netAsset", 0))
                 iso_bor_u = float(qa_uc.get("borrowed", 0)) + float(qa_uc.get("interest", 0))
-                # v14.1 Hybrid Split: repay excess CM loan first if Iso < $245, seed $250 into 10x Iso USDCUSDT ($2,500), keep ~$248 in 5x Cross ($980 loan -> $1,228)
-                if iso_net_u < 245.0 and ut_borrowed > 10.0 and cm_ut_free >= 20.0:
+                # v16.0 Safe $0-Debt Mode: repay any CM/Iso debt and reclaim Iso USDT to Cross-Margin ($0.00 borrow interest!)
+                if ut_borrowed > 0.01 and cm_ut_free >= 1.0:
                     rep_cm = min(cm_ut_free, ut_borrowed)
                     api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "USDT", "isIsolated": "FALSE", "amount": f"{rep_cm:.2f}", "type": "REPAY"}, signed=True)
-                    cm_acc_r = api.request("GET", "/sapi/v1/margin/account", signed=True)
-                    cm_ut_free = float(next((a.get("free", 0) for a in cm_acc_r.get("userAssets", []) if a.get("asset") == "USDT"), 0)) if isinstance(cm_acc_r, dict) else 0.0
-                    ut_borrowed = float(next((float(a.get("borrowed", 0)) + float(a.get("interest", 0)) for a in cm_acc_r.get("userAssets", []) if a.get("asset") == "USDT"), 0)) if isinstance(cm_acc_r, dict) else 0.0
-                if iso_net_u < 245.0 and cm_ut_free >= 20.0 and ut_borrowed < 1000.0:
-                    need_seed = min(round(250.0 - iso_net_u, 2), math.floor((cm_ut_free - 15.0) * 100) / 100.0)
-                    if need_seed >= 5.0:
-                        r_u1 = api.request("POST", "/sapi/v1/asset/transfer", {"type": "MARGIN_ISOLATEDMARGIN", "asset": "USDT", "amount": f"{need_seed:.2f}", "toSymbol": "USDCUSDT"}, signed=True)
-                        if "tranId" in r_u1:
-                            iso_net_u += need_seed
-                        else:
-                            api.request("POST", "/sapi/v1/margin/transfer", {"asset": "USDT", "amount": f"{need_seed:.2f}", "type": "2"}, signed=True)
-                            r_u2 = api.request("POST", "/sapi/v1/margin/isolated/transfer", {"asset": "USDT", "symbol": "USDCUSDT", "transFrom": "SPOT", "transTo": "ISOLATED_MARGIN", "amount": f"{need_seed:.2f}"}, signed=True)
-                            if "tranId" in r_u2:
-                                iso_net_u += need_seed
-                if iso_net_u >= 25.0 and iso_bor_u < iso_net_u * 8.95:
-                    mx_b = api.request("GET", "/sapi/v1/margin/maxBorrowable", {"asset": "USDT", "isolatedSymbol": "USDCUSDT"}, signed=True)
-                    can_b = min(round(iso_net_u * 8.99 - iso_bor_u, 2), float(mx_b.get("amount", 0)) * 0.99) if isinstance(mx_b, dict) else 0.0
-                    if can_b >= 10.0:
-                        api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "USDT", "isIsolated": "TRUE", "symbol": "USDCUSDT", "amount": f"{can_b:.2f}", "type": "BORROW"}, signed=True)
-            # Scale 5x Cross-Margin USDT loan cleanly:
-            target_cm_loan = 980.0 if iso_net_u >= 200.0 else 450.0
+                if iso_bor_u > 0.01:
+                    q_iso_f = float(qa_uc.get("free", 0))
+                    if q_iso_f >= 1.0:
+                        api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "USDT", "isIsolated": "TRUE", "symbol": "USDCUSDT", "amount": f"{min(q_iso_f, iso_bor_u):.2f}", "type": "REPAY"}, signed=True)
+            target_cm_loan = 0.0
             if ut_borrowed < target_cm_loan - 5.0:
                 mx_cm_b = api.request("GET", "/sapi/v1/margin/maxBorrowable", {"asset": "USDT"}, signed=True)
                 can_cm_b = min(round(target_cm_loan - ut_borrowed, 2), float(mx_cm_b.get("amount", 0)) * 0.96) if isinstance(mx_cm_b, dict) else 0.0
@@ -2431,9 +2415,9 @@ def main():
                         live_hourly_rate_usd = api._audit_1h_rate
                         live_daily_rate_usd = round(live_hourly_rate_usd * 24.0, 4)
 
-                    # Hard Latched $497.60 Strict Equity Circuit Breaker
+                    # Hard Latched $497.20 Strict Equity Circuit Breaker
                     chk_eq_495 = getattr(api, "_raw_wallet_eq", cached_total_usd)
-                    if chk_eq_495 > 85.0 and chk_eq_495 <= 497.6000:
+                    if chk_eq_495 > 85.0 and chk_eq_495 <= 497.2000:
                         api._below_495_hits = getattr(api, "_below_495_hits", 0) + 1
                         if api._below_495_hits >= 2 and not getattr(api, "_paused_495", False):
                             api._paused_495 = True
@@ -3484,10 +3468,10 @@ def main():
                     ("FDUSDUSDT", False, "CM_USDT",       "CM_FDUSD",      0,                       0,  24.0,   0.0, "STOPPED • 0-LOSS DRAIN"),
                     ("BTCUSD1",   False, "CM_USD1",       "CM_BTC",        0,                       0,  80.0,    0.0, "STOPPED • FEES"),
                     ("USD1USDC",  False, "CM_USDC",       "CM_USD1",       0,                       0, 140.0,    0.0, "STOPPED • LOCKED USDC"),
-                    ("UUSDT",     False, "CM_USDT",       "CM_U",         25 if allow_buys else 0,  0,  24.0,  600.0, "v12.6 10x-TICK • U/USDT $24"),
-                    ("USDCUSDT",  True,  "ISO_USDC_USDT", "ISO_USDC_BASE", 70 if allow_buys else 0,  0, 140.0, 2500.0, "v15.0 10x ISO • USDC $140"),
-                    ("USDCUSDT",  False, "CM_USDT",       "CM_USDC",       0,                       0,  24.0,    0.0, "STOPPED • 10x ISO ONLY"),
-                    ("USD1USDT",  False, "CM_USDT",       "CM_USD1",      88 if allow_buys else 0,  0,  24.0, 2150.0, "v12.6 100x$24 • USD1 $24"),
+                    ("UUSDT",     False, "CM_USDT",       "CM_U",          0,                       0,  24.0,    0.0, "STOPPED • SAFE MODE"),
+                    ("USDCUSDT",  True,  "ISO_USDC_USDT", "ISO_USDC_BASE", 0,                       0, 140.0,    0.0, "STOPPED • $0-DEBT SAFE MODE"),
+                    ("USDCUSDT",  False, "CM_USDT",       "CM_USDC",       4 if allow_buys else 0,  0,  24.0,   96.0, "v16.0 SAFE • USDC $24x4"),
+                    ("USD1USDT",  False, "CM_USDT",       "CM_USD1",       6 if allow_buys else 0,  0,  24.0,  144.0, "v16.0 SAFE • USD1 $24x6"),
                 ):
                     q_bbo = bbos.get(sym_p)
                     if not q_bbo or q_bbo["bid"] <= 0:
@@ -3516,16 +3500,18 @@ def main():
                         else:
                             tot_active_legs = [t for t in active_tranches if (not t["iso"]) and t["symbol"] in ("USD1USDT", "USDCUSDT", "USD1USDC", "UUSDT") and t["state"] in ("BUY_OPEN", "SELL_OPEN")]
                             tot_deployed_usd = sum(t["qty"] * t["buy_px"] for t in tot_active_legs)
-                            cm_pool_cap = 1980.0 if free_map.get("ISO_USDC_USDT", 0) + free_map.get("ISO_USDC_BASE", 0) >= 50.0 else 2475.0
+                            cm_pool_cap = 240.0
                             rem_2k_budget = max(0.0, cm_pool_cap - tot_deployed_usd)
                             clip_sz_u = 24.0
                             if sym_p == "USD1USDT":
                                 impulse_ok = (
                                     rem_2k_budget >= 20.0
                                     and free_map[f_key] >= 20.0
+                                    and not cons_guards.get(sym_p, {}).get("falling", False)
+                                    and q_bbo["bidQty"] >= q_bbo["askQty"] * 0.50
                                 )
-                                max_sym_legs = 88
-                                max_buy_slots = 55
+                                max_sym_legs = 6
+                                max_buy_slots = 4
                             elif sym_p == "UUSDT":
                                 impulse_ok = (
                                     rem_2k_budget >= 20.0
@@ -3561,20 +3547,13 @@ def main():
                                     rem_2k_budget >= 20.0
                                     and free_map[f_key] >= 20.0
                                     and not cons_guards.get(sym_p, {}).get("falling", False)
-                                    and q_bbo["bidQty"] >= q_bbo["askQty"] * 0.15
+                                    and q_bbo["bidQty"] >= q_bbo["askQty"] * 0.50
                                 )
-                                max_sym_legs = 55
-                                max_buy_slots = 35
+                                max_sym_legs = 4
+                                max_buy_slots = 3
                         while len(p_tr) < max_sym_legs and len(p_buy_open) < max_buy_slots and rem_2k_budget >= 20.0 and free_map[f_key] >= 20.0 and impulse_ok:
-                            # v12.3 Last-Look 0%-Fee IOC Ask Sniping + Bid+1 Spread Stepping (skips Bid queue when Ask <= 1200 is about to wipe out!):
-                            can_snipe_ask = (
-                                (not is_iso)
-                                and sym_p not in getattr(api, "_disabled_fee_keys", set())
-                                and loop_ts - getattr(api, "_last_ioc_snipe_ts", 0.0) >= 1.5
-                                and sym_p == "USD1USDT"
-                                and q_bbo["askQty"] <= 1200.0
-                                and q_bbo["bidQty"] >= max(10000.0, q_bbo["askQty"] * 10.0)
-                            )
+                            # v16.0 Safe Mode: LIMIT_MAKER ONLY (zero IOC taker slippage)
+                            can_snipe_ask = False
                             if can_snipe_ask:
                                 api._last_ioc_snipe_ts = loop_ts
                                 snipe_px = round(q_bbo["ask"], spec["dec"])
