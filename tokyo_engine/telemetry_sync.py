@@ -3573,7 +3573,7 @@ def main():
                                     rem_2k_budget >= 20.0
                                     and free_map[f_key] >= 20.0
                                     and not cons_guards.get(sym_p, {}).get("falling", False)
-                                    and q_bbo["bidQty"] >= q_bbo["askQty"] * 0.85
+                                    and q_bbo["bidQty"] >= q_bbo["askQty"] * 0.35
                                 )
                                 max_sym_legs = 8
                                 max_buy_slots = 6
@@ -3905,9 +3905,9 @@ def main():
                         setattr(api, "_prev_rts_1h", getattr(api, "_s1_short_rts", 0)),
                         round(len(getattr(api, "_placed_ts_1h", [])) / min(1.0, max(1.0 / 60.0, (loop_ts - getattr(api, "_s1_pilot_start_ts", loop_ts)) / 3600.0)))
                     )[-1])()),
-                    "closed1hRate": (closed_hr_val := round((len(getattr(api, "_closed_ts_1h", [])) * 2) / min(1.0, max(1.0 / 60.0, (loop_ts - getattr(api, "_s1_pilot_start_ts", loop_ts)) / 3600.0)))),
-                    "closedRts1hRate": round(len(getattr(api, "_closed_ts_1h", [])) / min(1.0, max(1.0 / 60.0, (loop_ts - getattr(api, "_s1_pilot_start_ts", loop_ts)) / 3600.0))),
-                    "fillConvPct": (conv_pct_val := round(min(100.0, 100.0 * (len(getattr(api, "_closed_ts_1h", [])) * 2) / max(1, len(getattr(api, "_placed_ts_1h", [])))), 1)),
+                    "closed1hRate": (closed_hr_val := last_1h_fills_count),
+                    "closedRts1hRate": round(last_1h_fills_count / 2.0),
+                    "fillConvPct": (conv_pct_val := round(min(100.0, 100.0 * last_1h_fills_count / max(1, placed_hr_val)), 1)),
                     "abStats": getattr(api, "_ab_stats", {}),
                     "solSpotPerpPilot": sp_st,
                     "trancheStats": {
