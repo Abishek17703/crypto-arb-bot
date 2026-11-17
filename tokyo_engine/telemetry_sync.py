@@ -3476,7 +3476,7 @@ def main():
                     ("UUSDT",     False, "CM_USDT",       "CM_U",          4 if allow_buys else 0,  0,  48.0,  192.0, "v18.2 10x-TICK • U/USDT $48x4"),
                     ("USDCUSDT",  True,  "ISO_USDC_USDT", "ISO_USDC_BASE", 0,                       0, 140.0,    0.0, "STOPPED • CM 2x MODE"),
                     ("USDCUSDT",  False, "CM_USDT",       "CM_USDC",      16 if allow_buys else 0,  0, 120.0, 1920.0, "v19.5 ACCURATE-FILL • USDC $120x16"),
-                    ("USD1USDT",  False, "CM_USDT",       "CM_USD1",      14 if allow_buys else 0,  0, 112.0, 1568.0, "v19.5 ACCURATE-FILL • USD1 $112x14"),
+                    ("USD1USDT",  False, "CM_USDT",       "CM_USD1",       6 if allow_buys else 0,  0, 112.0,  672.0, "v19.9 AUTO-CAP • USD1 $112x6"),
                 ):
                     q_bbo = bbos.get(sym_p)
                     if not q_bbo or q_bbo["bid"] <= 0:
@@ -3538,8 +3538,8 @@ def main():
                                     and not cons_guards.get(sym_p, {}).get("falling", False)
                                     and q_bbo["bidQty"] >= q_bbo["askQty"] * 0.75
                                 )
-                                max_sym_legs = 14
-                                max_buy_slots = 6
+                                max_sym_legs = 6
+                                max_buy_slots = 4
                             elif sym_p == "UUSDT":
                                 clip_sz_u = 48.0
                                 impulse_ok = (
@@ -3584,6 +3584,12 @@ def main():
                                 )
                                 max_sym_legs = 16
                                 max_buy_slots = 8
+                        if not is_iso:
+                            _sym_stuck = sum(1 for tx in p_tr if tx.get("state") == "SELL_OPEN" and (loop_ts - tx.get("ts", loop_ts)) > 60.0 and tx.get("sell_px", 0.0) > q_bbo["ask"] + spec["tick"] * 1.5)
+                            _sym_locked = sum(tx.get("qty", 0.0) * tx.get("buy_px", 1.0) for tx in p_tr if tx.get("state") in ("BUY_OPEN", "SELL_OPEN"))
+                            _sym_cap_usd = cm_pool_cap * (0.70 if (_sym_stuck < 2 and sym_p == "USDCUSDT") else 0.45)
+                            if _sym_stuck >= 3 or _sym_locked >= _sym_cap_usd:
+                                impulse_ok = False
                         while len(p_tr) < max_sym_legs and len(p_buy_open) < max_buy_slots and rem_2k_budget >= 20.0 and free_map[f_key] >= 20.0 and impulse_ok:
                             # v16.0 Safe Mode: LIMIT_MAKER ONLY (zero IOC taker slippage)
                             can_snipe_ask = False
