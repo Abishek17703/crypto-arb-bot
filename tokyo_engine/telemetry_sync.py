@@ -2780,7 +2780,7 @@ def main():
                             vault_target_px = tr["sell_px"]
                             vault_subsidy_need = 0.0
                             if not want_step_1tick and sym in ("USD1USDT", "USDCUSDT", "FDUSDUSDT") and float(o_live.get("executedQty", 0)) == 0 and q_bbo["ask"] < tr["sell_px"] - spec["tick"] * 0.5:
-                                if age_s >= 10.0 and q_bbo["ask"] >= tr["buy_px"] - spec["tick"] * 0.2:
+                                if age_s >= 45.0 and tr["sell_px"] > tr["buy_px"] + spec["tick"] * 0.5 and q_bbo["ask"] >= tr["buy_px"] - spec["tick"] * 0.2:
                                     want_vault_unstick = True
                                     vault_target_px = round(max(tr["buy_px"], q_bbo["ask"]), spec["dec"])
                                     vault_subsidy_need = 0.0
@@ -3470,8 +3470,8 @@ def main():
                     ("USD1USDC",  False, "CM_USDC",       "CM_USD1",       0,                       0, 140.0,    0.0, "STOPPED • LOCKED USDC"),
                     ("UUSDT",     False, "CM_USDT",       "CM_U",          0,                       0,  24.0,    0.0, "STOPPED • SAFE MODE"),
                     ("USDCUSDT",  True,  "ISO_USDC_USDT", "ISO_USDC_BASE", 0,                       0, 140.0,    0.0, "STOPPED • $0-DEBT SAFE MODE"),
-                    ("USDCUSDT",  False, "CM_USDT",       "CM_USDC",       4 if allow_buys else 0,  0,  24.0,   96.0, "v16.0 SAFE • USDC $24x4"),
-                    ("USD1USDT",  False, "CM_USDT",       "CM_USD1",       6 if allow_buys else 0,  0,  24.0,  144.0, "v16.0 SAFE • USD1 $24x6"),
+                    ("USDCUSDT",  False, "CM_USDT",       "CM_USDC",       8 if allow_buys else 0,  0,  24.0,  192.0, "v16.1 SAFE • USDC $24x8"),
+                    ("USD1USDT",  False, "CM_USDT",       "CM_USD1",      12 if allow_buys else 0,  0,  24.0,  288.0, "v16.1 SAFE • USD1 $24x12"),
                 ):
                     q_bbo = bbos.get(sym_p)
                     if not q_bbo or q_bbo["bid"] <= 0:
@@ -3500,7 +3500,7 @@ def main():
                         else:
                             tot_active_legs = [t for t in active_tranches if (not t["iso"]) and t["symbol"] in ("USD1USDT", "USDCUSDT", "USD1USDC", "UUSDT") and t["state"] in ("BUY_OPEN", "SELL_OPEN")]
                             tot_deployed_usd = sum(t["qty"] * t["buy_px"] for t in tot_active_legs)
-                            cm_pool_cap = 240.0
+                            cm_pool_cap = 480.0
                             rem_2k_budget = max(0.0, cm_pool_cap - tot_deployed_usd)
                             clip_sz_u = 24.0
                             if sym_p == "USD1USDT":
@@ -3510,8 +3510,8 @@ def main():
                                     and not cons_guards.get(sym_p, {}).get("falling", False)
                                     and q_bbo["bidQty"] >= q_bbo["askQty"] * 0.50
                                 )
-                                max_sym_legs = 6
-                                max_buy_slots = 4
+                                max_sym_legs = 12
+                                max_buy_slots = 8
                             elif sym_p == "UUSDT":
                                 impulse_ok = (
                                     rem_2k_budget >= 20.0
@@ -3549,8 +3549,8 @@ def main():
                                     and not cons_guards.get(sym_p, {}).get("falling", False)
                                     and q_bbo["bidQty"] >= q_bbo["askQty"] * 0.50
                                 )
-                                max_sym_legs = 4
-                                max_buy_slots = 3
+                                max_sym_legs = 8
+                                max_buy_slots = 6
                         while len(p_tr) < max_sym_legs and len(p_buy_open) < max_buy_slots and rem_2k_budget >= 20.0 and free_map[f_key] >= 20.0 and impulse_ok:
                             # v16.0 Safe Mode: LIMIT_MAKER ONLY (zero IOC taker slippage)
                             can_snipe_ask = False
@@ -3863,6 +3863,8 @@ def main():
                     "realizedYesterdayUsd": realized_yesterday_usd,
                     "todayFillsCount": today_fills_count,
                     "last1hFillsCount": last_1h_fills_count,
+                    "fillRateHr": last_1h_fills_count,
+                    "fillRateMin": round(last_1h_fills_count / 60.0, 2),
                     "solSpotPerpPilot": sp_st,
                     "trancheStats": {
                         "total": tot_tr_cnt,
@@ -3878,7 +3880,7 @@ def main():
                             else (
                                 f"PAUSED AT <=$495.00 — ALL TRADING STOPPED UNTIL USER REPLY (Eq ${cached_total_usd:.4f})"
                                 if getattr(api, "_paused_495", False)
-                                else f"{s1_st_lbl} • $399 Idle USDT Reserve • 1h {'+$' if equity_changes.get('1h', 0)>=0 else '-$'}{abs(equity_changes.get('1h', 0)):.4f}"
+                                else f"{s1_st_lbl} • Fill Rate {last_1h_fills_count}/hr ({last_1h_fills_count/60.0:.1f}/min) • 1h {'+$' if equity_changes.get('1h', 0)>=0 else '-$'}{abs(equity_changes.get('1h', 0)):.4f}"
                             )
                         ),
                         "paused": bool(getattr(api, "_paused_495", False) or getattr(api, "_user_paused", False)),
