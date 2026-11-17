@@ -1334,15 +1334,15 @@ def auto_compound_borrow(api, force_repay_all=False):
                 ba_uc = ia_uc.get("baseAsset", {})
                 iso_net_u = float(qa_uc.get("netAsset", 0)) + float(ba_uc.get("netAsset", 0))
                 iso_bor_u = float(qa_uc.get("borrowed", 0)) + float(qa_uc.get("interest", 0))
-                # v18.0 Controlled 2x ($500 CM USDT Loan = ~$1,000 Pool) Mode:
-                if ut_borrowed > 515.0 and cm_ut_free >= 1.0:
-                    rep_cm = min(cm_ut_free, ut_borrowed - 500.0)
+                # v18.1 Controlled 3x ($1,000 CM USDT Loan = ~$1,500 Pool) Mode:
+                if ut_borrowed > 1015.0 and cm_ut_free >= 1.0:
+                    rep_cm = min(cm_ut_free, ut_borrowed - 1000.0)
                     api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "USDT", "isIsolated": "FALSE", "amount": f"{rep_cm:.2f}", "type": "REPAY"}, signed=True)
                 if iso_bor_u > 0.01:
                     q_iso_f = float(qa_uc.get("free", 0))
                     if q_iso_f >= 1.0:
                         api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "USDT", "isIsolated": "TRUE", "symbol": "USDCUSDT", "amount": f"{min(q_iso_f, iso_bor_u):.2f}", "type": "REPAY"}, signed=True)
-            target_cm_loan = 500.0
+            target_cm_loan = 1000.0
             if ut_borrowed < target_cm_loan - 5.0:
                 mx_cm_b = api.request("GET", "/sapi/v1/margin/maxBorrowable", {"asset": "USDT"}, signed=True)
                 can_cm_b = min(round(target_cm_loan - ut_borrowed, 2), float(mx_cm_b.get("amount", 0)) * 0.96) if isinstance(mx_cm_b, dict) else 0.0
@@ -3468,10 +3468,10 @@ def main():
                     ("FDUSDUSDT", False, "CM_USDT",       "CM_FDUSD",      0,                       0,  24.0,   0.0, "STOPPED • 0-LOSS DRAIN"),
                     ("BTCUSD1",   False, "CM_USD1",       "CM_BTC",        0,                       0,  80.0,    0.0, "STOPPED • FEES"),
                     ("USD1USDC",  False, "CM_USDC",       "CM_USD1",       0,                       0, 140.0,    0.0, "STOPPED • LOCKED USDC"),
-                    ("UUSDT",     False, "CM_USDT",       "CM_U",          4 if allow_buys else 0,  0,  48.0,  192.0, "v18.0 10x-TICK • U/USDT $48x4"),
-                    ("USDCUSDT",  True,  "ISO_USDC_USDT", "ISO_USDC_BASE", 0,                       0, 140.0,    0.0, "STOPPED • CM 2x MODE"),
-                    ("USDCUSDT",  False, "CM_USDT",       "CM_USDC",       3 if allow_buys else 0,  0, 100.0,  300.0, "v18.0 2x SAFE • USDC $100x3"),
-                    ("USD1USDT",  False, "CM_USDT",       "CM_USD1",       8 if allow_buys else 0,  0,  96.0,  768.0, "v18.0 2x SAFE • USD1 $96x8"),
+                    ("UUSDT",     False, "CM_USDT",       "CM_U",          4 if allow_buys else 0,  0,  64.0,  256.0, "v18.1 10x-TICK • U/USDT $64x4"),
+                    ("USDCUSDT",  True,  "ISO_USDC_USDT", "ISO_USDC_BASE", 0,                       0, 140.0,    0.0, "STOPPED • CM 3x MODE"),
+                    ("USDCUSDT",  False, "CM_USDT",       "CM_USDC",       3 if allow_buys else 0,  0, 140.0,  420.0, "v18.1 3x SAFE • USDC $140x3"),
+                    ("USD1USDT",  False, "CM_USDT",       "CM_USD1",       8 if allow_buys else 0,  0, 144.0, 1152.0, "v18.1 3x SAFE • USD1 $144x8"),
                 ):
                     q_bbo = bbos.get(sym_p)
                     if not q_bbo or q_bbo["bid"] <= 0:
@@ -3500,7 +3500,7 @@ def main():
                         else:
                             tot_active_legs = [t for t in active_tranches if (not t["iso"]) and t["symbol"] in ("USD1USDT", "USDCUSDT", "USD1USDC", "UUSDT") and t["state"] in ("BUY_OPEN", "SELL_OPEN")]
                             tot_deployed_usd = sum(t["qty"] * t["buy_px"] for t in tot_active_legs)
-                            cm_pool_cap = 980.0
+                            cm_pool_cap = 1480.0
                             rem_2k_budget = max(0.0, cm_pool_cap - tot_deployed_usd)
                             clip_sz_u = 24.0
                             if sym_p == "USD1USDT":
@@ -3525,7 +3525,7 @@ def main():
                                         }
                                         active_tranches.append(_nt_sh)
                                         p_tr.append(_nt_sh)
-                                clip_sz_u = 96.0
+                                clip_sz_u = 144.0
                                 impulse_ok = (
                                     rem_2k_budget >= 20.0
                                     and free_map[f_key] >= 20.0
@@ -3535,7 +3535,7 @@ def main():
                                 max_sym_legs = 8
                                 max_buy_slots = 6
                             elif sym_p == "UUSDT":
-                                clip_sz_u = 48.0
+                                clip_sz_u = 64.0
                                 impulse_ok = (
                                     rem_2k_budget >= 20.0
                                     and free_map[f_key] >= 20.0
@@ -3566,7 +3566,7 @@ def main():
                                 max_sym_legs = 6
                                 max_buy_slots = 4
                             else:
-                                clip_sz_u = 100.0
+                                clip_sz_u = 140.0
                                 if sym_p == "USDCUSDT":
                                     _uc_mid = 0.5 * (q_bbo["bid"] + q_bbo["ask"])
                                     api._uc_ema_1h = _uc_mid if not hasattr(api, "_uc_ema_1h") else (api._uc_ema_1h * 0.9997 + _uc_mid * 0.0003)
