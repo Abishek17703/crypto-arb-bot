@@ -1813,8 +1813,8 @@ def main():
     start_ws_bbo_stream()
     start_margin_user_ws()
 
-    start_equity_usd = 497.2800
-    today_start_equity_usd = 498.4870
+    start_equity_usd = 498.4936
+    today_start_equity_usd = 498.4936
     daily_orders_placed = 42150
     round_trips = []
     try:
