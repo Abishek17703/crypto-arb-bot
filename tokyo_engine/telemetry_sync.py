@@ -1390,14 +1390,16 @@ def compute_composite_regime(api, bbos, fills_1h, p_5m, p_15m):
     old_m = prev_reg.get("mode", "MEDIUM")
     mode_since = prev_reg.get("mode_since", now_t - 180.0)
     fills_fpm = fills_1h / 60.0
-    if score >= 74 or fills_fpm >= 8.0 or (old_m == "HIGH" and (score >= 66 or fills_fpm >= 6.5)):
+    _stuck_n = getattr(api, "_live_stuck_cnt", 0)
+    _eq_15m = getattr(api, "_live_15m_eq", 0.0)
+    if (score >= 74 and _stuck_n <= 3 and _eq_15m >= 0.0) or (fills_fpm >= 9.0 and _stuck_n <= 3 and _eq_15m >= 0.0) or (old_m == "HIGH" and _stuck_n <= 3 and (score >= 66 or fills_fpm >= 7.5)):
         raw_m = "HIGH"
-    elif score >= 34 or (old_m == "MEDIUM" and score >= 26):
+    elif score >= 34 or fills_fpm >= 4.5 or (old_m == "MEDIUM" and score >= 26):
         raw_m = "MEDIUM"
     else:
         raw_m = "LOW"
-    # Enforce 180s (3-min) hold timer + gradual sequential transitions (LOW <-> MEDIUM <-> HIGH)
-    if raw_m != old_m and (now_t - mode_since) >= 180.0:
+    # Enforce 180s (3-min) hold timer, except immediate step-down from HIGH if stuck >= 4
+    if raw_m != old_m and ((now_t - mode_since) >= 180.0 or (old_m == "HIGH" and _stuck_n >= 4)):
         if (old_m == "HIGH" and raw_m == "LOW") or (old_m == "LOW" and raw_m == "HIGH"):
             mode = "MEDIUM"
         else:
@@ -3888,6 +3890,8 @@ def main():
                         active_tr_cnt += 1
 
                 free_tr_cnt = int(round(free_map.get("CM_USDT", 0.0) / 24.0))
+                api._live_stuck_cnt = stuck_tr_cnt
+                api._live_15m_eq = equity_changes.get("15m", 0.0)
                 tot_tr_cnt = active_tr_cnt + stuck_tr_cnt + free_tr_cnt
 
                 btcu_net_val = btcu_net_pnl if "btcu_net_pnl" in locals() else 0.0
