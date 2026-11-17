@@ -2407,11 +2407,13 @@ def main():
                         live_hourly_rate_usd = api._audit_1h_rate
                         live_daily_rate_usd = round(live_hourly_rate_usd * 24.0, 4)
 
-                    # Hard Latched $497.70 Strict Equity Circuit Breaker
+                    # Hard Latched $497.70 Strict Equity Circuit Breaker (3 hits >= 2.0s apart so <1s API blips never false-trip)
                     chk_eq_495 = getattr(api, "_raw_wallet_eq", cached_total_usd)
                     if chk_eq_495 > 85.0 and chk_eq_495 <= 497.7000:
-                        api._below_495_hits = getattr(api, "_below_495_hits", 0) + 1
-                        if api._below_495_hits >= 2 and not getattr(api, "_paused_495", False):
+                        if loop_ts - getattr(api, "_last_495_hit_ts", 0.0) >= 2.0:
+                            api._last_495_hit_ts = loop_ts
+                            api._below_495_hits = getattr(api, "_below_495_hits", 0) + 1
+                        if api._below_495_hits >= 3 and not getattr(api, "_paused_495", False):
                             api._paused_495 = True
                             try:
                                 with open("/tmp/pause_495_latch.json", "w") as _pf:
@@ -3637,12 +3639,17 @@ def main():
                             bq_pl = round(math.floor((pl_usd_sz / bpx_entry) / spec["step"] + 1e-9) * spec["step"], 6)
                             if bq_pl * bpx_entry < 15.0:
                                 break
+                            _lb_map = getattr(api, "_last_buy_pl_ts", {})
+                            if loop_ts - _lb_map.get(sym_p, 0.0) < 2.0:
+                                break
+                            _lb_map[sym_p] = loop_ts
+                            api._last_buy_pl_ts = _lb_map
                             bpx_pl = bpx_entry
                             br_pl = api.request("POST", "/sapi/v1/margin/order", {
                                 "symbol": sym_p, "side": "BUY", "type": "LIMIT_MAKER",
                                 "quantity": spec["q_fmt"].format(bq_pl), "price": f"{bpx_pl:.{spec['dec']}f}", **iso_param
                             }, signed=True)
-                            if "orderId" in br_pl:
+                            if "orderId" in br_pl and br_pl.get("status") != "EXPIRED":
                                 spent_u = bq_pl * bpx_pl
                                 free_map[f_key] -= spent_u
                                 rem_2k_budget = max(0.0, rem_2k_budget - spent_u)
