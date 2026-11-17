@@ -2844,6 +2844,7 @@ def main():
                                             tr["qty"] = rem_q
                                             tr["ts"] = loop_ts
                                             daily_orders_placed += 1
+                                            _ds = getattr(api, "_dop_sites", {}); _ds["STEP_SELL"] = _ds.get("STEP_SELL", 0) + 1; api._dop_sites = _ds
                                             still_tranches.append(tr)
                                 elif cr.get("code") != -2011:
                                     still_tranches.append(tr)
@@ -3513,6 +3514,7 @@ def main():
                                     }, signed=True)
                                     if "orderId" in _sh_r:
                                         daily_orders_placed += 1
+                                        _ds = getattr(api, "_dop_sites", {}); _ds["SH_USD1"] = _ds.get("SH_USD1", 0) + 1; api._dop_sites = _ds
                                         _nt_sh = {
                                             "tid": f"SH_USD1_{len(p_tr)+1}", "symbol": "USD1USDT", "iso": False,
                                             "lbl": "v16.6 MTM-SHORT • USD1 $24", "qty": 24.0,
@@ -3645,6 +3647,7 @@ def main():
                                 free_map[f_key] -= spent_u
                                 rem_2k_budget = max(0.0, rem_2k_budget - spent_u)
                                 daily_orders_placed += 1
+                                _ds = getattr(api, "_dop_sites", {}); _ds["BUY_PL"] = _ds.get("BUY_PL", 0) + 1; api._dop_sites = _ds
                                 _ab = getattr(api, "_ab_stats", {"A_ctrl": {"placed": 0, "rts": 0, "pnl": 0.0}, "B_test": {"placed": 0, "rts": 0, "pnl": 0.0}})
                                 _ab["B_test" if is_ab_b else "A_ctrl"]["placed"] += 1
                                 api._ab_stats = _ab
@@ -3705,6 +3708,7 @@ def main():
                         if "orderId" in sr:
                             free_map[b_key] = max(0.0, free_map[b_key] - sq)
                             daily_orders_placed += 1
+                            _ds = getattr(api, "_dop_sites", {}); _ds["INV_SELL"] = _ds.get("INV_SELL", 0) + 1; api._dop_sites = _ds
                             nt = {
                                 "tid": f"{sym_p[:4]}{len(p_tr)+1}", "symbol": sym_p, "iso": is_iso, "lbl": lbl_p,
                                 "qty": sq, "buy_px": bpx, "sell_px": spx, "buy_oid": "INV", "sell_oid": sr["orderId"],
@@ -3900,6 +3904,7 @@ def main():
                     "closedRts1hRate": round(last_1h_fills_count / 2.0),
                     "fillConvPct": (conv_pct_val := round(min(100.0, 100.0 * last_1h_fills_count / max(1, placed_hr_val)), 1)),
                     "abStats": getattr(api, "_ab_stats", {}),
+                    "dopSites": getattr(api, "_dop_sites", {}),
                     "solSpotPerpPilot": sp_st,
                     "trancheStats": {
                         "total": tot_tr_cnt,
