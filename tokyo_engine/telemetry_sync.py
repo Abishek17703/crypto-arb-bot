@@ -2783,9 +2783,9 @@ def main():
                                     want_vault_unstick = True
                                     vault_target_px = round(max(tr["buy_px"] + spec["tick"], q_bbo["ask"]), spec["dec"])
                                     vault_subsidy_need = 0.0
-                                elif False and age_s >= 25.0 and sym in ("USD1USDT", "USDCUSDT") and unstick_vault_usd >= 0.00020:
+                                elif age_s >= 90.0 and sym in ("USD1USDT", "USDCUSDT") and unstick_vault_usd >= 0.00020:
                                     need_u = max(0.0, (tr["buy_px"] - q_bbo["ask"]) * tr["qty"])
-                                    if 0.0 < need_u <= unstick_vault_usd + 1e-6 and need_u <= 0.0060:
+                                    if 0.0 < need_u <= unstick_vault_usd + 1e-6 and need_u <= 0.0150:
                                         want_vault_unstick = True
                                         vault_target_px = round(q_bbo["ask"], spec["dec"])
                                         vault_subsidy_need = need_u
@@ -3567,7 +3567,7 @@ def main():
                                     rem_2k_budget >= 20.0
                                     and free_map[f_key] >= 20.0
                                     and not cons_guards.get(sym_p, {}).get("falling", False)
-                                    and q_bbo["bidQty"] >= q_bbo["askQty"] * 0.35
+                                    and q_bbo["bidQty"] >= q_bbo["askQty"] * 0.65
                                 )
                                 max_sym_legs = 6
                                 max_buy_slots = 4
@@ -3580,7 +3580,7 @@ def main():
                                     rem_2k_budget >= 20.0
                                     and free_map[f_key] >= 20.0
                                     and not cons_guards.get(sym_p, {}).get("falling", False)
-                                    and q_bbo["bidQty"] >= q_bbo["askQty"] * 0.35
+                                    and q_bbo["bidQty"] >= q_bbo["askQty"] * 0.65
                                 )
                                 max_sym_legs = 16
                                 max_buy_slots = 8
@@ -3630,7 +3630,7 @@ def main():
                             bpx_entry = None
                             u1_top_cnt = sum(1 for tx in p_tr if tx["buy_px"] >= q_bbo["bid"] - spec["tick"] * 1.5)
                             u1_below_ema = (q_bbo["bid"] <= getattr(api, "_u1_ema_1h", q_bbo["bid"]) + spec["tick"] * 1.5)
-                            uc_below_ema = (q_bbo["bid"] <= getattr(api, "_uc_ema_1h", q_bbo["bid"]) + spec["tick"] * 3.0)
+                            uc_below_ema = (q_bbo["bid"] <= getattr(api, "_uc_ema_1h", q_bbo["bid"]) + spec["tick"] * 1.5)
                             lvl_range = (range(5) if (sym_p == "USDCUSDT" and uc_below_ema) else (range(1, 6) if sym_p == "USDCUSDT" else (range(5) if (u1_top_cnt < 4 and u1_below_ema) else range(1, 6))))
                             for _cap_pass in (1, 2):
                                 for _st_lvl in lvl_range:
@@ -3646,7 +3646,7 @@ def main():
                             # Dynamic +2/+3 Tick target for Control A; strict +1 Tick top-of-book for Test B:
                             ask_q_now = q_bbo["askQty"]
                             imb_now = q_bbo["bidQty"] / max(1.0, ask_q_now)
-                            t_ticks = 1 if is_ab_b else (3 if (sym_p == "USD1USDT" and ask_q_now < 4500.0 and imb_now >= 2.50) else (2 if (sym_p == "USD1USDT" and (ask_q_now < 12000.0 or imb_now >= 2.20)) else 1))
+                            t_ticks = (2 if (ask_q_now < 15000.0 and imb_now >= 2.0) else 1) if is_ab_b else (3 if (sym_p == "USD1USDT" and ask_q_now < 4500.0 and imb_now >= 2.50) else (2 if (sym_p == "USD1USDT" and (ask_q_now < 12000.0 or imb_now >= 2.20)) else 1))
                             spx_target = round(bpx_entry + max(8.0, q_bbo["ask"] - bpx_entry), spec["dec"]) if sym_p == "BTCUSD1" else round(bpx_entry + spec["tick"] * t_ticks, spec["dec"])
                             pl_usd_sz = min(clip_sz_u, rem_2k_budget, free_map[f_key] * 0.99)
                             bq_pl = round(math.floor((pl_usd_sz / bpx_entry) / spec["step"] + 1e-9) * spec["step"], 6)
