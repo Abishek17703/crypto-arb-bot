@@ -1863,6 +1863,8 @@ def main():
     start_futures_bbo_ws()
     setup_sol_spot_perp_pilot(api, fapi)
     halt_all_orders_and_repay(api)
+    if not getattr(api, "_user_paused", False):
+        auto_compound_borrow(api)
 
     active_tranches = []
     trades_cache = {s: [] for s in ("USDCUSDT", "USDCUSDT_CM", "USD1USDT_CM", "USD1USDT_ISO", "USD1USDC_CM", "USD1U_CM", "UUSDT_CM", "FDUSDUSDT", "FDUSDUSDT_CM", "FDUSDUSDC", "FDUSDUSDC_CM", "BTCU_CM", "BTCUSD1_CM", "BNBU_CM", "ETHU_CM", "BNBFDUSD_CM", "SOLFDUSD_CM", "EURIUSDT", "BTCU", "ETHU")}
