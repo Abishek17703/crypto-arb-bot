@@ -1394,7 +1394,7 @@ def compute_composite_regime(api, bbos, fills_1h, p_5m, p_15m):
     _eq_15m = getattr(api, "_live_15m_eq", 0.0)
     if (score >= 74 and _stuck_n <= 3 and _eq_15m >= 0.0) or (fills_fpm >= 9.0 and _stuck_n <= 3 and _eq_15m >= 0.0) or (old_m == "HIGH" and _stuck_n <= 3 and (score >= 66 or fills_fpm >= 7.5)):
         raw_m = "HIGH"
-    elif score >= 34 or fills_fpm >= 4.5 or (old_m == "MEDIUM" and score >= 26):
+    elif (fills_fpm >= 4.5 and score >= 26) or (score >= 50) or (old_m == "MEDIUM" and fills_fpm >= 3.5 and score >= 34):
         raw_m = "MEDIUM"
     else:
         raw_m = "LOW"
