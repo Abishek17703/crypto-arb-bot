@@ -1334,9 +1334,9 @@ def auto_compound_borrow(api, force_repay_all=False):
                 ba_uc = ia_uc.get("baseAsset", {})
                 iso_net_u = float(qa_uc.get("netAsset", 0)) + float(ba_uc.get("netAsset", 0))
                 iso_bor_u = float(qa_uc.get("borrowed", 0)) + float(qa_uc.get("interest", 0))
-                # v19.0 Volume-Adaptive Loan ($350 LOW / $600 MEDIUM / $950 HIGH):
+                # v19.2 Volume-Adaptive Loan ($0 LOW / $600 MEDIUM / Max-$1,800 HIGH):
                 _reg_mode = getattr(api, "_regime_info", {}).get("mode", "MEDIUM")
-                target_cm_loan = 950.0 if _reg_mode == "HIGH" else (350.0 if _reg_mode == "LOW" else 600.0)
+                target_cm_loan = 1800.0 if _reg_mode == "HIGH" else (0.0 if _reg_mode == "LOW" else 600.0)
                 if ut_borrowed > target_cm_loan + 15.0 and cm_ut_free >= 1.0:
                     rep_cm = min(cm_ut_free, ut_borrowed - target_cm_loan)
                     api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "USDT", "isIsolated": "FALSE", "amount": f"{rep_cm:.2f}", "type": "REPAY"}, signed=True)
@@ -1346,10 +1346,10 @@ def auto_compound_borrow(api, force_repay_all=False):
                         api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "USDT", "isIsolated": "TRUE", "symbol": "USDCUSDT", "amount": f"{min(q_iso_f, iso_bor_u):.2f}", "type": "REPAY"}, signed=True)
             else:
                 _reg_mode = getattr(api, "_regime_info", {}).get("mode", "MEDIUM")
-                target_cm_loan = 950.0 if _reg_mode == "HIGH" else (350.0 if _reg_mode == "LOW" else 600.0)
+                target_cm_loan = 1800.0 if _reg_mode == "HIGH" else (0.0 if _reg_mode == "LOW" else 600.0)
             if ut_borrowed < target_cm_loan - 5.0:
                 mx_cm_b = api.request("GET", "/sapi/v1/margin/maxBorrowable", {"asset": "USDT"}, signed=True)
-                can_cm_b = min(round(target_cm_loan - ut_borrowed, 2), float(mx_cm_b.get("amount", 0)) * 0.96) if isinstance(mx_cm_b, dict) else 0.0
+                can_cm_b = min(round(target_cm_loan - ut_borrowed, 2), float(mx_cm_b.get("amount", 0)) * 0.92) if isinstance(mx_cm_b, dict) else 0.0
                 if can_cm_b >= 2.0:
                     api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "USDT", "isIsolated": "FALSE", "amount": f"{can_cm_b:.2f}", "type": "BORROW"}, signed=True)
     except Exception:
@@ -3505,7 +3505,7 @@ def main():
                             tot_active_legs = [t for t in active_tranches if (not t["iso"]) and t["symbol"] in ("USD1USDT", "USDCUSDT", "USD1USDC", "UUSDT") and t["state"] in ("BUY_OPEN", "SELL_OPEN")]
                             tot_deployed_usd = sum(t["qty"] * t["buy_px"] for t in tot_active_legs)
                             _reg_mode_p = getattr(api, "_regime_info", {}).get("mode", "MEDIUM")
-                            cm_pool_cap = (950.0 if _reg_mode_p == "HIGH" else (350.0 if _reg_mode_p == "LOW" else 600.0)) + 480.0
+                            cm_pool_cap = (1800.0 if _reg_mode_p == "HIGH" else (0.0 if _reg_mode_p == "LOW" else 600.0)) + 480.0
                             rem_2k_budget = max(0.0, cm_pool_cap - tot_deployed_usd)
                             clip_sz_u = 24.0
                             if sym_p == "USD1USDT":
@@ -3630,7 +3630,7 @@ def main():
                             u1_top_cnt = sum(1 for tx in p_tr if tx["buy_px"] >= q_bbo["bid"] - spec["tick"] * 1.5)
                             u1_below_ema = (q_bbo["bid"] <= getattr(api, "_u1_ema_1h", q_bbo["bid"]) + spec["tick"] * 3.0)
                             uc_below_ema = (q_bbo["bid"] <= getattr(api, "_uc_ema_1h", q_bbo["bid"]) + spec["tick"] * 3.0)
-                            lvl_range = (range(2) if (sym_p == "USDCUSDT" and uc_below_ema) else (range(1, 3) if sym_p == "USDCUSDT" else (range(2) if (u1_top_cnt < 6 and u1_below_ema) else range(1, 3))))
+                            lvl_range = (range(2) if (sym_p == "USDCUSDT" and uc_below_ema) else (range(1, 3) if sym_p == "USDCUSDT" else (range(2) if (u1_top_cnt < 4 and u1_below_ema) else range(1, 3))))
                             for _cap_pass in (1, 2, 3, 4, 5, 6 if sym_p in ("USD1USDT", "USDCUSDT") else 4):
                                 for _st_lvl in lvl_range:
                                     cand_bpx = round(top_bpx_ref - spec["tick"] * _st_lvl, spec["dec"])
