@@ -3482,10 +3482,11 @@ def main():
                     ("FDUSDUSDC", False, "CM_USDC",  "CM_FDUSD",   0,                       0, 20.0,   0.0, "STOPPED"),
                     ("USD1U",     False, "CM_U",     "CM_USD1",    0,                       0, 14.0,   0.0, "STOPPED"),
                     ("FDUSDUSDT", False, "CM_USDT",       "CM_FDUSD",      0,                       0,  24.0,   0.0, "STOPPED • 0-LOSS DRAIN"),
-                    ("USD1USDC",  False, "CM_USDC",       "CM_USD1",      15 if allow_buys else 0,  0,  24.0, 360.0, "v12.6 10x-TICK • USD1/USDC $24"),
-                    ("UUSDT",     False, "CM_USDT",       "CM_U",         25 if allow_buys else 0,  0,  24.0, 600.0, "v12.6 10x-TICK • U/USDT $24"),
-                    ("USDCUSDT",  True,  "ISO_USDC_USDT", "ISO_USDC_BASE", 70 if allow_buys else 0, 0,  70.0, 2500.0, "v14.0 10x ISO • USDC $70"),
-                    ("USDCUSDT",  False, "CM_USDT",       "CM_USDC",      0,                       0,  24.0,    0.0, "STOPPED • 10x ISO ONLY"),
+                    ("BTCUSD1",   False, "CM_USD1",       "CM_BTC",        6 if allow_buys else 0,  0,  80.0,  480.0, "v15.0 0%-FEE • BTC/USD1 $80"),
+                    ("USD1USDC",  False, "CM_USDC",       "CM_USD1",      15 if allow_buys else 0,  0, 140.0,  600.0, "v15.0 10x-TICK • USD1/USDC $140"),
+                    ("UUSDT",     False, "CM_USDT",       "CM_U",         25 if allow_buys else 0,  0,  24.0,  600.0, "v12.6 10x-TICK • U/USDT $24"),
+                    ("USDCUSDT",  True,  "ISO_USDC_USDT", "ISO_USDC_BASE", 70 if allow_buys else 0,  0, 140.0, 2500.0, "v15.0 10x ISO • USDC $140"),
+                    ("USDCUSDT",  False, "CM_USDT",       "CM_USDC",       0,                       0,  24.0,    0.0, "STOPPED • 10x ISO ONLY"),
                     ("USD1USDT",  False, "CM_USDT",       "CM_USD1",      88 if allow_buys else 0,  0,  24.0, 2150.0, "v12.6 100x$24 • USD1 $24"),
                 ):
                     q_bbo = bbos.get(sym_p)
@@ -3496,8 +3497,8 @@ def main():
                     p_tr = [t for t in active_tranches if t["symbol"] == sym_p and t["iso"] == is_iso]
                     is_crypto_u1 = sym_p in ("BTCU", "BTCUSD1", "BNBU", "ETHU", "BNBFDUSD", "SOLFDUSD")
 
-                    # v12.6 100x$24 Micro-Tranches + 10x-Tick (UUSDT / USD1USDC) + 10x ISO USDCUSDT + 50% Profit-Vault Waterfall Unstick:
-                    if sym_p in ("USD1USDT", "USDCUSDT", "UUSDT", "USD1USDC") and allow_buys and (not getattr(api, "_s1_cb_tripped", False)):
+                    # v15.0 Higher-Edge: 10x ISO USDC $140 + USD1USDC $140 + BTCUSD1 $80 (0%-fee + Perp Hedge) + USD1USDT:
+                    if sym_p in ("USD1USDT", "USDCUSDT", "UUSDT", "USD1USDC", "BTCUSD1") and allow_buys and (not getattr(api, "_s1_cb_tripped", False)):
                         p_buy_open = [t for t in p_tr if t["state"] == "BUY_OPEN"]
                         if is_iso:
                             tot_iso_legs = [t for t in active_tranches if t["symbol"] == "USDCUSDT" and t["iso"] and t["state"] in ("BUY_OPEN", "SELL_OPEN")]
@@ -3505,7 +3506,7 @@ def main():
                             rem_2k_budget = max(0.0, 2500.0 - tot_deployed_usd)
                             max_sym_legs = 70
                             max_buy_slots = 35
-                            clip_sz_u = 70.0
+                            clip_sz_u = 140.0
                             impulse_ok = (
                                 rem_2k_budget >= 20.0
                                 and free_map[f_key] >= 20.0
@@ -3536,6 +3537,7 @@ def main():
                                 max_sym_legs = 25
                                 max_buy_slots = 18
                             elif sym_p == "USD1USDC":
+                                clip_sz_u = 140.0
                                 impulse_ok = (
                                     rem_2k_budget >= 20.0
                                     and free_map[f_key] >= 20.0
@@ -3544,6 +3546,16 @@ def main():
                                 )
                                 max_sym_legs = 15
                                 max_buy_slots = 10
+                            elif sym_p == "BTCUSD1":
+                                clip_sz_u = 80.0
+                                impulse_ok = (
+                                    rem_2k_budget >= 20.0
+                                    and free_map[f_key] >= 20.0
+                                    and not cons_guards.get(sym_p, {}).get("falling", False)
+                                    and q_bbo["bidQty"] >= q_bbo["askQty"] * 0.35
+                                )
+                                max_sym_legs = 6
+                                max_buy_slots = 4
                             else:
                                 impulse_ok = (
                                     rem_2k_budget >= 20.0
@@ -3618,7 +3630,7 @@ def main():
                             ask_q_now = q_bbo["askQty"]
                             imb_now = q_bbo["bidQty"] / max(1.0, ask_q_now)
                             t_ticks = 3 if (sym_p == "USD1USDT" and ask_q_now < 4500.0 and imb_now >= 2.50) else (2 if (sym_p == "USD1USDT" and (ask_q_now < 12000.0 or imb_now >= 2.20)) else 1)
-                            spx_target = round(bpx_entry + spec["tick"] * t_ticks, spec["dec"])
+                            spx_target = round(bpx_entry + max(8.0, q_bbo["ask"] - bpx_entry), spec["dec"]) if sym_p == "BTCUSD1" else round(bpx_entry + spec["tick"] * t_ticks, spec["dec"])
                             pl_usd_sz = min(clip_sz_u, rem_2k_budget, free_map[f_key] * 0.99)
                             bq_pl = round(math.floor((pl_usd_sz / bpx_entry) / spec["step"] + 1e-9) * spec["step"], 6)
                             if bq_pl * bpx_entry < 15.0:
