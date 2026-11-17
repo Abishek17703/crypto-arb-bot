@@ -2523,12 +2523,12 @@ def main():
                                     synth_exit_g = bbos[ref_sym_g]["ask"] / bbos[q_bridge]["ask"]
                                     if synth_exit_g < tr["buy_px"] + 0.000030:
                                         tri_edge_gone = True
-                            can_reroute_deep = (sym in ("USD1USDT", "USDCUSDT", "UUSDT", "USD1USDC") and (q_bbo["bid"] - tr["buy_px"]) >= spec["tick"] * 1.5 and (loop_ts - tr.get("ts", 0)) >= 45.0)
+                            can_reroute_deep = (sym in ("USD1USDT", "USDCUSDT", "UUSDT", "USD1USDC") and (q_bbo["bid"] - tr["buy_px"]) >= spec["tick"] * 1.5 and (loop_ts - tr.get("ts", 0)) >= 12.0)
                             # Heavy-Bid Pre-Fill Shield (v9.5 100%-Winrate Anti-Adverse-Selection Shield: steps back to Bid-1 before thin Bid walls get swept!):
                             cg_live = compute_conservative_guard(api, bbos).get(sym, {})
                             min_safe_wall = 0.85 if sym in ("USD1USDT", "USDCUSDT") else (1.25 if sym in ("UUSDT", "USD1USDC") else (0.90 if sym == "BTCU" else 0.65))
                             weak_bid_wall = False
-                            if float(o_live.get("executedQty", 0)) == 0 and (tri_edge_gone or (sym in ("BTCU", "BTCUSD1", "BNBU", "ETHU", "BNBFDUSD", "SOLFDUSD") and q_bbo["bid"] > tr["buy_px"] + max(spec["tick"] * 0.5, 0.50 if sym in ("BTCU", "BTCUSD1") else 0.0)) or ((loop_ts - tr.get("ts", 0)) >= 45.0 and can_reroute_deep)):
+                            if float(o_live.get("executedQty", 0)) == 0 and (tri_edge_gone or (sym in ("BTCU", "BTCUSD1", "BNBU", "ETHU", "BNBFDUSD", "SOLFDUSD") and q_bbo["bid"] > tr["buy_px"] + max(spec["tick"] * 0.5, 0.50 if sym in ("BTCU", "BTCUSD1") else 0.0)) or can_reroute_deep):
                                 cr = api.request("DELETE", "/sapi/v1/margin/order", {"symbol": sym, "orderId": tr["buy_oid"], **iso_param}, signed=True)
                                 exec_b = float(cr.get("executedQty", 0))
                                 cm_bkey = "CM_BTC" if sym in ("BTCU", "BTCUSD1") else ("CM_ETH" if sym == "ETHU" else ("CM_BNB" if sym in ("BNBU", "BNBFDUSD") else ("CM_SOL" if sym == "SOLFDUSD" else ("CM_FDUSD" if sym in ("FDUSDUSDT", "FDUSDUSDC") else ("CM_USDC" if sym == "USDCUSDT" else ("CM_U" if sym in ("UUSDT", "UUSDC") else "CM_USD1"))))))
@@ -3530,7 +3530,7 @@ def main():
                                     rem_2k_budget >= 20.0
                                     and free_map[f_key] >= 20.0
                                     and not cons_guards.get(sym_p, {}).get("falling", False)
-                                    and q_bbo["bidQty"] >= q_bbo["askQty"] * 0.85
+                                    and q_bbo["bidQty"] >= q_bbo["askQty"] * 0.55
                                 )
                                 max_sym_legs = 8
                                 max_buy_slots = 6
@@ -3623,9 +3623,9 @@ def main():
                             top_bpx_ref = round(q_bbo["bid"] + spec["tick"], spec["dec"]) if (q_bbo["ask"] - q_bbo["bid"]) >= spec["tick"] * 1.8 else round(q_bbo["bid"], spec["dec"])
                             bpx_entry = None
                             u1_top_cnt = sum(1 for tx in p_tr if tx["buy_px"] >= q_bbo["bid"] - spec["tick"] * 1.5)
-                            u1_below_ema = (q_bbo["bid"] <= getattr(api, "_u1_ema_1h", q_bbo["bid"]) + spec["tick"] * 1.5)
-                            uc_below_ema = (q_bbo["bid"] <= getattr(api, "_uc_ema_1h", q_bbo["bid"]) + spec["tick"] * 1.0)
-                            lvl_range = (range(2) if (sym_p == "USDCUSDT" and uc_below_ema) else (range(2, 5) if sym_p == "USDCUSDT" else (range(2) if (u1_top_cnt < 6 and u1_below_ema) else range(3, 9))))
+                            u1_below_ema = (q_bbo["bid"] <= getattr(api, "_u1_ema_1h", q_bbo["bid"]) + spec["tick"] * 2.5)
+                            uc_below_ema = (q_bbo["bid"] <= getattr(api, "_uc_ema_1h", q_bbo["bid"]) + spec["tick"] * 2.0)
+                            lvl_range = (range(2) if (sym_p == "USDCUSDT" and uc_below_ema) else (range(1, 3) if sym_p == "USDCUSDT" else (range(2) if (u1_top_cnt < 6 and u1_below_ema) else range(1, 4))))
                             for _cap_pass in (1, 2, 3, 4, 5, 6 if sym_p in ("USD1USDT", "USDCUSDT") else 4):
                                 for _st_lvl in lvl_range:
                                     cand_bpx = round(top_bpx_ref - spec["tick"] * _st_lvl, spec["dec"])
