@@ -2758,7 +2758,7 @@ def main():
                                             continue
                             # Mechanism 1: Smart +2/+3 -> +1 Tick Profit Step-Down (after 5.0s) + Strictly >= Breakeven Step-Down (ZERO negative step-downs ever!)
                             min_step_gain = 2.50 if sym in ("BTCU", "BTCUSD1") else spec["tick"]
-                            step_wait_s = 5.0 if (tr.get("pilot") or (sym in ("USD1USDT", "USDCUSDT") and getattr(api, "_v89_scaled", False))) else 65.0
+                            step_wait_s = 45.0
                             want_step_1tick = (
                                 sym not in ("FDUSDUSDC", "ETHU")
                                 and float(o_live.get("executedQty", 0)) == 0
@@ -3081,7 +3081,7 @@ def main():
                         else:
                             tr["minus_since"] = None
 
-                if stuck_sells and (loop_ts - getattr(api, "_last_unstick_ts", 0.0)) >= 1.0:
+                if stuck_sells and (loop_ts - getattr(api, "_last_unstick_ts", 0.0)) >= 30.0:
                     stuck_sells.sort(key=lambda x: x[0])
                     for gap_cost, target_tr, live_ask_px, t_spec in stuck_sells[:4]:
                         at_live_ask = sum(1 for tx in still_tranches if tx["symbol"] == target_tr["symbol"] and abs(tx.get("sell_px", 0) - live_ask_px) < t_spec["tick"] * 0.3)
