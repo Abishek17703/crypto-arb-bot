@@ -2415,9 +2415,9 @@ def main():
                         live_hourly_rate_usd = api._audit_1h_rate
                         live_daily_rate_usd = round(live_hourly_rate_usd * 24.0, 4)
 
-                    # Hard Latched $497.20 Strict Equity Circuit Breaker
+                    # Hard Latched $497.70 Strict Equity Circuit Breaker
                     chk_eq_495 = getattr(api, "_raw_wallet_eq", cached_total_usd)
-                    if chk_eq_495 > 85.0 and chk_eq_495 <= 497.2000:
+                    if chk_eq_495 > 85.0 and chk_eq_495 <= 497.7000:
                         api._below_495_hits = getattr(api, "_below_495_hits", 0) + 1
                         if api._below_495_hits >= 2 and not getattr(api, "_paused_495", False):
                             api._paused_495 = True
@@ -2771,7 +2771,7 @@ def main():
                                 sym not in ("FDUSDUSDC", "ETHU")
                                 and float(o_live.get("executedQty", 0)) == 0
                                 and (
-                                    (age_s > 0.45 and q_bbo["ask"] < tr["sell_px"] - max(spec["tick"] * 0.5, 0.40 if sym in ("BTCU", "BTCUSD1") else 0.0) and max(tr["buy_px"] + min_step_gain, q_bbo["ask"]) < tr["sell_px"] - spec["tick"] * 0.5)
+                                    (age_s > (45.0 if tr.get("ab_test") else 0.45) and q_bbo["ask"] < tr["sell_px"] - max(spec["tick"] * 0.5, 0.40 if sym in ("BTCU", "BTCUSD1") else 0.0) and max(tr["buy_px"] + min_step_gain, q_bbo["ask"]) < tr["sell_px"] - spec["tick"] * 0.5)
                                     or (age_s >= step_wait_s and tr["sell_px"] >= tr["buy_px"] + min_step_gain * 1.8 and q_bbo["ask"] <= tr["buy_px"] + min_step_gain * 1.2)
                                 )
                             )
@@ -2880,6 +2880,11 @@ def main():
                                     if tr.get("pilot") or sym in ("USD1USDT", "USDCUSDT"):
                                         api._s1_short_realized = getattr(api, "_s1_short_realized", 0.0) + pnl_v
                                         api._s1_short_rts = getattr(api, "_s1_short_rts", 0) + 1
+                                        _ab = getattr(api, "_ab_stats", {"A_ctrl": {"placed": 0, "rts": 0, "pnl": 0.0}, "B_test": {"placed": 0, "rts": 0, "pnl": 0.0}})
+                                        _abk = "B_test" if tr.get("ab_test") else "A_ctrl"
+                                        _ab[_abk]["rts"] += 1
+                                        _ab[_abk]["pnl"] = round(_ab[_abk]["pnl"] + pnl_v, 6)
+                                        api._ab_stats = _ab
                                 session_live_fills += 2
                                 rt_wins = getattr(api, "_rt_wins", [])
                                 rt_wins.append((loop_ts, pnl_v))
@@ -3438,7 +3443,7 @@ def main():
                 s1_short_real = float(getattr(api, "_s1_short_realized", 0.0)) + float(getattr(api, "_btcu_realized_usd", 0.0))
                 s1_short_net = round(s1_short_real + s1_short_mtm, 4)
                 s1_elapsed_hr = max(0.25, (loop_ts - float(getattr(api, "_s1_pilot_start_ts", loop_ts))) / 3600.0)
-                s1_raw_hr = round(live_hourly_rate_usd if live_hourly_rate_usd > 0 else (s1_short_real / s1_elapsed_hr), 4)
+                s1_raw_hr = round(live_hourly_rate_usd, 4)
                 s1_equiv_2k_hr = round(s1_raw_hr, 2)
                 s1_can_scale = True
                 api._v89_scaled = True
@@ -3470,8 +3475,8 @@ def main():
                     ("USD1USDC",  False, "CM_USDC",       "CM_USD1",       0,                       0, 140.0,    0.0, "STOPPED • LOCKED USDC"),
                     ("UUSDT",     False, "CM_USDT",       "CM_U",          0,                       0,  24.0,    0.0, "STOPPED • SAFE MODE"),
                     ("USDCUSDT",  True,  "ISO_USDC_USDT", "ISO_USDC_BASE", 0,                       0, 140.0,    0.0, "STOPPED • $0-DEBT SAFE MODE"),
-                    ("USDCUSDT",  False, "CM_USDT",       "CM_USDC",       8 if allow_buys else 0,  0,  24.0,  192.0, "v16.1 SAFE • USDC $24x8"),
-                    ("USD1USDT",  False, "CM_USDT",       "CM_USD1",      12 if allow_buys else 0,  0,  24.0,  288.0, "v16.1 SAFE • USD1 $24x12"),
+                    ("USDCUSDT",  False, "CM_USDT",       "CM_USDC",       4 if allow_buys else 0,  0,  24.0,   96.0, "v16.3 AB • USDC $24x4"),
+                    ("USD1USDT",  False, "CM_USDT",       "CM_USD1",      16 if allow_buys else 0,  0,  24.0,  384.0, "v16.3 AB • USD1 $24x16 (12A+4B)"),
                 ):
                     q_bbo = bbos.get(sym_p)
                     if not q_bbo or q_bbo["bid"] <= 0:
@@ -3510,8 +3515,8 @@ def main():
                                     and not cons_guards.get(sym_p, {}).get("falling", False)
                                     and q_bbo["bidQty"] >= q_bbo["askQty"] * 0.50
                                 )
-                                max_sym_legs = 12
-                                max_buy_slots = 8
+                                max_sym_legs = 16
+                                max_buy_slots = 12
                             elif sym_p == "UUSDT":
                                 impulse_ok = (
                                     rem_2k_budget >= 20.0
@@ -3549,8 +3554,8 @@ def main():
                                     and not cons_guards.get(sym_p, {}).get("falling", False)
                                     and q_bbo["bidQty"] >= q_bbo["askQty"] * 0.50
                                 )
-                                max_sym_legs = 8
-                                max_buy_slots = 6
+                                max_sym_legs = 4
+                                max_buy_slots = 3
                         while len(p_tr) < max_sym_legs and len(p_buy_open) < max_buy_slots and rem_2k_budget >= 20.0 and free_map[f_key] >= 20.0 and impulse_ok:
                             # v16.0 Safe Mode: LIMIT_MAKER ONLY (zero IOC taker slippage)
                             can_snipe_ask = False
@@ -3592,10 +3597,13 @@ def main():
                                             api._last_buy_map[sym_p] = snipe_px
                                             break
                             # Stagger $24 micro-clips across top 6 ticks (up to 6 clips/tick = 35 BUY slots):
+                            b_test_cnt = sum(1 for tx in p_tr if tx.get("ab_test"))
+                            is_ab_b = (sym_p == "USD1USDT" and b_test_cnt < 4)
                             top_bpx_ref = round(q_bbo["bid"] + spec["tick"], spec["dec"]) if (q_bbo["ask"] - q_bbo["bid"]) >= spec["tick"] * 1.8 else round(q_bbo["bid"], spec["dec"])
                             bpx_entry = None
+                            lvl_range = range(2) if is_ab_b else range(6 if sym_p in ("USD1USDT", "USDCUSDT") else 3)
                             for _cap_pass in (1, 2, 3, 4, 5, 6 if sym_p in ("USD1USDT", "USDCUSDT") else 4):
-                                for _st_lvl in range(6 if sym_p in ("USD1USDT", "USDCUSDT") else 3):
+                                for _st_lvl in lvl_range:
                                     cand_bpx = round(top_bpx_ref - spec["tick"] * _st_lvl, spec["dec"])
                                     same_tick_cnt = sum(1 for tx in p_buy_open if abs(tx["buy_px"] - cand_bpx) < spec["tick"] * 0.3)
                                     if same_tick_cnt < _cap_pass:
@@ -3605,10 +3613,10 @@ def main():
                                     break
                             if bpx_entry is None:
                                 break
-                            # Dynamic +2/+3 Tick target when Ask wall is thin (< 12,000 USD1):
+                            # Dynamic +2/+3 Tick target for Control A; strict +1 Tick top-of-book for Test B:
                             ask_q_now = q_bbo["askQty"]
                             imb_now = q_bbo["bidQty"] / max(1.0, ask_q_now)
-                            t_ticks = 3 if (sym_p == "USD1USDT" and ask_q_now < 4500.0 and imb_now >= 2.50) else (2 if (sym_p == "USD1USDT" and (ask_q_now < 12000.0 or imb_now >= 2.20)) else 1)
+                            t_ticks = 1 if is_ab_b else (3 if (sym_p == "USD1USDT" and ask_q_now < 4500.0 and imb_now >= 2.50) else (2 if (sym_p == "USD1USDT" and (ask_q_now < 12000.0 or imb_now >= 2.20)) else 1))
                             spx_target = round(bpx_entry + max(8.0, q_bbo["ask"] - bpx_entry), spec["dec"]) if sym_p == "BTCUSD1" else round(bpx_entry + spec["tick"] * t_ticks, spec["dec"])
                             pl_usd_sz = min(clip_sz_u, rem_2k_budget, free_map[f_key] * 0.99)
                             bq_pl = round(math.floor((pl_usd_sz / bpx_entry) / spec["step"] + 1e-9) * spec["step"], 6)
@@ -3624,11 +3632,14 @@ def main():
                                 free_map[f_key] -= spent_u
                                 rem_2k_budget = max(0.0, rem_2k_budget - spent_u)
                                 daily_orders_placed += 1
+                                _ab = getattr(api, "_ab_stats", {"A_ctrl": {"placed": 0, "rts": 0, "pnl": 0.0}, "B_test": {"placed": 0, "rts": 0, "pnl": 0.0}})
+                                _ab["B_test" if is_ab_b else "A_ctrl"]["placed"] += 1
+                                api._ab_stats = _ab
                                 nt_pl = {
-                                    "tid": f"V123_{'ISO' if is_iso else 'CM'}_{sym_p[:4]}{len(p_tr)+1}", "symbol": sym_p, "iso": is_iso,
-                                    "lbl": f"v12.3 100x$24 • {sym_p[:4]} ${int(bq_pl)}",
+                                    "tid": f"V123_{'AB_B' if is_ab_b else ('ISO' if is_iso else 'CM')}_{sym_p[:4]}{len(p_tr)+1}", "symbol": sym_p, "iso": is_iso,
+                                    "lbl": f"{'TEST_B' if is_ab_b else 'CTRL_A'} • {sym_p[:4]} ${int(bq_pl)}",
                                     "qty": bq_pl, "buy_px": bpx_pl, "sell_px": spx_target, "buy_oid": br_pl["orderId"], "sell_oid": None,
-                                    "state": "BUY_OPEN", "ts": loop_ts, "pilot": True, "borrowed": False
+                                    "state": "BUY_OPEN", "ts": loop_ts, "pilot": True, "borrowed": False, "ab_test": is_ab_b
                                 }
                                 active_tranches.append(nt_pl)
                                 p_tr.append(nt_pl)
@@ -3875,6 +3886,7 @@ def main():
                     "closed1hRate": (closed_hr_val := round((len(getattr(api, "_closed_ts_1h", [])) * 2) / min(1.0, max(1.0 / 60.0, (loop_ts - getattr(api, "_s1_pilot_start_ts", loop_ts)) / 3600.0)))),
                     "closedRts1hRate": round(len(getattr(api, "_closed_ts_1h", [])) / min(1.0, max(1.0 / 60.0, (loop_ts - getattr(api, "_s1_pilot_start_ts", loop_ts)) / 3600.0))),
                     "fillConvPct": (conv_pct_val := round(min(100.0, 100.0 * (len(getattr(api, "_closed_ts_1h", [])) * 2) / max(1, len(getattr(api, "_placed_ts_1h", [])))), 1)),
+                    "abStats": getattr(api, "_ab_stats", {}),
                     "solSpotPerpPilot": sp_st,
                     "trancheStats": {
                         "total": tot_tr_cnt,
