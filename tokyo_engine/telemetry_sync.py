@@ -2772,7 +2772,7 @@ def main():
                                 sym not in ("FDUSDUSDC", "ETHU")
                                 and float(o_live.get("executedQty", 0)) == 0
                                 and (
-                                    (age_s > (45.0 if tr.get("ab_test") else 0.45) and q_bbo["ask"] < tr["sell_px"] - max(spec["tick"] * 0.5, 0.40 if sym in ("BTCU", "BTCUSD1") else 0.0) and max(tr["buy_px"] + min_step_gain, q_bbo["ask"]) < tr["sell_px"] - spec["tick"] * 0.5)
+                                    (age_s > 45.0 and q_bbo["ask"] < tr["sell_px"] - max(spec["tick"] * 0.5, 0.40 if sym in ("BTCU", "BTCUSD1") else 0.0) and max(tr["buy_px"] + min_step_gain, q_bbo["ask"]) < tr["sell_px"] - spec["tick"] * 0.5)
                                     or (age_s >= step_wait_s and tr["sell_px"] >= tr["buy_px"] + min_step_gain * 1.8 and q_bbo["ask"] <= tr["buy_px"] + min_step_gain * 1.2)
                                 )
                             )
@@ -2957,7 +2957,7 @@ def main():
                         f_key_s = "CM_USDC" if sym == "USD1USDC" else "CM_USDT"
                         if o_live is not None:
                             # Pre-Fill Shield: only cancel if Ask moved down > 0.5 tick or CB tripped (preserve FIFO queue priority at live Ask!)
-                            if float(o_live.get("executedQty", 0)) == 0 and (q_bbo["ask"] < tr["sell_px"] - spec["tick"] * 0.5 or getattr(api, "_s1_cb_tripped", False)):
+                            if float(o_live.get("executedQty", 0)) == 0 and (((loop_ts - tr.get("ts", 0)) >= 20.0 and q_bbo["ask"] < tr["sell_px"] - spec["tick"] * 0.5) or getattr(api, "_s1_cb_tripped", False)):
                                 cr = api.request("DELETE", "/sapi/v1/margin/order", {"symbol": sym, "orderId": tr["sell_oid"]}, signed=True)
                                 exec_s = float(cr.get("executedQty", 0))
                                 if exec_s > 0:
@@ -2999,7 +2999,7 @@ def main():
                         if o_live is not None:
                             age_sb = loop_ts - tr["ts"]
                             max_cov_b = round(tr["sell_px"] - spec["tick"], spec["dec"])
-                            if float(o_live.get("executedQty", 0)) == 0 and age_sb >= 0.8 and q_bbo["bid"] > tr["buy_px"] + spec["tick"] * 0.5 and min(max_cov_b, q_bbo["bid"]) > tr["buy_px"] + spec["tick"] * 0.5:
+                            if float(o_live.get("executedQty", 0)) == 0 and age_sb >= 20.0 and q_bbo["bid"] > tr["buy_px"] + spec["tick"] * 0.5 and min(max_cov_b, q_bbo["bid"]) > tr["buy_px"] + spec["tick"] * 0.5:
                                 cr = api.request("DELETE", "/sapi/v1/margin/order", {"symbol": sym, "orderId": tr["buy_oid"]}, signed=True)
                                 if cr.get("status") == "CANCELED":
                                     rem_q_c = round(math.floor((tr["qty"] - float(cr.get("executedQty", 0))) / spec["step"] + 1e-9) * spec["step"], 6)
