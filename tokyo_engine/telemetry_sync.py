@@ -2543,7 +2543,7 @@ def main():
                                     synth_exit_g = bbos[ref_sym_g]["ask"] / bbos[q_bridge]["ask"]
                                     if synth_exit_g < tr["buy_px"] + 0.000030:
                                         tri_edge_gone = True
-                            can_reroute_deep = (sym in ("USD1USDT", "USDCUSDT", "UUSDT", "USD1USDC") and not tr["iso"] and (q_bbo["bid"] - tr["buy_px"]) >= spec["tick"] * 3.5 and (loop_ts - tr.get("ts", 0)) >= 8.0)
+                            can_reroute_deep = (sym in ("USD1USDT", "USDCUSDT", "UUSDT", "USD1USDC") and (q_bbo["bid"] - tr["buy_px"]) >= spec["tick"] * 1.5 and (loop_ts - tr.get("ts", 0)) >= 45.0)
                             # Heavy-Bid Pre-Fill Shield (v9.5 100%-Winrate Anti-Adverse-Selection Shield: steps back to Bid-1 before thin Bid walls get swept!):
                             cg_live = compute_conservative_guard(api, bbos).get(sym, {})
                             min_safe_wall = 0.85 if sym in ("USD1USDT", "USDCUSDT") else (1.25 if sym in ("UUSDT", "USD1USDC") else (0.90 if sym == "BTCU" else 0.65))
@@ -2564,6 +2564,8 @@ def main():
                                         api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "USDT", "isIsolated": "FALSE", "amount": f"{rem_b * tr['buy_px']:.4f}", "type": "REPAY"}, signed=True)
                                     elif not tr["iso"]:
                                         free_map[cm_qkey] += rem_b * tr["buy_px"]
+                                    else:
+                                        free_map["ISO_USDC_USDT"] += rem_b * tr["buy_px"]
                                 elif cr.get("code") != -2011 and exec_b > 0:
                                     still_tranches.append(tr)
                             else:
