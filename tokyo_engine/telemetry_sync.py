@@ -3468,10 +3468,10 @@ def main():
                     ("FDUSDUSDT", False, "CM_USDT",       "CM_FDUSD",      0,                       0,  24.0,   0.0, "STOPPED • 0-LOSS DRAIN"),
                     ("BTCUSD1",   False, "CM_USD1",       "CM_BTC",        0,                       0,  80.0,    0.0, "STOPPED • FEES"),
                     ("USD1USDC",  False, "CM_USDC",       "CM_USD1",       0,                       0, 140.0,    0.0, "STOPPED • LOCKED USDC"),
-                    ("UUSDT",     False, "CM_USDT",       "CM_U",          0,                       0,  24.0,    0.0, "STOPPED • SAFE MODE"),
+                    ("UUSDT",     False, "CM_USDT",       "CM_U",          4 if allow_buys else 0,  0,  24.0,   96.0, "v17.8 10x-TICK • U/USDT $24x4"),
                     ("USDCUSDT",  True,  "ISO_USDC_USDT", "ISO_USDC_BASE", 0,                       0, 140.0,    0.0, "STOPPED • $0-DEBT SAFE MODE"),
                     ("USDCUSDT",  False, "CM_USDT",       "CM_USDC",       3 if allow_buys else 0,  0,  60.0,  180.0, "v17.7 SAFE • USDC $60x3"),
-                    ("USD1USDT",  False, "CM_USDT",       "CM_USD1",       6 if allow_buys else 0,  0,  48.0,  288.0, "v17.6 SAFE • USD1 $48x6"),
+                    ("USD1USDT",  False, "CM_USDT",       "CM_USD1",       8 if allow_buys else 0,  0,  48.0,  384.0, "v17.8 SAFE • USD1 $48x8"),
                 ):
                     q_bbo = bbos.get(sym_p)
                     if not q_bbo or q_bbo["bid"] <= 0:
@@ -3500,7 +3500,7 @@ def main():
                         else:
                             tot_active_legs = [t for t in active_tranches if (not t["iso"]) and t["symbol"] in ("USD1USDT", "USDCUSDT", "USD1USDC", "UUSDT") and t["state"] in ("BUY_OPEN", "SELL_OPEN")]
                             tot_deployed_usd = sum(t["qty"] * t["buy_px"] for t in tot_active_legs)
-                            cm_pool_cap = 480.0
+                            cm_pool_cap = 560.0
                             rem_2k_budget = max(0.0, cm_pool_cap - tot_deployed_usd)
                             clip_sz_u = 24.0
                             if sym_p == "USD1USDT":
@@ -3532,18 +3532,18 @@ def main():
                                     and not cons_guards.get(sym_p, {}).get("falling", False)
                                     and q_bbo["bidQty"] >= q_bbo["askQty"] * 0.85
                                 )
-                                max_sym_legs = 6
-                                max_buy_slots = 4
+                                max_sym_legs = 8
+                                max_buy_slots = 6
                             elif sym_p == "UUSDT":
                                 impulse_ok = (
                                     rem_2k_budget >= 20.0
                                     and free_map[f_key] >= 20.0
                                     and not cons_guards.get(sym_p, {}).get("falling", False)
-                                    and q_bbo["bid"] <= 1.0005
+                                    and q_bbo["bid"] <= 1.0003
                                     and q_bbo["bidQty"] >= q_bbo["askQty"] * 0.45
                                 )
-                                max_sym_legs = 25
-                                max_buy_slots = 18
+                                max_sym_legs = 4
+                                max_buy_slots = 3
                             elif sym_p == "USD1USDC":
                                 clip_sz_u = 140.0
                                 impulse_ok = (
