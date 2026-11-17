@@ -3482,7 +3482,7 @@ def main():
                     is_crypto_u1 = sym_p in ("BTCU", "BTCUSD1", "BNBU", "ETHU", "BNBFDUSD", "SOLFDUSD")
 
                     # v15.0 Higher-Edge: 10x ISO USDC $140 + USD1USDC $140 + BTCUSD1 $80 (0%-fee + Perp Hedge) + USD1USDT:
-                    if sym_p in ("USD1USDT", "USDCUSDT", "UUSDT", "USD1USDC", "BTCUSD1") and allow_buys and (not getattr(api, "_s1_cb_tripped", False)):
+                    if max_tr > 0 and sym_p in ("USD1USDT", "USDCUSDT", "UUSDT", "USD1USDC", "BTCUSD1") and allow_buys and (not getattr(api, "_s1_cb_tripped", False)):
                         p_buy_open = [t for t in p_tr if t["state"] == "BUY_OPEN"]
                         if is_iso:
                             tot_iso_legs = [t for t in active_tranches if t["symbol"] == "USDCUSDT" and t["iso"] and t["state"] in ("BUY_OPEN", "SELL_OPEN")]
@@ -3680,7 +3680,7 @@ def main():
                                 break
 
                     # Immediately post maker SELL for any free non-hedged base inventory (excluding USD1USDC when stopped!):
-                    max_inv_sells = 6 if sym_p == "FDUSDUSDT" else (max_tr + 2)
+                    max_inv_sells = 6 if sym_p == "FDUSDUSDT" else (max_tr + 6)
                     while sym_p not in ("USD1USDC", "FDUSDUSDC", "USD1U") and (free_map[b_key] - (28.5 if (sym_p == "USDCUSDT" and fd_tri_edge_ok) else 0.0)) * q_bbo["ask"] >= 5.6 and len(p_tr) < max_inv_sells:
                         if (sym_p == "USD1USDT" and cm_u1_debt >= 1.0) or (sym_p == "USDCUSDT" and cm_uc_debt >= 1.0) or (sym_p == "UUSDT" and cm_u_debt >= 1.0):
                             break
@@ -3907,7 +3907,8 @@ def main():
                     "todayFillsCount": today_fills_count,
                     "last1hFillsCount": last_1h_fills_count,
                     "fillRateHr": last_1h_fills_count,
-                    "fillRateMin": round(last_1h_fills_count / 60.0, 2),
+                    "fillRateMin": (fpm_val := round(last_1h_fills_count / 60.0, 2)),
+                    "fpmTarget": 6.0,
                     "placed1hRate": (placed_hr_val := (lambda: (
                         setattr(api, "_placed_ts_1h", [t for t in (getattr(api, "_placed_ts_1h", []) + ([loop_ts] * max(0, daily_orders_placed - getattr(api, "_prev_dop_1h", daily_orders_placed)))) if loop_ts - t <= 3600.0]),
                         setattr(api, "_prev_dop_1h", daily_orders_placed),
@@ -3915,6 +3916,7 @@ def main():
                         setattr(api, "_prev_rts_1h", getattr(api, "_s1_short_rts", 0)),
                         round(len(getattr(api, "_placed_ts_1h", [])) / min(1.0, max(1.0 / 60.0, (loop_ts - getattr(api, "_s1_pilot_start_ts", loop_ts)) / 3600.0)))
                     )[-1])()),
+                    "placedFpm": round(placed_hr_val / 60.0, 2),
                     "closed1hRate": (closed_hr_val := last_1h_fills_count),
                     "closedRts1hRate": round(last_1h_fills_count / 2.0),
                     "fillConvPct": (conv_pct_val := round(min(100.0, 100.0 * last_1h_fills_count / max(1, placed_hr_val)), 1)),
@@ -3935,7 +3937,7 @@ def main():
                             else (
                                 f"PAUSED AT <=$495.00 — ALL TRADING STOPPED UNTIL USER REPLY (Eq ${cached_total_usd:.4f})"
                                 if getattr(api, "_paused_495", False)
-                                else f"{s1_st_lbl} • Placed {placed_hr_val}/hr vs Closed {closed_hr_val}/hr ({conv_pct_val}%) • Fill Rate {last_1h_fills_count}/hr • 1h {'+$' if equity_changes.get('1h', 0)>=0 else '-$'}{abs(equity_changes.get('1h', 0)):.4f}"
+                                else f"{s1_st_lbl} • Placed {round(placed_hr_val / 60.0, 1)}/min vs Fills {fpm_val:.2f}/min (Target 6.0/min, {conv_pct_val}%) • 1h {'+$' if equity_changes.get('1h', 0)>=0 else '-$'}{abs(equity_changes.get('1h', 0)):.4f}"
                             )
                         ),
                         "paused": bool(getattr(api, "_paused_495", False) or getattr(api, "_user_paused", False)),
