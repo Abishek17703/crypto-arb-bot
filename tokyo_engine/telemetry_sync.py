@@ -1334,15 +1334,15 @@ def auto_compound_borrow(api, force_repay_all=False):
                 ba_uc = ia_uc.get("baseAsset", {})
                 iso_net_u = float(qa_uc.get("netAsset", 0)) + float(ba_uc.get("netAsset", 0))
                 iso_bor_u = float(qa_uc.get("borrowed", 0)) + float(qa_uc.get("interest", 0))
-                # v14.0 Hybrid Split: $250 in 10x Isolated USDCUSDT (~$2,500 pool) + ~$248 in 5x Cross USD1USDT/USD1USDC (~$1,240 pool) = ~$3,740 total!
-                if iso_net_u < 245.0 and ut_borrowed > 10.0 and cm_ut_free >= 100.0:
+                # v14.1 Hybrid Split: repay excess CM loan first if Iso < $245, seed $250 into 10x Iso USDCUSDT ($2,500), keep ~$248 in 5x Cross ($980 loan -> $1,228)
+                if iso_net_u < 245.0 and ut_borrowed > 10.0 and cm_ut_free >= 20.0:
                     rep_cm = min(cm_ut_free, ut_borrowed)
                     api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "USDT", "isIsolated": "FALSE", "amount": f"{rep_cm:.2f}", "type": "REPAY"}, signed=True)
                     cm_acc_r = api.request("GET", "/sapi/v1/margin/account", signed=True)
                     cm_ut_free = float(next((a.get("free", 0) for a in cm_acc_r.get("userAssets", []) if a.get("asset") == "USDT"), 0)) if isinstance(cm_acc_r, dict) else 0.0
                     ut_borrowed = float(next((float(a.get("borrowed", 0)) + float(a.get("interest", 0)) for a in cm_acc_r.get("userAssets", []) if a.get("asset") == "USDT"), 0)) if isinstance(cm_acc_r, dict) else 0.0
-                if iso_net_u < 245.0 and cm_ut_free >= 5.0 and ut_borrowed < 50.0:
-                    need_seed = min(round(250.0 - iso_net_u, 2), math.floor((cm_ut_free - 200.0) * 100) / 100.0)
+                if iso_net_u < 245.0 and cm_ut_free >= 20.0 and ut_borrowed < 1000.0:
+                    need_seed = min(round(250.0 - iso_net_u, 2), math.floor((cm_ut_free - 15.0) * 100) / 100.0)
                     if need_seed >= 5.0:
                         r_u1 = api.request("POST", "/sapi/v1/asset/transfer", {"type": "MARGIN_ISOLATEDMARGIN", "asset": "USDT", "amount": f"{need_seed:.2f}", "toSymbol": "USDCUSDT"}, signed=True)
                         if "tranId" in r_u1:
@@ -1357,8 +1357,8 @@ def auto_compound_borrow(api, force_repay_all=False):
                     can_b = min(round(iso_net_u * 8.99 - iso_bor_u, 2), float(mx_b.get("amount", 0)) * 0.99) if isinstance(mx_b, dict) else 0.0
                     if can_b >= 10.0:
                         api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "USDT", "isIsolated": "TRUE", "symbol": "USDCUSDT", "amount": f"{can_b:.2f}", "type": "BORROW"}, signed=True)
-            # Scale 5x Cross-Margin USDT loan for USD1USDT + USD1USDC + UUSDT:
-            target_cm_loan = 980.0 if iso_net_u >= 200.0 else 1440.0
+            # Scale 5x Cross-Margin USDT loan ONLY after 10x Iso is seeded:
+            target_cm_loan = 980.0 if iso_net_u >= 240.0 else 0.0
             if ut_borrowed < target_cm_loan - 5.0:
                 mx_cm_b = api.request("GET", "/sapi/v1/margin/maxBorrowable", {"asset": "USDT"}, signed=True)
                 can_cm_b = min(round(target_cm_loan - ut_borrowed, 2), float(mx_cm_b.get("amount", 0)) * 0.96) if isinstance(mx_cm_b, dict) else 0.0
@@ -2794,16 +2794,15 @@ def main():
                                     want_vault_unstick = True
                                     vault_target_px = round(max(tr["buy_px"], q_bbo["ask"]), spec["dec"])
                                     vault_subsidy_need = 0.0
-                                elif age_s >= 25.0 and sym in ("USD1USDT", "USDCUSDT") and unstick_vault_usd >= 0.00020:
+                                elif False and age_s >= 25.0 and sym in ("USD1USDT", "USDCUSDT") and unstick_vault_usd >= 0.00020:
                                     need_u = max(0.0, (tr["buy_px"] - q_bbo["ask"]) * tr["qty"])
                                     if 0.0 < need_u <= unstick_vault_usd + 1e-6 and need_u <= 0.0060:
                                         want_vault_unstick = True
                                         vault_target_px = round(q_bbo["ask"], spec["dec"])
                                         vault_subsidy_need = need_u
-                            # Mechanism 3 (v12.4): Stuck-Tranche Reverse-Flip Inventory Recycling!
-                            # When a SELL_OPEN tranche is stuck >= 1.5 ticks above live Ask for >= 25s, convert it into a SHORT_SELL_OPEN @ live Ask (which sells @ Ask and buys back 1 tick lower @ Bid, stepping down its cost basis by -1 tick per flip while earning +$0.00024/flip!):
-                            active_rev_flips = sum(1 for tx in still_tranches + active_tranches if tx.get("symbol") == sym and tx.get("state") in ("SHORT_SELL_OPEN", "SHORT_BUY_OPEN"))
-                            if (not want_step_1tick) and (not want_vault_unstick) and (not tr["iso"]) and sym in ("USD1USDT", "USDCUSDT") and float(o_live.get("executedQty", 0)) == 0 and age_s >= 25.0 and q_bbo["ask"] <= tr["sell_px"] - spec["tick"] * 1.5 and active_rev_flips < 12 and q_bbo["askQty"] >= q_bbo["bidQty"] * 0.40:
+                            # Mechanism 3 (v14.1): Disabled REV-FLIP below-cost selling for smooth monotonic equity climb
+                            active_rev_flips = 0
+                            if False and (not want_step_1tick) and (not want_vault_unstick) and (not tr["iso"]) and sym in ("USD1USDT", "USDCUSDT") and float(o_live.get("executedQty", 0)) == 0 and age_s >= 25.0 and q_bbo["ask"] <= tr["sell_px"] - spec["tick"] * 1.5 and active_rev_flips < 12 and q_bbo["askQty"] >= q_bbo["bidQty"] * 0.40:
                                 cr_rf = api.request("DELETE", "/sapi/v1/margin/order", {"symbol": sym, "orderId": tr["sell_oid"]}, signed=True)
                                 if cr_rf.get("status") == "CANCELED":
                                     rem_rf = round(math.floor((tr["qty"] - float(cr_rf.get("executedQty", 0))) / spec["step"] + 1e-9) * spec["step"], 6)
@@ -3480,7 +3479,7 @@ def main():
                     ("USD1USDC",  False, "CM_USDC",       "CM_USD1",      15 if allow_buys else 0,  0,  24.0, 360.0, "v12.6 10x-TICK • USD1/USDC $24"),
                     ("UUSDT",     False, "CM_USDT",       "CM_U",         25 if allow_buys else 0,  0,  24.0, 600.0, "v12.6 10x-TICK • U/USDT $24"),
                     ("USDCUSDT",  True,  "ISO_USDC_USDT", "ISO_USDC_BASE", 70 if allow_buys else 0, 0,  70.0, 2500.0, "v14.0 10x ISO • USDC $70"),
-                    ("USDCUSDT",  False, "CM_USDT",       "CM_USDC",      55 if allow_buys else 0,  0,  24.0, 1320.0, "v12.6 100x$24 • USDC $24"),
+                    ("USDCUSDT",  False, "CM_USDT",       "CM_USDC",      0,                       0,  24.0,    0.0, "STOPPED • 10x ISO ONLY"),
                     ("USD1USDT",  False, "CM_USDT",       "CM_USD1",      88 if allow_buys else 0,  0,  24.0, 2150.0, "v12.6 100x$24 • USD1 $24"),
                 ):
                     q_bbo = bbos.get(sym_p)
