@@ -3631,11 +3631,11 @@ def main():
                             u1_top_cnt = sum(1 for tx in p_tr if tx["buy_px"] >= q_bbo["bid"] - spec["tick"] * 1.5)
                             u1_below_ema = (q_bbo["bid"] <= getattr(api, "_u1_ema_1h", q_bbo["bid"]) + spec["tick"] * 1.5)
                             uc_below_ema = (q_bbo["bid"] <= getattr(api, "_uc_ema_1h", q_bbo["bid"]) + spec["tick"] * 3.0)
-                            lvl_range = (range(2) if (sym_p == "USDCUSDT" and uc_below_ema) else (range(1, 3) if sym_p == "USDCUSDT" else (range(2) if (u1_top_cnt < 4 and u1_below_ema) else range(1, 3))))
-                            for _cap_pass in (1, 2, 3, 4, 5, 6 if sym_p in ("USD1USDT", "USDCUSDT") else 4):
+                            lvl_range = (range(5) if (sym_p == "USDCUSDT" and uc_below_ema) else (range(1, 6) if sym_p == "USDCUSDT" else (range(5) if (u1_top_cnt < 4 and u1_below_ema) else range(1, 6))))
+                            for _cap_pass in (1, 2):
                                 for _st_lvl in lvl_range:
                                     cand_bpx = round(top_bpx_ref - spec["tick"] * _st_lvl, spec["dec"])
-                                    same_tick_cnt = sum(1 for tx in p_buy_open if abs(tx["buy_px"] - cand_bpx) < spec["tick"] * 0.3)
+                                    same_tick_cnt = sum(1 for tx in p_tr if abs(tx["buy_px"] - cand_bpx) < spec["tick"] * 0.3)
                                     if same_tick_cnt < _cap_pass:
                                         bpx_entry = cand_bpx
                                         break
