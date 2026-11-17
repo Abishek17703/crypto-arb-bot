@@ -1357,8 +1357,8 @@ def auto_compound_borrow(api, force_repay_all=False):
                     can_b = min(round(iso_net_u * 8.99 - iso_bor_u, 2), float(mx_b.get("amount", 0)) * 0.99) if isinstance(mx_b, dict) else 0.0
                     if can_b >= 10.0:
                         api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "USDT", "isIsolated": "TRUE", "symbol": "USDCUSDT", "amount": f"{can_b:.2f}", "type": "BORROW"}, signed=True)
-            # Scale 5x Cross-Margin USDT loan ONLY after 10x Iso is seeded:
-            target_cm_loan = 980.0 if iso_net_u >= 240.0 else 0.0
+            # Scale 5x Cross-Margin USDT loan cleanly:
+            target_cm_loan = 980.0 if iso_net_u >= 200.0 else 450.0
             if ut_borrowed < target_cm_loan - 5.0:
                 mx_cm_b = api.request("GET", "/sapi/v1/margin/maxBorrowable", {"asset": "USDT"}, signed=True)
                 can_cm_b = min(round(target_cm_loan - ut_borrowed, 2), float(mx_cm_b.get("amount", 0)) * 0.96) if isinstance(mx_cm_b, dict) else 0.0
@@ -2155,9 +2155,8 @@ def main():
                 realized_today_usd = round(max(true_wallet_gain_today, min(tot_today_pnl, true_wallet_gain_today + 0.15)), 4)
                 today_fills_count = tot_fills
                 last_1h_fills_count = tot_1h_fills
-                # True Sustained Realized Run-Rate (100% matched to actual FIFO 1h / 15m realized PnL — zero burst inflation!):
-                cur_pace_hr = tot_1h_pnl if tot_1h_fills >= 10 else max(0.0, tot_15m_pnl * 4.0)
-                api._audit_1h_rate = round(max(0.0, cur_pace_hr), 4)
+                # Steady Past 1-Hour Actual Equity Climb (zero short-fill burst inflation!):
+                api._audit_1h_rate = round(equity_changes.get("1h", 0.0), 4)
                 live_hourly_rate_usd = api._audit_1h_rate
                 live_daily_rate_usd = round(live_hourly_rate_usd * 24.0, 4)
 
@@ -2428,6 +2427,9 @@ def main():
                             true_delta = round(raw_wallet_eq - ref_eq_w, 4)
                             equity_changes[lbl_w] = true_delta
                             equity_changes_pct[lbl_w] = round((true_delta / max(1.0, ref_eq_w)) * 100.0, 4)
+                        api._audit_1h_rate = round(equity_changes.get("1h", 0.0), 4)
+                        live_hourly_rate_usd = api._audit_1h_rate
+                        live_daily_rate_usd = round(live_hourly_rate_usd * 24.0, 4)
 
                     # Hard Latched $497.50 Strict Equity Circuit Breaker (-$1.00 max drawdown)
                     chk_eq_495 = getattr(api, "_raw_wallet_eq", cached_total_usd)
