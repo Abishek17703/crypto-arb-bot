@@ -1389,7 +1389,8 @@ def compute_composite_regime(api, bbos, fills_1h, p_5m, p_15m):
     score = int(round(prev_reg.get("score", raw_score) * 0.70 + raw_score * 0.30)) if prev_reg.get("ts", 0) > 0 else int(round(raw_score))
     old_m = prev_reg.get("mode", "MEDIUM")
     mode_since = prev_reg.get("mode_since", now_t - 180.0)
-    if score >= 74 or (old_m == "HIGH" and score >= 66):
+    fills_fpm = fills_1h / 60.0
+    if score >= 74 or fills_fpm >= 8.0 or (old_m == "HIGH" and (score >= 66 or fills_fpm >= 6.5)):
         raw_m = "HIGH"
     elif score >= 34 or (old_m == "MEDIUM" and score >= 26):
         raw_m = "MEDIUM"
