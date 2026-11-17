@@ -2431,9 +2431,9 @@ def main():
                         live_hourly_rate_usd = api._audit_1h_rate
                         live_daily_rate_usd = round(live_hourly_rate_usd * 24.0, 4)
 
-                    # Hard Latched $497.50 Strict Equity Circuit Breaker (-$1.00 max drawdown)
+                    # Hard Latched $497.60 Strict Equity Circuit Breaker
                     chk_eq_495 = getattr(api, "_raw_wallet_eq", cached_total_usd)
-                    if chk_eq_495 > 85.0 and chk_eq_495 <= 497.5000:
+                    if chk_eq_495 > 85.0 and chk_eq_495 <= 497.6000:
                         api._below_495_hits = getattr(api, "_below_495_hits", 0) + 1
                         if api._below_495_hits >= 2 and not getattr(api, "_paused_495", False):
                             api._paused_495 = True
@@ -2752,7 +2752,7 @@ def main():
                                             still_tranches.append(tr)
                                             continue
                             # Mechanism 0 (v12.1): <3ms 0%-Fee Breakeven/Profit IOC Bailout when Bid >= buy_px and Bid wall weakens (prevents lockups at $0.0000 loss!)
-                            if (not tr["iso"]) and sym in ("USD1USDT", "USDCUSDT", "UUSDT", "USD1USDC") and float(o_live.get("executedQty", 0)) == 0 and age_s >= 2.5:
+                            if False and (not tr["iso"]) and sym in ("USD1USDT", "USDCUSDT", "UUSDT", "USD1USDC") and float(o_live.get("executedQty", 0)) == 0 and age_s >= 2.5:
                                 ioc_profit_ok = (q_bbo["bid"] >= tr["buy_px"] + spec["tick"] * 0.8)
                                 ioc_be_bail = (abs(q_bbo["bid"] - tr["buy_px"]) < spec["tick"] * 0.3 and (q_bbo["bidQty"] < 3000.0 or q_bbo["bidQty"] < q_bbo["askQty"] * 0.25 or (age_s >= 12.0 and q_bbo["bidQty"] < q_bbo["askQty"] * 0.65)))
                                 if ioc_profit_ok or ioc_be_bail:
@@ -3366,7 +3366,7 @@ def main():
                         api.request("DELETE", "/sapi/v1/margin/order", {"symbol": "USDCUSDT", "orderId": uc_seed_ord[1]}, signed=True)
                         api._uc_seed_oid = None
                 # Convert any free USDC >= 6 directly to USDT on USDCUSDT:
-                elif "USDCUSDT" in bbos and free_map["CM_USDC"] >= 6.0 and cm_uc_debt < 1.0 and (soft_delev or not any(t["symbol"] == "USDCUSDT" for t in active_tranches)):
+                elif False and "USDCUSDT" in bbos and free_map["CM_USDC"] >= 6.0 and cm_uc_debt < 1.0 and (soft_delev or not any(t["symbol"] == "USDCUSDT" for t in active_tranches)):
                     uc_s_mkr = min(250, math.floor(free_map["CM_USDC"]))
                     if uc_s_mkr >= 6:
                         uc_ask_now = bbos["USDCUSDT"]["ask"]
@@ -3482,8 +3482,8 @@ def main():
                     ("FDUSDUSDC", False, "CM_USDC",  "CM_FDUSD",   0,                       0, 20.0,   0.0, "STOPPED"),
                     ("USD1U",     False, "CM_U",     "CM_USD1",    0,                       0, 14.0,   0.0, "STOPPED"),
                     ("FDUSDUSDT", False, "CM_USDT",       "CM_FDUSD",      0,                       0,  24.0,   0.0, "STOPPED • 0-LOSS DRAIN"),
-                    ("BTCUSD1",   False, "CM_USD1",       "CM_BTC",        6 if allow_buys else 0,  0,  80.0,  480.0, "v15.0 0%-FEE • BTC/USD1 $80"),
-                    ("USD1USDC",  False, "CM_USDC",       "CM_USD1",      15 if allow_buys else 0,  0, 140.0,  600.0, "v15.0 10x-TICK • USD1/USDC $140"),
+                    ("BTCUSD1",   False, "CM_USD1",       "CM_BTC",        0,                       0,  80.0,    0.0, "STOPPED • FEES"),
+                    ("USD1USDC",  False, "CM_USDC",       "CM_USD1",       0,                       0, 140.0,    0.0, "STOPPED • LOCKED USDC"),
                     ("UUSDT",     False, "CM_USDT",       "CM_U",         25 if allow_buys else 0,  0,  24.0,  600.0, "v12.6 10x-TICK • U/USDT $24"),
                     ("USDCUSDT",  True,  "ISO_USDC_USDT", "ISO_USDC_BASE", 70 if allow_buys else 0,  0, 140.0, 2500.0, "v15.0 10x ISO • USDC $140"),
                     ("USDCUSDT",  False, "CM_USDT",       "CM_USDC",       0,                       0,  24.0,    0.0, "STOPPED • 10x ISO ONLY"),
