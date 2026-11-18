@@ -29,10 +29,9 @@ const (
 	ChainID      = uint32(304)
 	PrivKey      = "56491130b44362b137b0a3b46dc63d647865876f11ff1613c857f946ec8612f6e4f216d065f4695a"
 	ClipUSD      = 10.60
-	EdgeBps      = 5.0
-	CloseEdgeBps = 2.5
-	CancelBps    = 1.0
-	ImpulseBps   = 2.0
+	EdgeBps      = 5.5 // Passive entry spread (bps from Binance mid)
+	CloseEdgeBps = 2.0 // Profit-only close floor (+2.0 bps vs avg_entry)
+	CancelBps    = 1.0 // Instant cancel if Binance moves >= 1.0 bps
 	StopEqUSD    = 14.50
 )
 
@@ -51,21 +50,26 @@ var markets = map[string]Market{
 var idToSym = map[int64]string{0: "ETH", 2: "SOL"}
 
 type ActiveOrder struct {
-	COI    int64
-	Px     float64
-	RefMid float64
-	TS     time.Time
+	COI     int64
+	Px      float64
+	RefMid  float64
+	IsClose bool
+	TS      time.Time
 }
 
 var (
 	mu         sync.Mutex
 	bnMid      = map[string]float64{}
-	bnEma      = map[string]float64{}
+	emaFast    = map[string]float64{} // 20s time-based EMA
+	emaSlow    = map[string]float64{} // 180s time-based EMA
+	lastEmaTS  = map[string]time.Time{}
+	bookBids   = map[string]map[string]float64{"ETH": {}, "SOL": {}}
+	bookAsks   = map[string]map[string]float64{"ETH": {}, "SOL": {}}
 	ltBid      = map[string]float64{}
 	ltAsk      = map[string]float64{}
 	positions  = map[string]float64{}
 	avgEntry   = map[string]float64{}
-	activeOrds = map[string]*ActiveOrder{} // key: sym+"_"+side
+	activeOrds = map[string]*ActiveOrder{}
 	lastOrdTS  = map[string]time.Time{}
 	eqNow      = 14.98
 	lastLog    = time.Time{}
@@ -74,9 +78,6 @@ var (
 	nonceSeq atomic.Int64
 	coiSeq   atomic.Int64
 	txMu     sync.Mutex
-
-	wsMu   sync.Mutex
-	ltConn *websocket.Conn
 )
 
 func roundTo(v float64, dec int) float64 {
@@ -125,14 +126,14 @@ func sendSignedTx(id string, dbg string, build func(*types.TransactOpts) (uint8,
 		if n, e2 := txCli.HTTP().GetNextNonce(AcctIdx, KeyIdx); e2 == nil {
 			nonceSeq.Store(n)
 		}
-		return fmt.Errorf("sendTx failed: %s", string(body))
+		return fmt.Errorf("sendTx failed")
 	}
 	fmt.Printf("[TX_OK %s %s] %dms\n", id, dbg, ms)
 	return nil
 }
 
 func cancelAll() {
-	err := sendSignedTx("ca", "cancelAll", func(opts *types.TransactOpts) (uint8, string, error) {
+	_ = sendSignedTx("ca", "cancelAll", func(opts *types.TransactOpts) (uint8, string, error) {
 		ti, e := txCli.GetCancelAllOrdersTransaction(&types.CancelAllOrdersTxReq{TimeInForce: 0, Time: 0}, opts)
 		if e != nil {
 			return 0, "", e
@@ -140,9 +141,6 @@ func cancelAll() {
 		s, e := ti.GetTxInfo()
 		return ti.GetTxType(), s, e
 	})
-	if err != nil {
-		fmt.Printf("[CANCEL_ALL ERR] %v\n", err)
-	}
 	mu.Lock()
 	activeOrds = map[string]*ActiveOrder{}
 	mu.Unlock()
@@ -168,20 +166,32 @@ func cancelSide(sym, side string) {
 	}(ao.COI, m.ID)
 }
 
-func placeSide(sym, side string, pxF, midF float64) {
+func placeSide(sym, side string, pxF, midF, customSz float64, isClose bool) {
 	m := markets[sym]
-	baseF := math.Max(m.MinB, ClipUSD/pxF)
-	baseInt := int64(math.Ceil(baseF * math.Pow10(m.SzDec)))
+	baseF := customSz
+	if baseF <= 0 {
+		baseF = math.Max(m.MinB, ClipUSD/pxF)
+	}
+	baseInt := int64(math.Round(baseF * math.Pow10(m.SzDec)))
+	if !isClose {
+		baseInt = int64(math.Ceil(baseF * math.Pow10(m.SzDec)))
+	}
+	if baseInt <= 0 {
+		return
+	}
 	pxInt := uint32(math.Round(pxF * math.Pow10(m.PxDec)))
 	coi := coiSeq.Add(1)
-	var isAsk uint8
+	var isAsk, redOnly uint8
 	if side == "ASK" {
 		isAsk = 1
 	}
-	activeOrds[sym+"_"+side] = &ActiveOrder{COI: coi, Px: pxF, RefMid: midF, TS: time.Now()}
+	if isClose {
+		redOnly = 1
+	}
+	activeOrds[sym+"_"+side] = &ActiveOrder{COI: coi, Px: pxF, RefMid: midF, IsClose: isClose, TS: time.Now()}
 	go func() {
 		exp := time.Now().Add(28 * 24 * time.Hour).UnixMilli()
-		dbg := fmt.Sprintf("%s_%s px=%.4f", sym, side, pxF)
+		dbg := fmt.Sprintf("%s_%s px=%.4f ro=%d", sym, side, pxF, redOnly)
 		err := sendSignedTx(fmt.Sprintf("o_%d", coi), dbg, func(opts *types.TransactOpts) (uint8, string, error) {
 			ti, e := txCli.GetCreateOrderTransaction(&types.CreateOrderTxReq{
 				MarketIndex:      m.ID,
@@ -191,6 +201,7 @@ func placeSide(sym, side string, pxF, midF float64) {
 				IsAsk:            isAsk,
 				Type:             0,
 				TimeInForce:      2,
+				ReduceOnly:       redOnly,
 				OrderExpiry:      exp,
 			}, opts)
 			if e != nil {
@@ -207,80 +218,121 @@ func placeSide(sym, side string, pxF, midF float64) {
 	}()
 }
 
+func recomputeBBO(sym string) {
+	bestB := 0.0
+	for ps, sz := range bookBids[sym] {
+		if sz > 0 {
+			p, _ := strconv.ParseFloat(ps, 64)
+			if p > bestB {
+				bestB = p
+			}
+		}
+	}
+	bestA := 0.0
+	for ps, sz := range bookAsks[sym] {
+		if sz > 0 {
+			p, _ := strconv.ParseFloat(ps, 64)
+			if bestA == 0 || p < bestA {
+				bestA = p
+			}
+		}
+	}
+	if bestB > 0 {
+		ltBid[sym] = bestB
+	}
+	if bestA > 0 {
+		ltAsk[sym] = bestA
+	}
+}
+
 func manageCoin(sym string) {
 	mu.Lock()
 	defer mu.Unlock()
 	mid := bnMid[sym]
 	lb, la := ltBid[sym], ltAsk[sym]
-	if mid <= 0 || lb <= 0 || la <= 0 {
+	if mid <= 0 || lb <= 0 || la <= 0 || lb >= la {
 		return
 	}
-	posUSD := positions[sym] * mid
+	pos := positions[sym]
+	posUSD := pos * mid
+	totalNetUSD := positions["ETH"]*bnMid["ETH"] + positions["SOL"]*bnMid["SOL"]
+
+	// 1. Cancel stale entry quotes if Binance moved >= CancelBps, or if direction turned hostile
+	ef, es := emaFast[sym], emaSlow[sym]
+	trendBps := 0.0
+	impBps := 0.0
+	if ef > 0 && es > 0 {
+		trendBps = (ef - es) / es * 10000.0
+		impBps = (mid - ef) / ef * 10000.0
+	}
+	bidSafe := trendBps >= -1.5 && impBps >= -1.5 && totalNetUSD < 6.0
+	askSafe := trendBps <= 1.5 && impBps <= 1.5 && totalNetUSD > -6.0
 
 	for _, side := range []string{"BID", "ASK"} {
 		ao := activeOrds[sym+"_"+side]
 		if ao != nil {
-			isClose := (side == "BID" && posUSD <= -5.0) || (side == "ASK" && posUSD >= 5.0)
 			moveBps := math.Abs(mid-ao.RefMid) / ao.RefMid * 10000.0
 			ageS := time.Since(ao.TS).Seconds()
 			tooClose := (side == "BID" && ao.Px >= la) || (side == "ASK" && ao.Px <= lb)
-			if (!isClose && (moveBps >= CancelBps || ageS >= 45.0)) || tooClose {
+			trendTurned := (!ao.IsClose) && ((side == "BID" && !bidSafe) || (side == "ASK" && !askSafe))
+			if (!ao.IsClose && (moveBps >= CancelBps || trendTurned || ageS >= 40.0)) || tooClose {
 				cancelSide(sym, side)
 			}
 		}
 	}
 
-	ema := bnEma[sym]
-	impBps := 0.0
-	if ema > 0 {
-		impBps = (mid - ema) / ema * 10000.0
-	}
-	allowBid := posUSD < 5.0 && impBps >= -ImpulseBps
-	allowAsk := posUSD > -5.0 && impBps <= ImpulseBps
-	ae := avgEntry[sym]
 	m := markets[sym]
 	tick := math.Pow10(-m.PxDec)
-
-	// Sanity-check Lighter BBO (WS delta can occasionally send deep level; fall back to mid if >0.5% away)
-	saneLB := lb
-	if math.Abs(lb-mid)/mid > 0.005 {
-		saneLB = mid
-	}
-	saneLA := la
-	if math.Abs(la-mid)/mid > 0.005 {
-		saneLA = mid
-	}
-
-	wantBid := roundTo(math.Min(saneLB, mid*(1.0-EdgeBps/10000.0)), m.PxDec)
-	if posUSD <= -5.0 && ae > 0 {
-		pBid := roundTo(math.Min(saneLB, ae*(1.0-CloseEdgeBps/10000.0)), m.PxDec)
-		wantBid = pBid
-	}
-	wantAsk := roundTo(math.Max(saneLA, mid*(1.0+EdgeBps/10000.0)), m.PxDec)
-	if posUSD >= 5.0 && ae > 0 {
-		pAsk := roundTo(math.Max(saneLA, ae*(1.0+CloseEdgeBps/10000.0)), m.PxDec)
-		wantAsk = pAsk
-	}
-	if wantBid >= saneLA {
-		wantBid = roundTo(saneLA-tick, m.PxDec)
-	}
-	if wantAsk <= saneLB {
-		wantAsk = roundTo(saneLB+tick, m.PxDec)
-	}
-
+	ae := avgEntry[sym]
 	now := time.Now()
-	if allowBid && activeOrds[sym+"_BID"] == nil && now.Sub(lastOrdTS[sym+"_BID"]) >= 5*time.Second {
-		lastOrdTS[sym+"_BID"] = now
-		placeSide(sym, "BID", wantBid, mid)
+
+	// 2. Closing orders (exact position size + ReduceOnly=1 + profit floor)
+	if posUSD <= -5.0 && ae > 0 {
+		wantBid := roundTo(math.Min(lb, ae*(1.0-CloseEdgeBps/10000.0)), m.PxDec)
+		if wantBid >= la {
+			wantBid = roundTo(la-tick, m.PxDec)
+		}
+		if activeOrds[sym+"_BID"] == nil && now.Sub(lastOrdTS[sym+"_BID"]) >= 4*time.Second {
+			lastOrdTS[sym+"_BID"] = now
+			placeSide(sym, "BID", wantBid, mid, math.Abs(pos), true)
+		}
+	} else if posUSD < 5.0 && bidSafe {
+		// Entry BID (only when flat, trend not falling, and global net delta < +$6)
+		wantBid := roundTo(math.Min(lb, mid*(1.0-EdgeBps/10000.0)), m.PxDec)
+		if wantBid >= la {
+			wantBid = roundTo(la-tick, m.PxDec)
+		}
+		if activeOrds[sym+"_BID"] == nil && now.Sub(lastOrdTS[sym+"_BID"]) >= 5*time.Second {
+			lastOrdTS[sym+"_BID"] = now
+			placeSide(sym, "BID", wantBid, mid, 0, false)
+		}
 	}
-	if allowAsk && activeOrds[sym+"_ASK"] == nil && now.Sub(lastOrdTS[sym+"_ASK"]) >= 5*time.Second {
-		lastOrdTS[sym+"_ASK"] = now
-		placeSide(sym, "ASK", wantAsk, mid)
+
+	if posUSD >= 5.0 && ae > 0 {
+		wantAsk := roundTo(math.Max(la, ae*(1.0+CloseEdgeBps/10000.0)), m.PxDec)
+		if wantAsk <= lb {
+			wantAsk = roundTo(lb+tick, m.PxDec)
+		}
+		if activeOrds[sym+"_ASK"] == nil && now.Sub(lastOrdTS[sym+"_ASK"]) >= 4*time.Second {
+			lastOrdTS[sym+"_ASK"] = now
+			placeSide(sym, "ASK", wantAsk, mid, math.Abs(pos), true)
+		}
+	} else if posUSD > -5.0 && askSafe {
+		// Entry ASK (only when flat, trend not rising, and global net delta > -$6)
+		wantAsk := roundTo(math.Max(la, mid*(1.0+EdgeBps/10000.0)), m.PxDec)
+		if wantAsk <= lb {
+			wantAsk = roundTo(lb+tick, m.PxDec)
+		}
+		if activeOrds[sym+"_ASK"] == nil && now.Sub(lastOrdTS[sym+"_ASK"]) >= 5*time.Second {
+			lastOrdTS[sym+"_ASK"] = now
+			placeSide(sym, "ASK", wantAsk, mid, 0, false)
+		}
 	}
 
 	if now.Sub(lastLog) >= 20*time.Second {
 		lastLog = now
-		fmt.Printf("[%s] GO-TOKYO Eq=$%.4f | Pos=%v | Active=%d\n", now.Format("15:04:05"), eqNow, positions, len(activeOrds))
+		fmt.Printf("[%s] GO-TOKYO v2 Eq=$%.4f | Pos=%v | Active=%d | ETH_BBO=%.2f/%.2f SOL_BBO=%.3f/%.3f\n",
+			now.Format("15:04:05"), eqNow, positions, len(activeOrds), ltBid["ETH"], ltAsk["ETH"], ltBid["SOL"], ltAsk["SOL"])
 	}
 }
 
@@ -297,10 +349,11 @@ func syncAccountLoop() {
 					TotalAssetValue string `json:"total_asset_value"`
 					Collateral      string `json:"collateral"`
 					Positions       []struct {
-						MarketID      int64  `json:"market_id"`
-						Position      string `json:"position"`
-						Sign          int    `json:"sign"`
-						AvgEntryPrice string `json:"avg_entry_price"`
+						MarketID       int64  `json:"market_id"`
+						Position       string `json:"position"`
+						Sign           int    `json:"sign"`
+						AvgEntryPrice  string `json:"avg_entry_price"`
+						OpenOrderCount int    `json:"open_order_count"`
 					} `json:"positions"`
 				} `json:"accounts"`
 			}
@@ -327,9 +380,18 @@ func syncAccountLoop() {
 						if p.Sign < 0 && sz > 0 {
 							sz = -sz
 						}
+						prevPos := positions[sym]
 						positions[sym] = sz
 						ae, _ := strconv.ParseFloat(p.AvgEntryPrice, 64)
 						avgEntry[sym] = ae
+						// Clear local order cache if exchange shows 0 open orders OR position changed (fill occurred!)
+						if p.OpenOrderCount == 0 || math.Abs(sz-prevPos) > 1e-6 {
+							for _, s := range []string{"BID", "ASK"} {
+								if ao := activeOrds[sym+"_"+s]; ao != nil && time.Since(ao.TS) > 2*time.Second {
+									delete(activeOrds, sym+"_"+s)
+								}
+							}
+						}
 					}
 				}
 				mu.Unlock()
@@ -341,7 +403,7 @@ func syncAccountLoop() {
 				}
 			}
 		}
-		time.Sleep(2500 * time.Millisecond)
+		time.Sleep(2 * time.Second)
 	}
 }
 
@@ -349,16 +411,16 @@ func runLtWS() {
 	for {
 		conn, _, err := websocket.DefaultDialer.Dial(WsURL, nil)
 		if err != nil {
-			fmt.Printf("[LT WS DIAL ERR] %v\n", err)
 			time.Sleep(1 * time.Second)
 			continue
 		}
 		if tc, ok := conn.UnderlyingConn().(*net.TCPConn); ok {
 			_ = tc.SetNoDelay(true)
 		}
-		wsMu.Lock()
-		ltConn = conn
-		wsMu.Unlock()
+		mu.Lock()
+		bookBids = map[string]map[string]float64{"ETH": {}, "SOL": {}}
+		bookAsks = map[string]map[string]float64{"ETH": {}, "SOL": {}}
+		mu.Unlock()
 		for _, m := range markets {
 			_ = conn.WriteJSON(map[string]any{"type": "subscribe", "channel": fmt.Sprintf("order_book/%d", m.ID)})
 		}
@@ -367,37 +429,50 @@ func runLtWS() {
 			if err != nil {
 				break
 			}
-			if !strings.Contains(string(msg), "order_book") && (strings.Contains(string(msg), `"error"`) || (strings.Contains(string(msg), `"code":`) && !strings.Contains(string(msg), `"code":200`))) {
-				fmt.Printf("[WS_RESP] %s\n", string(msg))
-				if strings.Contains(string(msg), "invalid nonce") {
-					if n, e2 := txCli.HTTP().GetNextNonce(AcctIdx, KeyIdx); e2 == nil {
-						nonceSeq.Store(n)
-					}
-				}
-			}
 			var m struct {
+				Type      string `json:"type"`
 				Channel   string `json:"channel"`
 				OrderBook struct {
-					Bids []struct{ Price string `json:"price"` } `json:"bids"`
-					Asks []struct{ Price string `json:"price"` } `json:"asks"`
+					Bids []struct {
+						Price string `json:"price"`
+						Size  string `json:"size"`
+					} `json:"bids"`
+					Asks []struct {
+						Price string `json:"price"`
+						Size  string `json:"size"`
+					} `json:"asks"`
 				} `json:"order_book"`
 			}
 			if json.Unmarshal(msg, &m) == nil && strings.HasPrefix(m.Channel, "order_book:") {
 				idStr := strings.TrimPrefix(m.Channel, "order_book:")
 				midID, _ := strconv.ParseInt(idStr, 10, 64)
-				if sym, ok := idToSym[midID]; ok && len(m.OrderBook.Bids) > 0 && len(m.OrderBook.Asks) > 0 {
-					bp, _ := strconv.ParseFloat(m.OrderBook.Bids[0].Price, 64)
-					ap, _ := strconv.ParseFloat(m.OrderBook.Asks[0].Price, 64)
+				if sym, ok := idToSym[midID]; ok {
 					mu.Lock()
-					ltBid[sym] = bp
-					ltAsk[sym] = ap
+					if strings.Contains(m.Type, "subscribed") {
+						bookBids[sym] = map[string]float64{}
+						bookAsks[sym] = map[string]float64{}
+					}
+					for _, b := range m.OrderBook.Bids {
+						sz, _ := strconv.ParseFloat(b.Size, 64)
+						if sz <= 0 {
+							delete(bookBids[sym], b.Price)
+						} else {
+							bookBids[sym][b.Price] = sz
+						}
+					}
+					for _, a := range m.OrderBook.Asks {
+						sz, _ := strconv.ParseFloat(a.Size, 64)
+						if sz <= 0 {
+							delete(bookAsks[sym], a.Price)
+						} else {
+							bookAsks[sym][a.Price] = sz
+						}
+					}
+					recomputeBBO(sym)
 					mu.Unlock()
 				}
 			}
 		}
-		wsMu.Lock()
-		ltConn = nil
-		wsMu.Unlock()
 		_ = conn.Close()
 		time.Sleep(1 * time.Second)
 	}
@@ -408,7 +483,6 @@ func runBnWS() {
 	for {
 		conn, _, err := websocket.DefaultDialer.Dial(url, nil)
 		if err != nil {
-			fmt.Printf("[BN WS DIAL ERR] %v\n", err)
 			time.Sleep(1 * time.Second)
 			continue
 		}
@@ -435,12 +509,20 @@ func runBnWS() {
 				a, _ := strconv.ParseFloat(env.Data.A, 64)
 				if b > 0 && a > 0 {
 					mVal := 0.5 * (b + a)
+					now := time.Now()
 					mu.Lock()
 					bnMid[sym] = mVal
-					if bnEma[sym] == 0 {
-						bnEma[sym] = mVal
+					if emaFast[sym] == 0 {
+						emaFast[sym] = mVal
+						emaSlow[sym] = mVal
+						lastEmaTS[sym] = now
 					} else {
-						bnEma[sym] = bnEma[sym]*0.95 + mVal*0.05
+						dt := math.Min(5.0, math.Max(0.001, now.Sub(lastEmaTS[sym]).Seconds()))
+						lastEmaTS[sym] = now
+						aFast := 1.0 - math.Exp(-dt/20.0)  // True 20-second EMA
+						aSlow := 1.0 - math.Exp(-dt/180.0) // True 3-minute EMA
+						emaFast[sym] += aFast * (mVal - emaFast[sym])
+						emaSlow[sym] += aSlow * (mVal - emaSlow[sym])
 					}
 					mu.Unlock()
 					manageCoin(sym)
@@ -471,7 +553,7 @@ func main() {
 	go runLtWS()
 	time.Sleep(1500 * time.Millisecond)
 	cancelAll()
-	fmt.Printf("GO-TOKYO Lighter Bot LIVE | Acct #%d | Nonce=%d | Clip=$%.2f | Edge=%.1fbps | Stop=$%.2f\n", AcctIdx, n, ClipUSD, EdgeBps, StopEqUSD)
+	fmt.Printf("GO-TOKYO v2 LIVE | Acct #%d | Nonce=%d | Clip=$%.2f | Edge=%.1fbps | Stop=$%.2f\n", AcctIdx, n, ClipUSD, EdgeBps, StopEqUSD)
 	go syncAccountLoop()
 	runBnWS()
 }
