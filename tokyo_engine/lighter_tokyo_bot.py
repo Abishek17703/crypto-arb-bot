@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import asyncio, json, math, time, urllib.request, websockets
+import asyncio, json, math, socket, time, urllib.request, websockets
 import lighter
 
 URL = "https://mainnet.zklighter.elliot.ai"
@@ -28,6 +28,7 @@ last_ord_ts = {}
 next_coi = int(time.time() * 100) % 10_000_000
 running = True
 client = None
+lt_ws_conn = None
 last_log = 0.0
 eq_now = 14.98
 
@@ -81,6 +82,15 @@ async def cancel_side(sym, side):
     if not ao:
         return
     try:
+        if lt_ws_conn is not None:
+            tx_t, tx_i, _, err = client.sign_cancel_order(
+                market_index=MARKETS[sym]["id"],
+                order_index=ao["coi"],
+                api_key_index=KEY_IDX,
+            )
+            if not err and tx_i:
+                await lt_ws_conn.send(json.dumps({"type": "jsonapi/sendtx", "data": {"id": f"c_{ao['coi']}", "tx_type": int(tx_t), "tx_info": tx_i}}))
+                return
         await client.cancel_order(
             market_index=MARKETS[sym]["id"],
             order_index=ao["coi"],
@@ -99,6 +109,25 @@ async def place_side(sym, side, px_f, mid_f):
     next_coi += 1
     coi = next_coi
     try:
+        if lt_ws_conn is not None:
+            tx_t, tx_i, _, err = client.sign_create_order(
+                market_index=m["id"],
+                client_order_index=coi,
+                base_amount=base_int,
+                price=px_int,
+                is_ask=(side == "ASK"),
+                order_type=client.ORDER_TYPE_LIMIT,
+                time_in_force=client.ORDER_TIME_IN_FORCE_POST_ONLY,
+                order_expiry=client.DEFAULT_28_DAY_ORDER_EXPIRY,
+                api_key_index=KEY_IDX,
+            )
+            if err:
+                if "post only" not in str(err).lower():
+                    print(f"[WS SIGN ERR] {sym} {side}: {err}", flush=True)
+                return
+            await lt_ws_conn.send(json.dumps({"type": "jsonapi/sendtx", "data": {"id": f"o_{coi}", "tx_type": int(tx_t), "tx_info": tx_i}}))
+            active_orders[(sym, side)] = {"coi": coi, "px": px_f, "ref_mid": mid_f, "ts": time.time()}
+            return
         _, _, err = await client.create_order(
             market_index=m["id"],
             client_order_index=coi,
@@ -190,10 +219,16 @@ async def run_bn_ws():
 
 
 async def run_lt_ws():
+    global lt_ws_conn
     url = "wss://mainnet.zklighter.elliot.ai/stream"
     while running:
         try:
             async with websockets.connect(url, ping_interval=20, ping_timeout=10) as ws:
+                lt_ws_conn = ws
+                try:
+                    ws.transport.get_extra_info("socket").setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                except Exception:
+                    pass
                 for m in MARKETS.values():
                     await ws.send(json.dumps({"type": "subscribe", "channel": f"order_book/{m['id']}"}))
                 while running:
@@ -206,6 +241,7 @@ async def run_lt_ws():
                         if sym and bids and asks:
                             lt_bbo[sym] = (float(bids[0]["price"]), float(asks[0]["price"]))
         except Exception as e:
+            lt_ws_conn = None
             print(f"[LT WS] {e}", flush=True)
             await asyncio.sleep(1.0)
 
