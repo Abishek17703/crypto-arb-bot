@@ -3536,30 +3536,31 @@ def main():
                                 api._u1_ema_1h = _u1_mid if not hasattr(api, "_u1_ema_1h") else (api._u1_ema_1h * 0.9997 + _u1_mid * 0.0003)
                                 # v20.7: Disable MTM short USD1 (prevent short-squeeze loss on USD1 rebounds)
                                 _sh_u1_cnt = 99
-                                # v21.0: Dedicated $96 USD1 -5t Mean-Reversion Dip-Catcher (16/16 100% backtest winrate)
-                                _has_mr_u1 = any("MEAN_REV" in str(tx.get("tid", "")) for tx in p_tr)
-                                if allow_buys and (not _has_mr_u1) and hasattr(api, "_u1_ema_1h") and rem_2k_budget >= 96.0 and free_map[f_key] >= 96.0 and (loop_ts - getattr(api, "_last_mr_u1_ts", 0.0)) >= 15.0:
-                                    _mr_bpx = round(min(q_bbo["bid"] - spec["tick"], api._u1_ema_1h - spec["tick"] * 5.0), spec["dec"])
-                                    _mr_qty = int(math.floor(96.0 / max(0.5, _mr_bpx)))
-                                    if _mr_qty >= 20:
-                                        api._last_mr_u1_ts = loop_ts
-                                        _mr_r = api.request("POST", "/sapi/v1/margin/order", {
-                                            "symbol": "USD1USDT", "side": "BUY", "type": "LIMIT_MAKER",
-                                            "quantity": str(_mr_qty), "price": f"{_mr_bpx:.{spec['dec']}f}"
-                                        }, signed=True)
-                                        if "orderId" in _mr_r and _mr_r.get("status") != "EXPIRED":
-                                            daily_orders_placed += 1
-                                            free_map[f_key] -= _mr_qty * _mr_bpx
-                                            rem_2k_budget = max(0.0, rem_2k_budget - _mr_qty * _mr_bpx)
-                                            _nt_mr = {
-                                                "tid": f"MEAN_REV_USD1_{len(p_tr)+1}", "symbol": "USD1USDT", "iso": False,
-                                                "lbl": "MEAN-REV -5t • USD1 $96", "qty": float(_mr_qty),
-                                                "buy_px": _mr_bpx, "sell_px": round(_mr_bpx + spec["tick"] * 5.0, spec["dec"]),
-                                                "buy_oid": _mr_r["orderId"], "sell_oid": None, "state": "BUY_OPEN", "ts": loop_ts, "pilot": True, "borrowed": False
-                                            }
-                                            active_tranches.append(_nt_mr)
-                                            p_tr.append(_nt_mr)
-                                            p_buy_open.append(_nt_mr)
+                                # v21.1: Two Dedicated $96 USD1 Mean-Reversion Dip-Catchers (-3t and -5t below 1h mean)
+                                for _mr_t in (3, 5):
+                                    _mr_tag = f"MEAN_REV{_mr_t}_USD1"
+                                    if allow_buys and (not any(_mr_tag in str(tx.get("tid", "")) for tx in p_tr)) and hasattr(api, "_u1_ema_1h") and rem_2k_budget >= 96.0 and free_map[f_key] >= 96.0 and (loop_ts - getattr(api, f"_last_mr_{_mr_t}_ts", 0.0)) >= 15.0:
+                                        _mr_bpx = round(min(q_bbo["bid"] - spec["tick"], api._u1_ema_1h - spec["tick"] * float(_mr_t)), spec["dec"])
+                                        _mr_qty = int(math.floor(96.0 / max(0.5, _mr_bpx)))
+                                        if _mr_qty >= 20:
+                                            setattr(api, f"_last_mr_{_mr_t}_ts", loop_ts)
+                                            _mr_r = api.request("POST", "/sapi/v1/margin/order", {
+                                                "symbol": "USD1USDT", "side": "BUY", "type": "LIMIT_MAKER",
+                                                "quantity": str(_mr_qty), "price": f"{_mr_bpx:.{spec['dec']}f}"
+                                            }, signed=True)
+                                            if "orderId" in _mr_r and _mr_r.get("status") != "EXPIRED":
+                                                daily_orders_placed += 1
+                                                free_map[f_key] -= _mr_qty * _mr_bpx
+                                                rem_2k_budget = max(0.0, rem_2k_budget - _mr_qty * _mr_bpx)
+                                                _nt_mr = {
+                                                    "tid": f"{_mr_tag}_{len(p_tr)+1}", "symbol": "USD1USDT", "iso": False,
+                                                    "lbl": f"MEAN-REV -{_mr_t}t • USD1 $96", "qty": float(_mr_qty),
+                                                    "buy_px": _mr_bpx, "sell_px": round(_mr_bpx + spec["tick"] * float(_mr_t), spec["dec"]),
+                                                    "buy_oid": _mr_r["orderId"], "sell_oid": None, "state": "BUY_OPEN", "ts": loop_ts, "pilot": True, "borrowed": False
+                                                }
+                                                active_tranches.append(_nt_mr)
+                                                p_tr.append(_nt_mr)
+                                                p_buy_open.append(_nt_mr)
                                 if allow_buys and _sh_u1_cnt < 2 and q_bbo["ask"] >= api._u1_ema_1h + spec["tick"] * 4.0 and q_bbo["askQty"] >= q_bbo["bidQty"] * 0.85:
                                     _sh_px = round(q_bbo["ask"], spec["dec"])
                                     _sh_r = api.request("POST", "/sapi/v1/margin/order", {
