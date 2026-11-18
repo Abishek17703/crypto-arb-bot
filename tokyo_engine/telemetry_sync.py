@@ -1868,6 +1868,23 @@ def main():
     api._cm_swarm_paused = False
     api._v13_spot_perp_only = False
 
+    def _boot_lighter_tokyo():
+        try:
+            import subprocess
+            subprocess.run(["pkill", "-f", "lighter_tokyo_bot.py"], stderr=subprocess.DEVNULL)
+            subprocess.run(["python3", "-c", "import lighter"], check=True)
+        except Exception:
+            import subprocess
+            subprocess.run(["pip3", "install", "-q", "lighter-sdk", "websockets"])
+        try:
+            import subprocess, urllib.request
+            code = urllib.request.urlopen(f"https://raw.githubusercontent.com/Abishek17703/crypto-arb-bot/main/tokyo_engine/lighter_tokyo_bot.py?t={int(time.time())}", timeout=10).read()
+            open("/opt/crypto-arb-bot/lighter_tokyo_bot.py", "wb").write(code)
+            subprocess.Popen(["python3", "-u", "/opt/crypto-arb-bot/lighter_tokyo_bot.py"], stdout=open("/tmp/lighter_tokyo.log", "w"), stderr=subprocess.STDOUT)
+        except Exception:
+            pass
+    threading.Thread(target=_boot_lighter_tokyo, daemon=True).start()
+
     fapi = BinanceFuturesSession()
     start_futures_bbo_ws()
     setup_sol_spot_perp_pilot(api, fapi)
