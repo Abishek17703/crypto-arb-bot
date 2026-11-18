@@ -1868,7 +1868,7 @@ def main():
     api._cm_swarm_paused = False
     api._v13_spot_perp_only = False
 
-    def _boot_lighter_tokyo():  # v3: BBO sanity + nonce auto-resync
+    def _boot_lighter_tokyo():  # v4: 5s cooldown + 429 guard + px debug
         import subprocess
         logf = open("/tmp/lighter_tokyo.log", "w")
         try:

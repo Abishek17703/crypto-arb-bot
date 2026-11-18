@@ -97,7 +97,9 @@ var txHTTP = &http.Client{
 	},
 }
 
-func sendWS(id string, txType uint8, txInfo string) error {
+func sendWS(id string, txType uint8, txInfo string, dbg string) error {
+	txMu.Lock()
+	defer txMu.Unlock()
 	form := url.Values{}
 	form.Set("tx_type", strconv.Itoa(int(txType)))
 	form.Set("tx_info", txInfo)
@@ -108,7 +110,10 @@ func sendWS(id string, txType uint8, txInfo string) error {
 	body, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
 	if resp.StatusCode != 200 || !strings.Contains(string(body), `"code":200`) {
-		fmt.Printf("[SENDTX %s] status=%d body=%s\n", id, resp.StatusCode, string(body))
+		fmt.Printf("[SENDTX %s %s] status=%d body=%s\n", id, dbg, resp.StatusCode, string(body))
+		if resp.StatusCode == 429 {
+			time.Sleep(5 * time.Second)
+		}
 		if n, e2 := txCli.HTTP().GetNextNonce(AcctIdx, KeyIdx); e2 == nil {
 			nonceSeq.Store(n)
 		}
@@ -131,7 +136,7 @@ func cancelAll() {
 		fmt.Printf("[CANCEL_ALL INFO ERR] %v\n", err)
 		return
 	}
-	if err := sendWS("ca", txInfo.GetTxType(), s); err != nil {
+	if err := sendWS("ca", txInfo.GetTxType(), s, "cancelAll"); err != nil {
 		fmt.Printf("[CANCEL_ALL WS ERR] %v\n", err)
 	}
 	mu.Lock()
@@ -158,7 +163,7 @@ func cancelSide(sym, side string) {
 		}
 		s, err := txInfo.GetTxInfo()
 		if err == nil {
-			_ = sendWS(fmt.Sprintf("c_%d", coi), txInfo.GetTxType(), s)
+			_ = sendWS(fmt.Sprintf("c_%d", coi), txInfo.GetTxType(), s, sym+"_"+side)
 		}
 	}(ao.COI, m.ID)
 }
@@ -195,7 +200,8 @@ func placeSide(sym, side string, pxF, midF float64) {
 		}
 		s, err := txInfo.GetTxInfo()
 		if err == nil {
-			if err := sendWS(fmt.Sprintf("o_%d", coi), txInfo.GetTxType(), s); err != nil {
+			dbg := fmt.Sprintf("%s_%s px=%.4f int=%d mid=%.4f", sym, side, pxF, pxInt, midF)
+			if err := sendWS(fmt.Sprintf("o_%d", coi), txInfo.GetTxType(), s, dbg); err != nil {
 				mu.Lock()
 				delete(activeOrds, sym+"_"+side)
 				mu.Unlock()
@@ -261,11 +267,11 @@ func manageCoin(sym string) {
 	}
 
 	now := time.Now()
-	if allowBid && activeOrds[sym+"_BID"] == nil && now.Sub(lastOrdTS[sym+"_BID"]) >= 3*time.Second {
+	if allowBid && activeOrds[sym+"_BID"] == nil && now.Sub(lastOrdTS[sym+"_BID"]) >= 5*time.Second {
 		lastOrdTS[sym+"_BID"] = now
 		placeSide(sym, "BID", wantBid, mid)
 	}
-	if allowAsk && activeOrds[sym+"_ASK"] == nil && now.Sub(lastOrdTS[sym+"_ASK"]) >= 3*time.Second {
+	if allowAsk && activeOrds[sym+"_ASK"] == nil && now.Sub(lastOrdTS[sym+"_ASK"]) >= 5*time.Second {
 		lastOrdTS[sym+"_ASK"] = now
 		placeSide(sym, "ASK", wantAsk, mid)
 	}
