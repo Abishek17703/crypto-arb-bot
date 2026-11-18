@@ -1868,7 +1868,7 @@ def main():
     api._cm_swarm_paused = False
     api._v13_spot_perp_only = False
 
-    def _boot_lighter_tokyo():  # v6: + S3 lighterAccount & lighter-dashboard.html upload
+    def _boot_lighter_tokyo():  # v7: serialize sign+sendTx under txMu + print ms latency
         import subprocess, urllib.request
         def _poll_lt_acct():
             while True:

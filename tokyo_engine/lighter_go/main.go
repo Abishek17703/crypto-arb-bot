@@ -97,9 +97,14 @@ var txHTTP = &http.Client{
 	},
 }
 
-func sendWS(id string, txType uint8, txInfo string, dbg string) error {
+func sendSignedTx(id string, dbg string, build func(*types.TransactOpts) (uint8, string, error)) error {
 	txMu.Lock()
 	defer txMu.Unlock()
+	t0 := time.Now()
+	txType, txInfo, err := build(nextOpts())
+	if err != nil {
+		return err
+	}
 	form := url.Values{}
 	form.Set("tx_type", strconv.Itoa(int(txType)))
 	form.Set("tx_info", txInfo)
@@ -109,8 +114,9 @@ func sendWS(id string, txType uint8, txInfo string, dbg string) error {
 	}
 	body, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
+	ms := time.Since(t0).Milliseconds()
 	if resp.StatusCode != 200 || !strings.Contains(string(body), `"code":200`) {
-		fmt.Printf("[SENDTX %s %s] status=%d body=%s\n", id, dbg, resp.StatusCode, string(body))
+		fmt.Printf("[SENDTX %s %s %dms] status=%d body=%s\n", id, dbg, ms, resp.StatusCode, string(body))
 		if resp.StatusCode == 429 {
 			time.Sleep(5 * time.Second)
 		}
@@ -119,25 +125,21 @@ func sendWS(id string, txType uint8, txInfo string, dbg string) error {
 		}
 		return fmt.Errorf("sendTx failed: %s", string(body))
 	}
+	fmt.Printf("[TX_OK %s %s] %dms\n", id, dbg, ms)
 	return nil
 }
 
 func cancelAll() {
-	txInfo, err := txCli.GetCancelAllOrdersTransaction(&types.CancelAllOrdersTxReq{
-		TimeInForce: 0, // CANCEL_ALL_TIF_IMMEDIATE
-		Time:        0,
-	}, nextOpts())
+	err := sendSignedTx("ca", "cancelAll", func(opts *types.TransactOpts) (uint8, string, error) {
+		ti, e := txCli.GetCancelAllOrdersTransaction(&types.CancelAllOrdersTxReq{TimeInForce: 0, Time: 0}, opts)
+		if e != nil {
+			return 0, "", e
+		}
+		s, e := ti.GetTxInfo()
+		return ti.GetTxType(), s, e
+	})
 	if err != nil {
-		fmt.Printf("[CANCEL_ALL SIGN ERR] %v\n", err)
-		return
-	}
-	s, err := txInfo.GetTxInfo()
-	if err != nil {
-		fmt.Printf("[CANCEL_ALL INFO ERR] %v\n", err)
-		return
-	}
-	if err := sendWS("ca", txInfo.GetTxType(), s, "cancelAll"); err != nil {
-		fmt.Printf("[CANCEL_ALL WS ERR] %v\n", err)
+		fmt.Printf("[CANCEL_ALL ERR] %v\n", err)
 	}
 	mu.Lock()
 	activeOrds = map[string]*ActiveOrder{}
@@ -153,18 +155,14 @@ func cancelSide(sym, side string) {
 	delete(activeOrds, key)
 	m := markets[sym]
 	go func(coi int64, mid int64) {
-		txInfo, err := txCli.GetCancelOrderTransaction(&types.CancelOrderTxReq{
-			MarketIndex: mid,
-			Index:       coi,
-		}, nextOpts())
-		if err != nil {
-			fmt.Printf("[CANCEL SIGN ERR] %s %s: %v\n", sym, side, err)
-			return
-		}
-		s, err := txInfo.GetTxInfo()
-		if err == nil {
-			_ = sendWS(fmt.Sprintf("c_%d", coi), txInfo.GetTxType(), s, sym+"_"+side)
-		}
+		_ = sendSignedTx(fmt.Sprintf("c_%d", coi), sym+"_"+side, func(opts *types.TransactOpts) (uint8, string, error) {
+			ti, e := txCli.GetCancelOrderTransaction(&types.CancelOrderTxReq{MarketIndex: mid, Index: coi}, opts)
+			if e != nil {
+				return 0, "", e
+			}
+			s, e := ti.GetTxInfo()
+			return ti.GetTxType(), s, e
+		})
 	}(ao.COI, m.ID)
 }
 
@@ -181,31 +179,28 @@ func placeSide(sym, side string, pxF, midF float64) {
 	activeOrds[sym+"_"+side] = &ActiveOrder{COI: coi, Px: pxF, RefMid: midF, TS: time.Now()}
 	go func() {
 		exp := time.Now().Add(28 * 24 * time.Hour).UnixMilli()
-		txInfo, err := txCli.GetCreateOrderTransaction(&types.CreateOrderTxReq{
-			MarketIndex:      m.ID,
-			ClientOrderIndex: coi,
-			BaseAmount:       baseInt,
-			Price:            pxInt,
-			IsAsk:            isAsk,
-			Type:             0, // LIMIT
-			TimeInForce:      2, // POST_ONLY
-			OrderExpiry:      exp,
-		}, nextOpts())
+		dbg := fmt.Sprintf("%s_%s px=%.4f", sym, side, pxF)
+		err := sendSignedTx(fmt.Sprintf("o_%d", coi), dbg, func(opts *types.TransactOpts) (uint8, string, error) {
+			ti, e := txCli.GetCreateOrderTransaction(&types.CreateOrderTxReq{
+				MarketIndex:      m.ID,
+				ClientOrderIndex: coi,
+				BaseAmount:       baseInt,
+				Price:            pxInt,
+				IsAsk:            isAsk,
+				Type:             0,
+				TimeInForce:      2,
+				OrderExpiry:      exp,
+			}, opts)
+			if e != nil {
+				return 0, "", e
+			}
+			s, e := ti.GetTxInfo()
+			return ti.GetTxType(), s, e
+		})
 		if err != nil {
-			fmt.Printf("[ORD SIGN ERR] %s %s: %v\n", sym, side, err)
 			mu.Lock()
 			delete(activeOrds, sym+"_"+side)
 			mu.Unlock()
-			return
-		}
-		s, err := txInfo.GetTxInfo()
-		if err == nil {
-			dbg := fmt.Sprintf("%s_%s px=%.4f int=%d mid=%.4f", sym, side, pxF, pxInt, midF)
-			if err := sendWS(fmt.Sprintf("o_%d", coi), txInfo.GetTxType(), s, dbg); err != nil {
-				mu.Lock()
-				delete(activeOrds, sym+"_"+side)
-				mu.Unlock()
-			}
 		}
 	}()
 }
