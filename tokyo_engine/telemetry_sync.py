@@ -3677,7 +3677,9 @@ def main():
                             imb_now = q_bbo["bidQty"] / max(1.0, ask_q_now)
                             t_ticks = (2 if (_reg_mode_p == "HIGH" and ask_q_now < 15000.0 and imb_now >= 2.0) else 1) if is_ab_b else (3 if (sym_p == "USD1USDT" and ask_q_now < 4500.0 and imb_now >= 2.50) else (2 if (sym_p == "USD1USDT" and (ask_q_now < 12000.0 or imb_now >= 2.20)) else 1))
                             spx_target = round(bpx_entry + max(8.0, q_bbo["ask"] - bpx_entry), spec["dec"]) if sym_p == "BTCUSD1" else round(bpx_entry + spec["tick"] * t_ticks, spec["dec"])
-                            pl_usd_sz = min(clip_sz_u, rem_2k_budget, free_map[f_key] * 0.99)
+                            _is_micro_slot = (sym_p == "USDCUSDT" and (len(p_tr) % 4 == 0))
+                            _eff_clip_u = 24.0 if _is_micro_slot else clip_sz_u
+                            pl_usd_sz = min(_eff_clip_u, rem_2k_budget, free_map[f_key] * 0.99)
                             bq_pl = round(math.floor((pl_usd_sz / bpx_entry) / spec["step"] + 1e-9) * spec["step"], 6)
                             if bq_pl * bpx_entry < 15.0:
                                 break
@@ -3702,8 +3704,8 @@ def main():
                                 _ab["B_test" if is_ab_b else "A_ctrl"]["placed"] += 1
                                 api._ab_stats = _ab
                                 nt_pl = {
-                                    "tid": f"V123_{'AB_B' if is_ab_b else ('ISO' if is_iso else 'CM')}_{sym_p[:4]}{len(p_tr)+1}", "symbol": sym_p, "iso": is_iso,
-                                    "lbl": f"{'TEST_B' if is_ab_b else 'CTRL_A'} • {sym_p[:4]} ${int(bq_pl)}",
+                                    "tid": f"V123_{'MICRO' if _is_micro_slot else ('AB_B' if is_ab_b else ('ISO' if is_iso else 'CM'))}_{sym_p[:4]}{len(p_tr)+1}", "symbol": sym_p, "iso": is_iso,
+                                    "lbl": f"{'MICRO_24' if _is_micro_slot else ('TEST_B' if is_ab_b else 'CTRL_A')} • {sym_p[:4]} ${int(bq_pl)}",
                                     "qty": bq_pl, "buy_px": bpx_pl, "sell_px": spx_target, "buy_oid": br_pl["orderId"], "sell_oid": None,
                                     "state": "BUY_OPEN", "ts": loop_ts, "pilot": True, "borrowed": False, "ab_test": is_ab_b
                                 }
