@@ -107,21 +107,6 @@ func sendSignedTx(id string, dbg string, build func(*types.TransactOpts) (uint8,
 	if err != nil {
 		return err
 	}
-	// Fast-path: send directly over already-open TCP_NODELAY WebSocket (<1ms non-blocking write!)
-	wsMu.Lock()
-	c := ltConn
-	var wsErr error
-	if c != nil {
-		wsErr = c.WriteJSON(map[string]any{
-			"type": "jsonapi/sendtx",
-			"data": map[string]any{"id": id, "tx_type": txType, "tx_info": txInfo},
-		})
-	}
-	wsMu.Unlock()
-	if c != nil && wsErr == nil {
-		fmt.Printf("[WS_TX %s %s] %dus\n", id, dbg, time.Since(t0).Microseconds())
-		return nil
-	}
 	form := url.Values{}
 	form.Set("tx_type", strconv.Itoa(int(txType)))
 	form.Set("tx_info", txInfo)
