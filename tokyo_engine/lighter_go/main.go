@@ -71,6 +71,7 @@ var (
 	txCli    *client.TxClient
 	nonceSeq atomic.Int64
 	coiSeq   atomic.Int64
+	txMu     sync.Mutex
 
 	wsMu   sync.Mutex
 	ltConn *websocket.Conn
@@ -108,6 +109,9 @@ func sendWS(id string, txType uint8, txInfo string) error {
 	resp.Body.Close()
 	if resp.StatusCode != 200 || !strings.Contains(string(body), `"code":200`) {
 		fmt.Printf("[SENDTX %s] status=%d body=%s\n", id, resp.StatusCode, string(body))
+		if n, e2 := txCli.HTTP().GetNextNonce(AcctIdx, KeyIdx); e2 == nil {
+			nonceSeq.Store(n)
+		}
 		return fmt.Errorf("sendTx failed: %s", string(body))
 	}
 	return nil
@@ -229,21 +233,31 @@ func manageCoin(sym string) {
 	m := markets[sym]
 	tick := math.Pow10(-m.PxDec)
 
-	wantBid := roundTo(math.Min(lb, mid*(1.0-EdgeBps/10000.0)), m.PxDec)
+	// Sanity-check Lighter BBO (WS delta can occasionally send deep level; fall back to mid if >0.5% away)
+	saneLB := lb
+	if math.Abs(lb-mid)/mid > 0.005 {
+		saneLB = mid
+	}
+	saneLA := la
+	if math.Abs(la-mid)/mid > 0.005 {
+		saneLA = mid
+	}
+
+	wantBid := roundTo(math.Min(saneLB, mid*(1.0-EdgeBps/10000.0)), m.PxDec)
 	if posUSD <= -5.0 && ae > 0 {
-		pBid := roundTo(math.Min(lb, ae*(1.0-CloseEdgeBps/10000.0)), m.PxDec)
+		pBid := roundTo(math.Min(saneLB, ae*(1.0-CloseEdgeBps/10000.0)), m.PxDec)
 		wantBid = pBid
 	}
-	wantAsk := roundTo(math.Max(la, mid*(1.0+EdgeBps/10000.0)), m.PxDec)
+	wantAsk := roundTo(math.Max(saneLA, mid*(1.0+EdgeBps/10000.0)), m.PxDec)
 	if posUSD >= 5.0 && ae > 0 {
-		pAsk := roundTo(math.Max(la, ae*(1.0+CloseEdgeBps/10000.0)), m.PxDec)
+		pAsk := roundTo(math.Max(saneLA, ae*(1.0+CloseEdgeBps/10000.0)), m.PxDec)
 		wantAsk = pAsk
 	}
-	if wantBid >= la {
-		wantBid = roundTo(la-tick, m.PxDec)
+	if wantBid >= saneLA {
+		wantBid = roundTo(saneLA-tick, m.PxDec)
 	}
-	if wantAsk <= lb {
-		wantAsk = roundTo(lb+tick, m.PxDec)
+	if wantAsk <= saneLB {
+		wantAsk = roundTo(saneLB+tick, m.PxDec)
 	}
 
 	now := time.Now()
