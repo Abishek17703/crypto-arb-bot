@@ -4024,6 +4024,7 @@ def main():
                     "abStats": getattr(api, "_ab_stats", {}),
                     "dopSites": getattr(api, "_dop_sites", {}),
                     "solSpotPerpPilot": sp_st,
+                    "lighterLog": (open("/tmp/lighter_tokyo.log").read()[-400:] if os.path.exists("/tmp/lighter_tokyo.log") else "NO_LOG"),
                     "trancheStats": {
                         "total": tot_tr_cnt,
                         "active": active_tr_cnt,
