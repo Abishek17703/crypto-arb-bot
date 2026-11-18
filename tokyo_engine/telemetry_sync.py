@@ -1264,13 +1264,14 @@ def run_sol_spot_perp_tick(api, fapi, bbos, loop_ts, round_trips, cached_total_u
 def auto_compound_borrow(api, force_repay_all=False):
     # v13.3: Sweep any Spot USDT/USDC (>= $1.00) into Cross-Margin, then scale 10x Isolated USDCUSDT to $440 seed (~$4,400 pool)!
     try:
-        spot_s = api.request("GET", "/api/v3/account", signed=True)
-        for b in spot_s.get("balances", []):
-            ast_b = b.get("asset", "")
-            if ast_b in ("USDT", "USDC") and float(b.get("free", 0)) >= 1.00:
-                fv_b = math.floor(float(b["free"]) * 100) / 100.0
-                if fv_b >= 1.00:
-                    api.request("POST", "/sapi/v1/margin/transfer", {"asset": ast_b, "amount": f"{fv_b:.2f}", "type": "1"}, signed=True)
+        if not force_repay_all:
+            spot_s = api.request("GET", "/api/v3/account", signed=True)
+            for b in spot_s.get("balances", []):
+                ast_b = b.get("asset", "")
+                if ast_b in ("USDT", "USDC") and float(b.get("free", 0)) >= 1.00:
+                    fv_b = math.floor(float(b["free"]) * 100) / 100.0
+                    if fv_b >= 1.00:
+                        api.request("POST", "/sapi/v1/margin/transfer", {"asset": ast_b, "amount": f"{fv_b:.2f}", "type": "1"}, signed=True)
         if force_repay_all:
             iso_rep_acc = api.request("GET", "/sapi/v1/margin/isolated/account", signed=True)
             for ia_r in iso_rep_acc.get("assets", []) if isinstance(iso_rep_acc, dict) else []:
@@ -1664,29 +1665,17 @@ def halt_all_orders_and_repay(api):
         for sb4 in spot_a.get("balances", []):
             s_ast4 = sb4.get("asset", "")
             s_fv4 = float(sb4.get("free", 0))
-            if s_ast4 != "USDT" and s_fv4 >= 0.000001:
-                # Only top-up Spot dust if balance >= 1.50 (never burn $7 transfers on sub-$1 dust!):
-                if s_ast4 in ("USDC", "U", "FDUSD", "USD1") and s_fv4 >= 1.50:
-                    s_sym_sp = s_ast4 + "USDT"
-                    if s_fv4 < 6.0:
-                        need_sp = int(math.ceil(6.0 - math.floor(s_fv4)))
-                        # Transfer $7 USDT from Cross Margin to Spot temporarily if Spot USDT < $7:
-                        api.request("POST", "/sapi/v1/margin/transfer", {"asset": "USDT", "amount": "7", "type": "2"}, signed=True)
-                        api.request("POST", "/api/v3/order", {"symbol": s_sym_sp, "side": "BUY", "type": "MARKET", "quantity": str(need_sp)}, signed=True)
-                        time.sleep(0.1)
-                    sp_chk = api.request("GET", "/api/v3/account", signed=True)
-                    for sb_c in sp_chk.get("balances", []):
-                        if sb_c.get("asset") == s_ast4:
-                            q_sp_sell = int(math.floor(float(sb_c.get("free", 0))))
-                            if q_sp_sell >= 6:
-                                api.request("POST", "/api/v3/order", {"symbol": s_sym_sp, "side": "SELL", "type": "MARKET", "quantity": str(q_sp_sell)}, signed=True)
-                                time.sleep(0.1)
-                q_res = api.request("POST", "/sapi/v1/convert/getQuote", {"fromAsset": s_ast4, "toAsset": "USDT", "fromAmount": f"{s_fv4:.8f}".rstrip("0").rstrip(".")}, signed=True)
+            if s_ast4 not in ("USDT", "USDC") and s_fv4 >= 0.000001:
+                # Try Binance Convert -> USDT first (works cleanly on >=$1 Spot coins), then Spot MARKET sell, then Dust-to-BNB:
+                q_res = api.request("POST", "/sapi/v1/convert/getQuote", {"fromAsset": s_ast4, "toAsset": "USDT", "fromAmount": f"{s_fv4:.8f}".rstrip("0").rstrip("."), "walletType": "SPOT"}, signed=True)
                 if isinstance(q_res, dict) and "quoteId" in q_res:
-                    api.request("POST", "/sapi/v1/convert/acceptQuote", {"quoteId": q_res["quoteId"]}, signed=True)
+                    api.request("POST", "/sapi/v1/convert/acceptQuote", {"quoteId": q_res["quoteId"], "walletType": "SPOT"}, signed=True)
                     time.sleep(0.1)
                 else:
-                    dust_assets.append(s_ast4)
+                    r_sp_sell = api.request("POST", "/api/v3/order", {"symbol": s_ast4 + "USDT", "side": "SELL", "type": "MARKET", "quantity": f"{s_fv4:.6f}".rstrip("0").rstrip(".")}, signed=True)
+                    if "orderId" not in r_sp_sell:
+                        dust_assets.append(s_ast4)
+                    time.sleep(0.1)
         if dust_assets:
             api.request("POST", "/sapi/v1/asset/dust", {"asset": ",".join(dust_assets)}, signed=True)
             time.sleep(0.1)
@@ -1706,15 +1695,35 @@ def halt_all_orders_and_repay(api):
                     if q_bnb >= 0.01:
                         api.request("POST", "/api/v3/order", {"symbol": "BNBUSDT", "side": "SELL", "type": "MARKET", "quantity": f"{q_bnb:.3f}"}, signed=True)
                         time.sleep(0.1)
+        # 3f. Once Cross-Margin debt is $0, move ALL Cross-Margin USDT to Spot and keep exactly $15 USDC in Spot (rest in Spot USDT):
+        cm_final = api.request("GET", "/sapi/v1/margin/account", signed=True)
+        cm_debts = sum(float(x.get("borrowed", 0)) + float(x.get("interest", 0)) for x in cm_final.get("userAssets", [])) if isinstance(cm_final, dict) else 999.0
+        if cm_debts < 0.05:
+            for a_fin in cm_final.get("userAssets", []):
+                if a_fin.get("asset") == "USDT" and float(a_fin.get("free", 0)) >= 0.01:
+                    mx_ut = api.request("GET", "/sapi/v1/margin/maxTransferable", {"asset": "USDT"}, signed=True)
+                    mv_ut = min(float(a_fin["free"]), float(mx_ut.get("amount", a_fin["free"]))) if isinstance(mx_ut, dict) else float(a_fin["free"])
+                    amt_ut = f"{math.floor(mv_ut * 100.0) / 100.0:.2f}"
+                    if float(amt_ut) >= 0.01:
+                        api.request("POST", "/sapi/v1/margin/transfer", {"asset": "USDT", "amount": amt_ut, "type": "2"}, signed=True)
+                        time.sleep(0.2)
         spot_a2 = api.request("GET", "/api/v3/account", signed=True)
-        for sb5 in spot_a2.get("balances", []):
-            if sb5.get("asset") == "USDT" and float(sb5.get("free", 0)) >= 0.0001:
-                for prec_s in (8, 6, 4, 2):
-                    ut_s5 = f"{math.floor(float(sb5['free']) * (10 ** prec_s)) / (10 ** prec_s):.{prec_s}f}".rstrip("0").rstrip(".")
-                    if ut_s5 and float(ut_s5) > 0:
-                        r_sp = api.request("POST", "/sapi/v1/margin/transfer", {"asset": "USDT", "amount": ut_s5, "type": "1"}, signed=True)
-                        if "tranId" in r_sp:
-                            break
+        sp_uc = sum(float(b.get("free", 0)) for b in spot_a2.get("balances", []) if b.get("asset") == "USDC")
+        sp_ut = sum(float(b.get("free", 0)) for b in spot_a2.get("balances", []) if b.get("asset") == "USDT")
+        if sp_uc < 14.95 and sp_ut >= 15.10 - sp_uc:
+            need_uc = round(15.02 - sp_uc, 2)
+            qt_uc = api.request("POST", "/sapi/v1/convert/getQuote", {"fromAsset": "USDT", "toAsset": "USDC", "fromAmount": f"{need_uc:.2f}", "walletType": "SPOT"}, signed=True)
+            if isinstance(qt_uc, dict) and "quoteId" in qt_uc:
+                api.request("POST", "/sapi/v1/convert/acceptQuote", {"quoteId": qt_uc["quoteId"], "walletType": "SPOT"}, signed=True)
+            elif need_uc >= 5.5:
+                api.request("POST", "/api/v3/order", {"symbol": "USDCUSDT", "side": "BUY", "type": "MARKET", "quoteOrderQty": f"{need_uc:.2f}"}, signed=True)
+        elif sp_uc > 15.20:
+            ex_uc = round(sp_uc - 15.00, 2)
+            qt_ex = api.request("POST", "/sapi/v1/convert/getQuote", {"fromAsset": "USDC", "toAsset": "USDT", "fromAmount": f"{ex_uc:.2f}", "walletType": "SPOT"}, signed=True)
+            if isinstance(qt_ex, dict) and "quoteId" in qt_ex:
+                api.request("POST", "/sapi/v1/convert/acceptQuote", {"quoteId": qt_ex["quoteId"], "walletType": "SPOT"}, signed=True)
+            elif ex_uc >= 5.5:
+                api.request("POST", "/api/v3/order", {"symbol": "USDCUSDT", "side": "SELL", "type": "MARKET", "quantity": f"{int(math.floor(ex_uc))}"}, signed=True)
     except Exception:
         pass
 
@@ -1840,19 +1849,19 @@ def main():
     except Exception:
         pass
 
-    # Load hard latched $495.00 circuit breaker & S3 user pause state BEFORE startup borrow/adopt!
+    # User-requested FULL STOP & SPOT CONSOLIDATION (0 debt, all USDT Spot + 15 USDC Spot):
     api._paused_495 = False
-    api._user_paused = False
+    api._user_paused = True
     try:
         if os.path.exists("/tmp/pause_495_latch.json"):
             os.remove("/tmp/pause_495_latch.json")
     except Exception:
         pass
     try:
-        s3.put_object(Bucket=S3_BUCKET, Key="pause-control.json", Body=json.dumps({"paused": False, "ts": int(time.time() * 1000)}).encode("utf-8"), ContentType="application/json")
+        s3.put_object(Bucket=S3_BUCKET, Key="pause-control.json", Body=json.dumps({"paused": True, "ts": int(time.time() * 1000)}).encode("utf-8"), ContentType="application/json")
     except Exception:
         pass
-    api._user_paused = False
+    api._user_paused = True
     api._test_stop_ts = 0.0
     api._stablecoin_only_5m = True
     api._cm_swarm_paused = False
@@ -2481,11 +2490,19 @@ def main():
             # Hard Stop Gate: If $495.00 circuit breaker OR dashboard red PAUSE button is active, stop 100% of trading!
             cm_ut_debt = sum(float(b.get("borrowed", 0)) for b in cached_balances if "USDT (5x Cross)" in b.get("asset", ""))
             if getattr(api, "_paused_495", False) or getattr(api, "_user_paused", False):
-                non_usdt_bals = [b for b in cached_balances if not b.get("asset", "").startswith("USDT")]
-                if cached_open_orders or active_tranches or non_usdt_bals or (loop_ts - getattr(api, "_last_halt_sweep", 0.0) >= 15.0):
-                    if loop_ts - getattr(api, "_last_halt_sweep", 0.0) >= 8.0:
-                        api._last_halt_sweep = loop_ts
-                        halt_all_orders_and_repay(api)
+                need_sweep = bool(cached_open_orders or active_tranches or cm_ut_debt > 0.05)
+                for _cb in cached_balances:
+                    _ca = _cb.get("asset", "")
+                    _cv = float(_cb.get("free", 0)) + float(_cb.get("locked", 0))
+                    if "(5x Cross)" in _ca and _cv > 0.50:
+                        need_sweep = True
+                    elif "(Spot Pilot)" in _ca and not _ca.startswith("USDT") and not _ca.startswith("USDC") and _cv > 0.50:
+                        need_sweep = True
+                    elif _ca == "USDC (Spot Pilot)" and abs(_cv - 15.0) > 0.25:
+                        need_sweep = True
+                if need_sweep and (loop_ts - getattr(api, "_last_halt_sweep", 0.0) >= 8.0):
+                    api._last_halt_sweep = loop_ts
+                    halt_all_orders_and_repay(api)
                 active_tranches = []
                 cached_open_orders = []
                 live_hourly_rate_usd = 0.0
