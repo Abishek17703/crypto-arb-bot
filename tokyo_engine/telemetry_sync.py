@@ -3495,7 +3495,7 @@ def main():
                     ("FDUSDUSDT", False, "CM_USDT",       "CM_FDUSD",      0,                       0,  24.0,   0.0, "STOPPED • 0-LOSS DRAIN"),
                     ("BTCUSD1",   False, "CM_USD1",       "CM_BTC",        0,                       0,  80.0,    0.0, "STOPPED • FEES"),
                     ("USD1USDC",  False, "CM_USDC",       "CM_USD1",       0,                       0, 140.0,    0.0, "STOPPED • LOCKED USDC"),
-                    ("UUSDT",     False, "CM_USDT",       "CM_U",          1 if allow_buys else 0,  0,  24.0,   24.0, "v20.8 CAP-U • U/USDT $24x1"),
+                    ("UUSDT",     False, "CM_USDT",       "CM_U",          0,                       0,  24.0,    0.0, "STOPPED • DRAIN $189 U"),
                     ("USDCUSDT",  True,  "ISO_USDC_USDT", "ISO_USDC_BASE", 0,                       0, 140.0,    0.0, "STOPPED • CM 2x MODE"),
                     ("USDCUSDT",  False, "CM_USDT",       "CM_USDC",      16 if allow_buys else 0,  0, 120.0, 1920.0, "v19.5 ACCURATE-FILL • USDC $120x16"),
                     ("USD1USDT",  False, "CM_USDT",       "CM_USD1",       6 if allow_buys else 0,  0, 112.0,  672.0, "v19.9 AUTO-CAP • USD1 $112x6"),
@@ -3634,7 +3634,7 @@ def main():
                         if not is_iso:
                             _sym_stuck = sum(1 for tx in p_tr if tx.get("state") == "SELL_OPEN" and (loop_ts - tx.get("ts", loop_ts)) > 60.0 and tx.get("sell_px", 0.0) > q_bbo["ask"] + spec["tick"] * 1.5)
                             _sym_locked = sum(tx.get("qty", 0.0) * tx.get("buy_px", 1.0) for tx in p_tr if tx.get("state") in ("BUY_OPEN", "SELL_OPEN"))
-                            _sym_cap_usd = cm_pool_cap * (0.70 if (_sym_stuck < 2 and sym_p == "USDCUSDT") else 0.45)
+                            _sym_cap_usd = cm_pool_cap * 0.45
                             if _sym_stuck >= 2 or _sym_locked >= _sym_cap_usd:
                                 impulse_ok = False
                         while len(p_tr) < max_sym_legs and len(p_buy_open) < max_buy_slots and rem_2k_budget >= 20.0 and free_map[f_key] >= 20.0 and impulse_ok:
@@ -3683,7 +3683,7 @@ def main():
                             bpx_entry = None
                             u1_top_cnt = sum(1 for tx in p_tr if tx["buy_px"] >= q_bbo["bid"] - spec["tick"] * 1.5)
                             u1_below_ema = (q_bbo["bid"] <= getattr(api, "_u1_ema_1h", q_bbo["bid"]) + spec["tick"] * 1.5)
-                            uc_below_ema = (q_bbo["bid"] <= getattr(api, "_uc_ema_1h", q_bbo["bid"]) + spec["tick"] * 3.0)
+                            uc_below_ema = (q_bbo["bid"] <= getattr(api, "_uc_ema_1h", q_bbo["bid"]) + spec["tick"] * 1.0)
                             _n_ticks = 3 if _reg_mode_p == "HIGH" else 1
                             _cap_passes = (1, 2, 3) if _reg_mode_p == "HIGH" else (1, 2, 3, 4)
                             lvl_range = (range(_n_ticks) if (sym_p == "USDCUSDT" and uc_below_ema) else (range(1, 3) if sym_p == "USDCUSDT" else (range(_n_ticks) if (u1_top_cnt < 4 and u1_below_ema) else range(1, 3))))
@@ -3703,8 +3703,8 @@ def main():
                             imb_now = q_bbo["bidQty"] / max(1.0, ask_q_now)
                             t_ticks = (2 if (_reg_mode_p == "HIGH" and ask_q_now < 15000.0 and imb_now >= 2.0) else 1) if is_ab_b else (3 if (sym_p == "USD1USDT" and ask_q_now < 4500.0 and imb_now >= 2.50) else (2 if (sym_p == "USD1USDT" and (ask_q_now < 12000.0 or imb_now >= 2.20)) else 1))
                             spx_target = round(bpx_entry + max(8.0, q_bbo["ask"] - bpx_entry), spec["dec"]) if sym_p == "BTCUSD1" else round(bpx_entry + spec["tick"] * t_ticks, spec["dec"])
-                            _is_micro_slot = (sym_p == "USDCUSDT" and (len(p_tr) % 4 == 0))
-                            _eff_clip_u = 24.0 if _is_micro_slot else clip_sz_u
+                            _is_micro_slot = False
+                            _eff_clip_u = clip_sz_u
                             pl_usd_sz = min(_eff_clip_u, rem_2k_budget, free_map[f_key] * 0.99)
                             bq_pl = round(math.floor((pl_usd_sz / bpx_entry) / spec["step"] + 1e-9) * spec["step"], 6)
                             if bq_pl * bpx_entry < 15.0:
