@@ -1868,8 +1868,23 @@ def main():
     api._cm_swarm_paused = False
     api._v13_spot_perp_only = False
 
-    def _boot_lighter_tokyo():  # v5: fix Go JSON case-insensitive "b" vs "B" qty overwrite
-        import subprocess
+    def _boot_lighter_tokyo():  # v6: + S3 lighterAccount & lighter-dashboard.html upload
+        import subprocess, urllib.request
+        def _poll_lt_acct():
+            while True:
+                try:
+                    d_lt = json.loads(urllib.request.urlopen("https://mainnet.zklighter.elliot.ai/api/v1/account?by=index&value=770015", timeout=5).read().decode())
+                    if d_lt.get("accounts"):
+                        api._lighter_acct = d_lt["accounts"][0]
+                except Exception:
+                    pass
+                time.sleep(2.0)
+        threading.Thread(target=_poll_lt_acct, daemon=True).start()
+        try:
+            html_lt = urllib.request.urlopen(f"https://raw.githubusercontent.com/Abishek17703/crypto-arb-bot/main/tokyo_engine/lighter_live_dashboard.html?t={int(time.time())}", timeout=8).read()
+            s3.put_object(Bucket=S3_BUCKET, Key="lighter-dashboard.html", Body=html_lt, ContentType="text/html", CacheControl="no-cache, no-store, must-revalidate")
+        except Exception:
+            pass
         logf = open("/tmp/lighter_tokyo.log", "w")
         try:
             subprocess.run(["pkill", "-f", "lighter_tokyo_bot.py"], stderr=subprocess.DEVNULL)
@@ -4023,6 +4038,7 @@ def main():
                     "abStats": getattr(api, "_ab_stats", {}),
                     "dopSites": getattr(api, "_dop_sites", {}),
                     "solSpotPerpPilot": sp_st,
+                    "lighterAccount": getattr(api, "_lighter_acct", None),
                     "lighterLog": (open("/tmp/lighter_tokyo.log").read()[-400:] if os.path.exists("/tmp/lighter_tokyo.log") else "NO_LOG"),
                     "trancheStats": {
                         "total": tot_tr_cnt,
