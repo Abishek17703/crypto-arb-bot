@@ -1392,7 +1392,7 @@ def compute_composite_regime(api, bbos, fills_1h, p_5m, p_15m):
     fills_fpm = fills_1h / 60.0
     _stuck_n = getattr(api, "_live_stuck_cnt", 0)
     _eq_15m = getattr(api, "_live_15m_eq", 0.0)
-    if (score >= 74 and _stuck_n <= 3 and _eq_15m >= 0.0) or (fills_fpm >= 9.0 and _stuck_n <= 3 and _eq_15m >= 0.0) or (old_m == "HIGH" and _stuck_n <= 3 and (score >= 66 or fills_fpm >= 7.5)):
+    if (fills_fpm >= 9.0 and _stuck_n <= 3 and _eq_15m >= 0.0) or (old_m == "HIGH" and _stuck_n <= 3 and fills_fpm >= 7.5):
         raw_m = "HIGH"
     elif (fills_fpm >= 4.5 and score >= 26) or (score >= 50) or (old_m == "MEDIUM" and fills_fpm >= 3.5 and score >= 34):
         raw_m = "MEDIUM"
@@ -3639,7 +3639,7 @@ def main():
                             u1_top_cnt = sum(1 for tx in p_tr if tx["buy_px"] >= q_bbo["bid"] - spec["tick"] * 1.5)
                             u1_below_ema = (q_bbo["bid"] <= getattr(api, "_u1_ema_1h", q_bbo["bid"]) + spec["tick"] * 1.5)
                             uc_below_ema = (q_bbo["bid"] <= getattr(api, "_uc_ema_1h", q_bbo["bid"]) + spec["tick"] * 1.5)
-                            _n_ticks = 2 if _reg_mode_p == "MEDIUM" else 3
+                            _n_ticks = 3 if _reg_mode_p == "HIGH" else 2
                             _cap_passes = (1, 2, 3) if _reg_mode_p == "HIGH" else (1, 2)
                             lvl_range = (range(_n_ticks) if (sym_p == "USDCUSDT" and uc_below_ema) else (range(1, _n_ticks + 1) if sym_p == "USDCUSDT" else (range(_n_ticks) if (u1_top_cnt < 4 and u1_below_ema) else range(1, _n_ticks + 1))))
                             for _cap_pass in _cap_passes:
