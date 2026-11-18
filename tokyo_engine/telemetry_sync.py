@@ -2395,7 +2395,7 @@ def main():
 
                     # Scrub any prior single-tick borrow/repay API glitches from eq_series
                     if 497.00 < cached_total_usd < 540.0 and eq_series:
-                        eq_series = [pt for pt in eq_series if (498.80 <= float(pt[1]) < 545.0) and not (float(pt[0]) >= loop_ts - 1800.0 and float(pt[1]) > cached_total_usd + 0.15)]
+                        eq_series = [pt for pt in eq_series if (498.80 <= float(pt[1]) < 503.0) and not (float(pt[0]) >= loop_ts - 1800.0 and float(pt[1]) > cached_total_usd + 0.15)]
 
                     # TRUE SIGNED WALLET EQUITY & 8-HORIZON DELTAS (Smoothed median anchors + outlier rejection so borrow/repay glitches never show fake $0.50+/hr or $6k/day!)
                     if cached_total_usd > 85.0:
@@ -2549,7 +2549,7 @@ def main():
                                     synth_exit_g = bbos[ref_sym_g]["ask"] / bbos[q_bridge]["ask"]
                                     if synth_exit_g < tr["buy_px"] + 0.000030:
                                         tri_edge_gone = True
-                            can_reroute_deep = (sym in ("USD1USDT", "USDCUSDT", "UUSDT", "USD1USDC") and (q_bbo["bid"] - tr["buy_px"]) >= spec["tick"] * 1.5 and (loop_ts - tr.get("ts", 0)) >= 6.0)
+                            can_reroute_deep = (sym in ("USD1USDT", "USDCUSDT", "UUSDT", "USD1USDC") and (q_bbo["bid"] - tr["buy_px"]) >= spec["tick"] * 1.5 and (loop_ts - tr.get("ts", 0)) >= 3.0)
                             # Heavy-Bid Pre-Fill Shield (v9.5 100%-Winrate Anti-Adverse-Selection Shield: steps back to Bid-1 before thin Bid walls get swept!):
                             cg_live = compute_conservative_guard(api, bbos).get(sym, {})
                             min_safe_wall = 0.85 if sym in ("USD1USDT", "USDCUSDT") else (1.25 if sym in ("UUSDT", "USD1USDC") else (0.90 if sym == "BTCU" else 0.65))
@@ -2786,12 +2786,12 @@ def main():
                                             continue
                             # Mechanism 1: Smart +2/+3 -> +1 Tick Profit Step-Down (after 5.0s) + Strictly >= Breakeven Step-Down (ZERO negative step-downs ever!)
                             min_step_gain = 2.50 if sym in ("BTCU", "BTCUSD1") else spec["tick"]
-                            step_wait_s = 15.0
+                            step_wait_s = 5.0
                             want_step_1tick = (
                                 sym not in ("FDUSDUSDC", "ETHU")
                                 and float(o_live.get("executedQty", 0)) == 0
                                 and (
-                                    (age_s > 15.0 and q_bbo["ask"] < tr["sell_px"] - max(spec["tick"] * 0.5, 0.40 if sym in ("BTCU", "BTCUSD1") else 0.0) and max(tr["buy_px"] + min_step_gain, q_bbo["ask"]) < tr["sell_px"] - spec["tick"] * 0.5)
+                                    (age_s > 5.0 and q_bbo["ask"] < tr["sell_px"] - max(spec["tick"] * 0.5, 0.40 if sym in ("BTCU", "BTCUSD1") else 0.0) and max(tr["buy_px"] + min_step_gain, q_bbo["ask"]) < tr["sell_px"] - spec["tick"] * 0.5)
                                     or (age_s >= step_wait_s and tr["sell_px"] >= tr["buy_px"] + min_step_gain * 1.8 and q_bbo["ask"] <= tr["buy_px"] + min_step_gain * 1.2)
                                 )
                             )
@@ -2800,7 +2800,7 @@ def main():
                             vault_target_px = tr["sell_px"]
                             vault_subsidy_need = 0.0
                             if not want_step_1tick and sym in ("USD1USDT", "USDCUSDT", "FDUSDUSDT") and float(o_live.get("executedQty", 0)) == 0 and q_bbo["ask"] < tr["sell_px"] - spec["tick"] * 0.5:
-                                if age_s >= 15.0 and tr["sell_px"] > tr["buy_px"] + spec["tick"] * 1.5 and q_bbo["ask"] >= tr["buy_px"] + spec["tick"] * 0.8:
+                                if age_s >= 5.0 and tr["sell_px"] > tr["buy_px"] + spec["tick"] * 1.5 and q_bbo["ask"] >= tr["buy_px"] + spec["tick"] * 0.8:
                                     want_vault_unstick = True
                                     vault_target_px = round(max(tr["buy_px"] + spec["tick"], q_bbo["ask"]), spec["dec"])
                                     vault_subsidy_need = 0.0
@@ -3609,7 +3609,7 @@ def main():
                             _sym_stuck = sum(1 for tx in p_tr if tx.get("state") == "SELL_OPEN" and (loop_ts - tx.get("ts", loop_ts)) > 60.0 and tx.get("sell_px", 0.0) > q_bbo["ask"] + spec["tick"] * 1.5)
                             _sym_locked = sum(tx.get("qty", 0.0) * tx.get("buy_px", 1.0) for tx in p_tr if tx.get("state") in ("BUY_OPEN", "SELL_OPEN"))
                             _sym_cap_usd = cm_pool_cap * (0.70 if (_sym_stuck < 2 and sym_p == "USDCUSDT") else 0.45)
-                            if _sym_stuck >= 3 or _sym_locked >= _sym_cap_usd:
+                            if _sym_stuck >= 2 or _sym_locked >= _sym_cap_usd:
                                 impulse_ok = False
                         while len(p_tr) < max_sym_legs and len(p_buy_open) < max_buy_slots and rem_2k_budget >= 20.0 and free_map[f_key] >= 20.0 and impulse_ok:
                             # v16.0 Safe Mode: LIMIT_MAKER ONLY (zero IOC taker slippage)
@@ -3658,9 +3658,9 @@ def main():
                             u1_top_cnt = sum(1 for tx in p_tr if tx["buy_px"] >= q_bbo["bid"] - spec["tick"] * 1.5)
                             u1_below_ema = (q_bbo["bid"] <= getattr(api, "_u1_ema_1h", q_bbo["bid"]) + spec["tick"] * 1.5)
                             uc_below_ema = (q_bbo["bid"] <= getattr(api, "_uc_ema_1h", q_bbo["bid"]) + spec["tick"] * 1.5)
-                            _n_ticks = 3 if _reg_mode_p == "HIGH" else 2
-                            _cap_passes = (1, 2, 3) if _reg_mode_p == "HIGH" else (1, 2)
-                            lvl_range = (range(_n_ticks) if (sym_p == "USDCUSDT" and uc_below_ema) else (range(1, _n_ticks + 1) if sym_p == "USDCUSDT" else (range(_n_ticks) if (u1_top_cnt < 4 and u1_below_ema) else range(1, _n_ticks + 1))))
+                            _n_ticks = 3 if _reg_mode_p == "HIGH" else 1
+                            _cap_passes = (1, 2, 3) if _reg_mode_p == "HIGH" else (1, 2, 3, 4)
+                            lvl_range = (range(_n_ticks) if (sym_p == "USDCUSDT" and uc_below_ema) else (range(1, 3) if sym_p == "USDCUSDT" else (range(_n_ticks) if (u1_top_cnt < 4 and u1_below_ema) else range(1, 3))))
                             for _cap_pass in _cap_passes:
                                 for _st_lvl in lvl_range:
                                     cand_bpx = round(top_bpx_ref - spec["tick"] * _st_lvl, spec["dec"])
