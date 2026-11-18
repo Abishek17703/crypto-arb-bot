@@ -1335,19 +1335,19 @@ def auto_compound_borrow(api, force_repay_all=False):
                 ba_uc = ia_uc.get("baseAsset", {})
                 iso_net_u = float(qa_uc.get("netAsset", 0)) + float(ba_uc.get("netAsset", 0))
                 iso_bor_u = float(qa_uc.get("borrowed", 0)) + float(qa_uc.get("interest", 0))
-                # v21.4 Standardized Regime Tiers ($300 LOW / $750 MEDIUM / $1,800 HIGH):
+                # WIND-DOWN MODE: Stop all new buys & repay 100% of all debts (target_cm_loan = 0.0)
                 _reg_mode = getattr(api, "_regime_info", {}).get("mode", "MEDIUM")
-                target_cm_loan = 1800.0 if _reg_mode == "HIGH" else (300.0 if _reg_mode == "LOW" else 750.0)
-                if ut_borrowed > target_cm_loan + 15.0 and cm_ut_free >= 1.0:
+                target_cm_loan = 0.0
+                if ut_borrowed > target_cm_loan + 0.05 and cm_ut_free >= 0.50:
                     rep_cm = min(cm_ut_free, ut_borrowed - target_cm_loan)
-                    api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "USDT", "isIsolated": "FALSE", "amount": f"{rep_cm:.2f}", "type": "REPAY"}, signed=True)
+                    api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "USDT", "isIsolated": "FALSE", "amount": f"{rep_cm:.4f}", "type": "REPAY"}, signed=True)
                 if iso_bor_u > 0.01:
                     q_iso_f = float(qa_uc.get("free", 0))
                     if q_iso_f >= 1.0:
                         api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "USDT", "isIsolated": "TRUE", "symbol": "USDCUSDT", "amount": f"{min(q_iso_f, iso_bor_u):.2f}", "type": "REPAY"}, signed=True)
             else:
                 _reg_mode = getattr(api, "_regime_info", {}).get("mode", "MEDIUM")
-                target_cm_loan = 1800.0 if _reg_mode == "HIGH" else (300.0 if _reg_mode == "LOW" else 750.0)
+                target_cm_loan = 0.0
             if ut_borrowed < target_cm_loan - 5.0:
                 mx_cm_b = api.request("GET", "/sapi/v1/margin/maxBorrowable", {"asset": "USDT"}, signed=True)
                 can_cm_b = min(round(target_cm_loan - ut_borrowed, 2), float(mx_cm_b.get("amount", 0)) * 0.92) if isinstance(mx_cm_b, dict) else 0.0
@@ -1849,19 +1849,20 @@ def main():
     except Exception:
         pass
 
-    # User-requested FULL STOP & SPOT CONSOLIDATION (0 debt, all USDT Spot + 15 USDC Spot):
+    # WIND-DOWN MODE: Keep loop running ONLY to exit existing SELL_OPEN tranches at profit/breakeven; 0 new buys, 0 debt:
     api._paused_495 = False
-    api._user_paused = True
+    api._user_paused = False
     try:
         if os.path.exists("/tmp/pause_495_latch.json"):
             os.remove("/tmp/pause_495_latch.json")
     except Exception:
         pass
     try:
-        s3.put_object(Bucket=S3_BUCKET, Key="pause-control.json", Body=json.dumps({"paused": True, "ts": int(time.time() * 1000)}).encode("utf-8"), ContentType="application/json")
+        s3.put_object(Bucket=S3_BUCKET, Key="pause-control.json", Body=json.dumps({"paused": False, "ts": int(time.time() * 1000)}).encode("utf-8"), ContentType="application/json")
     except Exception:
         pass
-    api._user_paused = True
+    api._user_paused = False
+    api._stop_new_buys = True
     api._test_stop_ts = 0.0
     api._stablecoin_only_5m = True
     api._cm_swarm_paused = False
@@ -3501,7 +3502,7 @@ def main():
                         active_tranches.remove(t_s)
 
                 cons_guards = compute_conservative_guard(api, bbos)
-                allow_buys = (not soft_delev)
+                allow_buys = False  # Wind-down: zero new buys; only close existing sells in profit or breakeven
                 main_t_sz = 250.0
                 fd_tri_edge_ok = False
                 for sym_p, is_iso, f_key, b_key, max_tr, max_buy, t_size, max_sell_cap, lbl_p in (
