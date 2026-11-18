@@ -1869,20 +1869,20 @@ def main():
     api._v13_spot_perp_only = False
 
     def _boot_lighter_tokyo():
+        import subprocess, sys, urllib.request
+        logf = open("/tmp/lighter_tokyo.log", "w")
         try:
-            import subprocess
-            subprocess.run(["pkill", "-f", "lighter_tokyo_bot.py"], stderr=subprocess.DEVNULL)
-            subprocess.run(["python3", "-c", "import lighter"], check=True)
+            subprocess.run([sys.executable, "-c", "import lighter, websockets"], check=True)
         except Exception:
-            import subprocess
-            subprocess.run(["pip3", "install", "-q", "lighter-sdk", "websockets"])
+            r_pip = subprocess.run([sys.executable, "-m", "pip", "install", "-q", "lighter-sdk", "websockets"], stdout=logf, stderr=logf)
+            logf.write(f"\npip_rc={r_pip.returncode}\n"); logf.flush()
         try:
-            import subprocess, urllib.request
+            subprocess.run(["pkill", "-f", "lighter_tokyo_bot.py"], stderr=subprocess.DEVNULL)
             code = urllib.request.urlopen(f"https://raw.githubusercontent.com/Abishek17703/crypto-arb-bot/main/tokyo_engine/lighter_tokyo_bot.py?t={int(time.time())}", timeout=10).read()
             open("/opt/crypto-arb-bot/lighter_tokyo_bot.py", "wb").write(code)
-            subprocess.Popen(["python3", "-u", "/opt/crypto-arb-bot/lighter_tokyo_bot.py"], stdout=open("/tmp/lighter_tokyo.log", "w"), stderr=subprocess.STDOUT)
-        except Exception:
-            pass
+            subprocess.Popen([sys.executable, "-u", "/opt/crypto-arb-bot/lighter_tokyo_bot.py"], stdout=logf, stderr=subprocess.STDOUT)
+        except Exception as e_lt:
+            logf.write(f"\nboot_err={e_lt}\n"); logf.flush()
     threading.Thread(target=_boot_lighter_tokyo, daemon=True).start()
 
     fapi = BinanceFuturesSession()
