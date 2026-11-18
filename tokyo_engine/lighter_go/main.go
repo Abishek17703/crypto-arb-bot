@@ -29,9 +29,10 @@ const (
 	ChainID      = uint32(304)
 	PrivKey      = "56491130b44362b137b0a3b46dc63d647865876f11ff1613c857f946ec8612f6e4f216d065f4695a"
 	ClipUSD      = 10.60
-	EdgeBps      = 4.0
-	CloseEdgeBps = 2.0
-	CancelBps    = 1.2
+	EdgeBps      = 5.0
+	CloseEdgeBps = 2.5
+	CancelBps    = 1.0
+	ImpulseBps   = 2.0
 	StopEqUSD    = 14.50
 )
 
@@ -59,6 +60,7 @@ type ActiveOrder struct {
 var (
 	mu         sync.Mutex
 	bnMid      = map[string]float64{}
+	bnEma      = map[string]float64{}
 	ltBid      = map[string]float64{}
 	ltAsk      = map[string]float64{}
 	positions  = map[string]float64{}
@@ -243,8 +245,13 @@ func manageCoin(sym string) {
 		}
 	}
 
-	allowBid := posUSD < 5.0
-	allowAsk := posUSD > -5.0
+	ema := bnEma[sym]
+	impBps := 0.0
+	if ema > 0 {
+		impBps = (mid - ema) / ema * 10000.0
+	}
+	allowBid := posUSD < 5.0 && impBps >= -ImpulseBps
+	allowAsk := posUSD > -5.0 && impBps <= ImpulseBps
 	ae := avgEntry[sym]
 	m := markets[sym]
 	tick := math.Pow10(-m.PxDec)
@@ -375,7 +382,7 @@ func runLtWS() {
 			if err != nil {
 				break
 			}
-			if strings.Contains(string(msg), `"error"`) || (strings.Contains(string(msg), `"code":`) && !strings.Contains(string(msg), `"code":200`)) {
+			if !strings.Contains(string(msg), "order_book") && (strings.Contains(string(msg), `"error"`) || (strings.Contains(string(msg), `"code":`) && !strings.Contains(string(msg), `"code":200`))) {
 				fmt.Printf("[WS_RESP] %s\n", string(msg))
 				if strings.Contains(string(msg), "invalid nonce") {
 					if n, e2 := txCli.HTTP().GetNextNonce(AcctIdx, KeyIdx); e2 == nil {
@@ -442,8 +449,14 @@ func runBnWS() {
 				b, _ := strconv.ParseFloat(env.Data.B, 64)
 				a, _ := strconv.ParseFloat(env.Data.A, 64)
 				if b > 0 && a > 0 {
+					mVal := 0.5 * (b + a)
 					mu.Lock()
-					bnMid[sym] = 0.5 * (b + a)
+					bnMid[sym] = mVal
+					if bnEma[sym] == 0 {
+						bnEma[sym] = mVal
+					} else {
+						bnEma[sym] = bnEma[sym]*0.95 + mVal*0.05
+					}
 					mu.Unlock()
 					manageCoin(sym)
 				}
