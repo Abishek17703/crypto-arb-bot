@@ -3533,8 +3533,8 @@ def main():
                             if sym_p == "USD1USDT":
                                 _u1_mid = 0.5 * (q_bbo["bid"] + q_bbo["ask"])
                                 api._u1_ema_1h = _u1_mid if not hasattr(api, "_u1_ema_1h") else (api._u1_ema_1h * 0.9997 + _u1_mid * 0.0003)
-                                # v16.6 MTM-Advantage: Small $48 (2x$24) Short USD1 test when USD1 > ema_1h + 4 ticks
-                                _sh_u1_cnt = sum(1 for tx in p_tr if tx.get("state") in ("SHORT_SELL_OPEN", "SHORT_BUY_OPEN"))
+                                # v20.7: Disable MTM short USD1 (prevent short-squeeze loss on USD1 rebounds)
+                                _sh_u1_cnt = 99
                                 if allow_buys and _sh_u1_cnt < 2 and q_bbo["ask"] >= api._u1_ema_1h + spec["tick"] * 4.0 and q_bbo["askQty"] >= q_bbo["bidQty"] * 0.85:
                                     _sh_px = round(q_bbo["ask"], spec["dec"])
                                     _sh_r = api.request("POST", "/sapi/v1/margin/order", {
@@ -3552,7 +3552,7 @@ def main():
                                         }
                                         active_tranches.append(_nt_sh)
                                         p_tr.append(_nt_sh)
-                                clip_sz_u = 112.0
+                                clip_sz_u = 112.0 if getattr(api, "_regime_info", {}).get("mode", "MEDIUM") == "HIGH" else 96.0
                                 impulse_ok = (
                                     rem_2k_budget >= 20.0
                                     and free_map[f_key] >= 20.0
@@ -3593,7 +3593,7 @@ def main():
                                 max_sym_legs = 6
                                 max_buy_slots = 4
                             else:
-                                clip_sz_u = 120.0
+                                clip_sz_u = 120.0 if getattr(api, "_regime_info", {}).get("mode", "MEDIUM") == "HIGH" else 96.0
                                 if sym_p == "USDCUSDT":
                                     _uc_mid = 0.5 * (q_bbo["bid"] + q_bbo["ask"])
                                     api._uc_ema_1h = _uc_mid if not hasattr(api, "_uc_ema_1h") else (api._uc_ema_1h * 0.9997 + _uc_mid * 0.0003)
@@ -3675,7 +3675,7 @@ def main():
                             # Dynamic +2/+3 Tick target for Control A; strict +1 Tick top-of-book for Test B:
                             ask_q_now = q_bbo["askQty"]
                             imb_now = q_bbo["bidQty"] / max(1.0, ask_q_now)
-                            t_ticks = (2 if (ask_q_now < 15000.0 and imb_now >= 2.0) else 1) if is_ab_b else (3 if (sym_p == "USD1USDT" and ask_q_now < 4500.0 and imb_now >= 2.50) else (2 if (sym_p == "USD1USDT" and (ask_q_now < 12000.0 or imb_now >= 2.20)) else 1))
+                            t_ticks = (2 if (_reg_mode_p == "HIGH" and ask_q_now < 15000.0 and imb_now >= 2.0) else 1) if is_ab_b else (3 if (sym_p == "USD1USDT" and ask_q_now < 4500.0 and imb_now >= 2.50) else (2 if (sym_p == "USD1USDT" and (ask_q_now < 12000.0 or imb_now >= 2.20)) else 1))
                             spx_target = round(bpx_entry + max(8.0, q_bbo["ask"] - bpx_entry), spec["dec"]) if sym_p == "BTCUSD1" else round(bpx_entry + spec["tick"] * t_ticks, spec["dec"])
                             pl_usd_sz = min(clip_sz_u, rem_2k_budget, free_map[f_key] * 0.99)
                             bq_pl = round(math.floor((pl_usd_sz / bpx_entry) / spec["step"] + 1e-9) * spec["step"], 6)
