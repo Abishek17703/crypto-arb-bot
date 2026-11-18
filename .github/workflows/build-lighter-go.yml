@@ -1,0 +1,33 @@
+name: Build Lighter Go Bot (linux/amd64)
+
+on:
+  push:
+    paths:
+      - 'tokyo_engine/lighter_go/**'
+      - '.github/workflows/build-lighter-go.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+      - name: Build lighter_go_bot
+        working-directory: tokyo_engine/lighter_go
+        run: |
+          go mod tidy
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o lighter_go_bot .
+      - name: Upload to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: lighter-go-latest
+          files: tokyo_engine/lighter_go/lighter_go_bot
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1869,24 +1869,17 @@ def main():
     api._v13_spot_perp_only = False
 
     def _boot_lighter_tokyo():
-        import subprocess, urllib.request
+        import subprocess
         logf = open("/tmp/lighter_tokyo.log", "w")
         try:
             subprocess.run(["pkill", "-f", "lighter_tokyo_bot.py"], stderr=subprocess.DEVNULL)
             subprocess.run(["pkill", "-f", "lighter_go_bot"], stderr=subprocess.DEVNULL)
-            if not os.path.exists("/usr/local/go/bin/go"):
-                r_go = subprocess.run("curl -fsSL https://go.dev/dl/go1.23.6.linux-amd64.tar.gz -o /tmp/go.tgz && rm -rf /usr/local/go && tar -C /usr/local -xzf /tmp/go.tgz && rm -f /tmp/go.tgz", shell=True, stdout=logf, stderr=logf)
-                logf.write(f"\ngo_inst_rc={r_go.returncode}\n"); logf.flush()
-            os.makedirs("/opt/crypto-arb-bot/lighter_go", exist_ok=True)
-            ts_q = int(time.time())
-            for fn in ("go.mod", "main.go"):
-                code = urllib.request.urlopen(f"https://raw.githubusercontent.com/Abishek17703/crypto-arb-bot/main/tokyo_engine/lighter_go/{fn}?t={ts_q}", timeout=10).read()
-                open(f"/opt/crypto-arb-bot/lighter_go/{fn}", "wb").write(code)
-            env_go = dict(os.environ, PATH="/usr/local/go/bin:" + os.environ.get("PATH", ""), GOPROXY="https://proxy.golang.org,direct", HOME="/root")
-            r_b = subprocess.run("/usr/local/go/bin/go mod tidy && /usr/local/go/bin/go build -o /opt/crypto-arb-bot/lighter_go_bot .", cwd="/opt/crypto-arb-bot/lighter_go", shell=True, env=env_go, stdout=logf, stderr=logf)
-            logf.write(f"\ngo_build_rc={r_b.returncode}\n"); logf.flush()
-            if r_b.returncode == 0:
-                subprocess.Popen(["/opt/crypto-arb-bot/lighter_go_bot"], stdout=logf, stderr=subprocess.STDOUT)
+            bin_p = "/opt/crypto-arb-bot/lighter_go_bot"
+            url_b = "https://github.com/Abishek17703/crypto-arb-bot/releases/download/lighter-go-latest/lighter_go_bot"
+            r_dl = subprocess.run(f"curl -fsSL {url_b} -o {bin_p}.tmp && mv {bin_p}.tmp {bin_p} && chmod +x {bin_p}", shell=True, stdout=logf, stderr=logf)
+            logf.write(f"\ndl_rc={r_dl.returncode}\n"); logf.flush()
+            if r_dl.returncode == 0:
+                subprocess.Popen([bin_p], stdout=logf, stderr=subprocess.STDOUT)
         except Exception as e_lt:
             logf.write(f"\nboot_err={e_lt}\n"); logf.flush()
     threading.Thread(target=_boot_lighter_tokyo, daemon=True).start()
