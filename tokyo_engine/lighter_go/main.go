@@ -7,6 +7,7 @@ import (
 	"math"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -86,21 +87,30 @@ func nextOpts() *types.TransactOpts {
 	return &types.TransactOpts{Nonce: &n, ExpiredAt: exp}
 }
 
+var txHTTP = &http.Client{
+	Timeout: 5 * time.Second,
+	Transport: &http.Transport{
+		DialContext:         (&net.Dialer{Timeout: 3 * time.Second, KeepAlive: 60 * time.Second}).DialContext,
+		MaxIdleConnsPerHost: 50,
+		IdleConnTimeout:     90 * time.Second,
+	},
+}
+
 func sendWS(id string, txType uint8, txInfo string) error {
-	wsMu.Lock()
-	defer wsMu.Unlock()
-	if ltConn == nil {
-		return fmt.Errorf("lt ws disconnected")
+	form := url.Values{}
+	form.Set("tx_type", strconv.Itoa(int(txType)))
+	form.Set("tx_info", txInfo)
+	resp, err := txHTTP.PostForm(BaseURL+"/api/v1/sendTx", form)
+	if err != nil {
+		return err
 	}
-	payload := map[string]any{
-		"type": "jsonapi/sendtx",
-		"data": map[string]any{
-			"id":      id,
-			"tx_type": txType,
-			"tx_info": txInfo,
-		},
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != 200 || !strings.Contains(string(body), `"code":200`) {
+		fmt.Printf("[SENDTX %s] status=%d body=%s\n", id, resp.StatusCode, string(body))
+		return fmt.Errorf("sendTx failed: %s", string(body))
 	}
-	return ltConn.WriteJSON(payload)
+	return nil
 }
 
 func cancelAll() {
