@@ -1334,9 +1334,9 @@ def auto_compound_borrow(api, force_repay_all=False):
                 ba_uc = ia_uc.get("baseAsset", {})
                 iso_net_u = float(qa_uc.get("netAsset", 0)) + float(ba_uc.get("netAsset", 0))
                 iso_bor_u = float(qa_uc.get("borrowed", 0)) + float(qa_uc.get("interest", 0))
-                # v20.2 Standardized Regime Tiers ($0 LOW / $750 MEDIUM / $1,800 HIGH):
+                # v21.4 Standardized Regime Tiers ($300 LOW / $750 MEDIUM / $1,800 HIGH):
                 _reg_mode = getattr(api, "_regime_info", {}).get("mode", "MEDIUM")
-                target_cm_loan = 1800.0 if _reg_mode == "HIGH" else (0.0 if _reg_mode == "LOW" else 750.0)
+                target_cm_loan = 1800.0 if _reg_mode == "HIGH" else (300.0 if _reg_mode == "LOW" else 750.0)
                 if ut_borrowed > target_cm_loan + 15.0 and cm_ut_free >= 1.0:
                     rep_cm = min(cm_ut_free, ut_borrowed - target_cm_loan)
                     api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "USDT", "isIsolated": "FALSE", "amount": f"{rep_cm:.2f}", "type": "REPAY"}, signed=True)
@@ -1346,7 +1346,7 @@ def auto_compound_borrow(api, force_repay_all=False):
                         api.request("POST", "/sapi/v1/margin/borrow-repay", {"asset": "USDT", "isIsolated": "TRUE", "symbol": "USDCUSDT", "amount": f"{min(q_iso_f, iso_bor_u):.2f}", "type": "REPAY"}, signed=True)
             else:
                 _reg_mode = getattr(api, "_regime_info", {}).get("mode", "MEDIUM")
-                target_cm_loan = 1800.0 if _reg_mode == "HIGH" else (0.0 if _reg_mode == "LOW" else 750.0)
+                target_cm_loan = 1800.0 if _reg_mode == "HIGH" else (300.0 if _reg_mode == "LOW" else 750.0)
             if ut_borrowed < target_cm_loan - 5.0:
                 mx_cm_b = api.request("GET", "/sapi/v1/margin/maxBorrowable", {"asset": "USDT"}, signed=True)
                 can_cm_b = min(round(target_cm_loan - ut_borrowed, 2), float(mx_cm_b.get("amount", 0)) * 0.92) if isinstance(mx_cm_b, dict) else 0.0
@@ -2800,14 +2800,14 @@ def main():
                             want_vault_unstick = False
                             vault_target_px = tr["sell_px"]
                             vault_subsidy_need = 0.0
-                            if not want_step_1tick and sym in ("USD1USDT", "USDCUSDT", "FDUSDUSDT") and float(o_live.get("executedQty", 0)) == 0 and q_bbo["ask"] < tr["sell_px"] - spec["tick"] * 0.5:
+                            if not want_step_1tick and sym in ("USD1USDT", "USDCUSDT", "FDUSDUSDT", "UUSDT") and float(o_live.get("executedQty", 0)) == 0 and q_bbo["ask"] < tr["sell_px"] - spec["tick"] * 0.5:
                                 if age_s >= 5.0 and tr["sell_px"] > tr["buy_px"] + spec["tick"] * 1.5 and q_bbo["ask"] >= tr["buy_px"] + spec["tick"] * 0.8:
                                     want_vault_unstick = True
                                     vault_target_px = round(max(tr["buy_px"] + spec["tick"], q_bbo["ask"]), spec["dec"])
                                     vault_subsidy_need = 0.0
-                                elif age_s >= 90.0 and sym in ("USD1USDT", "USDCUSDT") and unstick_vault_usd >= 0.00020:
+                                elif age_s >= 90.0 and sym in ("USD1USDT", "USDCUSDT", "UUSDT") and unstick_vault_usd >= 0.00020:
                                     need_u = max(0.0, (tr["buy_px"] - q_bbo["ask"]) * tr["qty"])
-                                    if 0.0 < need_u <= unstick_vault_usd + 1e-6 and need_u <= 0.0150:
+                                    if 0.0 < need_u <= unstick_vault_usd + 1e-6 and need_u <= 0.0450:
                                         want_vault_unstick = True
                                         vault_target_px = round(q_bbo["ask"], spec["dec"])
                                         vault_subsidy_need = need_u
@@ -3528,7 +3528,7 @@ def main():
                             tot_active_legs = [t for t in active_tranches if (not t["iso"]) and t["symbol"] in ("USD1USDT", "USDCUSDT", "USD1USDC", "UUSDT") and t["state"] in ("BUY_OPEN", "SELL_OPEN")]
                             tot_deployed_usd = sum(t["qty"] * t["buy_px"] for t in tot_active_legs)
                             _reg_mode_p = getattr(api, "_regime_info", {}).get("mode", "MEDIUM")
-                            cm_pool_cap = (1800.0 if _reg_mode_p == "HIGH" else (0.0 if _reg_mode_p == "LOW" else 750.0)) + 480.0
+                            cm_pool_cap = (1800.0 if _reg_mode_p == "HIGH" else (300.0 if _reg_mode_p == "LOW" else 750.0)) + 480.0
                             rem_2k_budget = max(0.0, cm_pool_cap - tot_deployed_usd)
                             clip_sz_u = 24.0
                             if sym_p == "USD1USDT":
@@ -3536,12 +3536,13 @@ def main():
                                 api._u1_ema_1h = _u1_mid if not hasattr(api, "_u1_ema_1h") else (api._u1_ema_1h * 0.9997 + _u1_mid * 0.0003)
                                 # v20.7: Disable MTM short USD1 (prevent short-squeeze loss on USD1 rebounds)
                                 _sh_u1_cnt = 99
-                                # v21.1: Two Dedicated $96 USD1 Mean-Reversion Dip-Catchers (-3t and -5t below 1h mean)
+                                # v21.4: Two Dedicated USD1 Mean-Reversion Dip-Catchers ($48 LOW / $96 MED-HIGH)
+                                _mr_sz = 48.0 if _reg_mode_p == "LOW" else 96.0
                                 for _mr_t in (3, 5):
                                     _mr_tag = f"MEAN_REV{_mr_t}_USD1"
-                                    if allow_buys and (not any(_mr_tag in str(tx.get("tid", "")) for tx in p_tr)) and hasattr(api, "_u1_ema_1h") and rem_2k_budget >= 96.0 and free_map[f_key] >= 96.0 and (loop_ts - getattr(api, f"_last_mr_{_mr_t}_ts", 0.0)) >= 15.0:
+                                    if allow_buys and (not any(_mr_tag in str(tx.get("tid", "")) for tx in p_tr)) and hasattr(api, "_u1_ema_1h") and rem_2k_budget >= _mr_sz and free_map[f_key] >= _mr_sz and (loop_ts - getattr(api, f"_last_mr_{_mr_t}_ts", 0.0)) >= 15.0:
                                         _mr_bpx = round(min(q_bbo["bid"] - spec["tick"], api._u1_ema_1h - spec["tick"] * float(_mr_t)), spec["dec"])
-                                        _mr_qty = int(math.floor(96.0 / max(0.5, _mr_bpx)))
+                                        _mr_qty = int(math.floor(_mr_sz / max(0.5, _mr_bpx)))
                                         if _mr_qty >= 20:
                                             setattr(api, f"_last_mr_{_mr_t}_ts", loop_ts)
                                             _mr_r = api.request("POST", "/sapi/v1/margin/order", {
@@ -3554,7 +3555,7 @@ def main():
                                                 rem_2k_budget = max(0.0, rem_2k_budget - _mr_qty * _mr_bpx)
                                                 _nt_mr = {
                                                     "tid": f"{_mr_tag}_{len(p_tr)+1}", "symbol": "USD1USDT", "iso": False,
-                                                    "lbl": f"MEAN-REV -{_mr_t}t • USD1 $96", "qty": float(_mr_qty),
+                                                    "lbl": f"MEAN-REV -{_mr_t}t • USD1 ${int(_mr_sz)}", "qty": float(_mr_qty),
                                                     "buy_px": _mr_bpx, "sell_px": round(_mr_bpx + spec["tick"] * float(_mr_t), spec["dec"]),
                                                     "buy_oid": _mr_r["orderId"], "sell_oid": None, "state": "BUY_OPEN", "ts": loop_ts, "pilot": True, "borrowed": False
                                                 }
@@ -3578,7 +3579,7 @@ def main():
                                         }
                                         active_tranches.append(_nt_sh)
                                         p_tr.append(_nt_sh)
-                                clip_sz_u = 112.0 if getattr(api, "_regime_info", {}).get("mode", "MEDIUM") == "HIGH" else 96.0
+                                clip_sz_u = 112.0 if _reg_mode_p == "HIGH" else (48.0 if _reg_mode_p == "LOW" else 96.0)
                                 impulse_ok = (
                                     rem_2k_budget >= 20.0
                                     and free_map[f_key] >= 20.0
@@ -3619,7 +3620,7 @@ def main():
                                 max_sym_legs = 6
                                 max_buy_slots = 4
                             else:
-                                clip_sz_u = 120.0 if getattr(api, "_regime_info", {}).get("mode", "MEDIUM") == "HIGH" else 96.0
+                                clip_sz_u = 120.0 if _reg_mode_p == "HIGH" else (48.0 if _reg_mode_p == "LOW" else 96.0)
                                 if sym_p == "USDCUSDT":
                                     _uc_mid = 0.5 * (q_bbo["bid"] + q_bbo["ask"])
                                     api._uc_ema_1h = _uc_mid if not hasattr(api, "_uc_ema_1h") else (api._uc_ema_1h * 0.9997 + _uc_mid * 0.0003)
@@ -3683,10 +3684,10 @@ def main():
                             bpx_entry = None
                             u1_top_cnt = sum(1 for tx in p_tr if tx["buy_px"] >= q_bbo["bid"] - spec["tick"] * 1.5)
                             u1_below_ema = (q_bbo["bid"] <= getattr(api, "_u1_ema_1h", q_bbo["bid"]) + spec["tick"] * 1.5)
-                            uc_below_ema = (q_bbo["bid"] <= getattr(api, "_uc_ema_1h", q_bbo["bid"]) + spec["tick"] * 1.0)
+                            uc_below_ema = (q_bbo["bid"] <= getattr(api, "_uc_ema_1h", q_bbo["bid"]) + spec["tick"] * 2.0)
                             _n_ticks = 3 if _reg_mode_p == "HIGH" else 1
                             _cap_passes = (1, 2, 3) if _reg_mode_p == "HIGH" else (1, 2, 3, 4)
-                            lvl_range = (range(_n_ticks) if (sym_p == "USDCUSDT" and uc_below_ema) else (range(1, 3) if sym_p == "USDCUSDT" else (range(_n_ticks) if (u1_top_cnt < 4 and u1_below_ema) else range(1, 3))))
+                            lvl_range = (range(_n_ticks) if (sym_p == "USDCUSDT" and uc_below_ema) else (range(1, 2) if sym_p == "USDCUSDT" else (range(_n_ticks) if (u1_top_cnt < 4 and u1_below_ema) else range(1, 2))))
                             for _cap_pass in _cap_passes:
                                 for _st_lvl in lvl_range:
                                     cand_bpx = round(top_bpx_ref - spec["tick"] * _st_lvl, spec["dec"])
