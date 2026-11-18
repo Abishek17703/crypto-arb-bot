@@ -1388,7 +1388,7 @@ def compute_composite_regime(api, bbos, fills_1h, p_5m, p_15m):
     raw_score = s_vol + s_tr + s_turn + s_rng + s_bot
     score = int(round(prev_reg.get("score", raw_score) * 0.70 + raw_score * 0.30)) if prev_reg.get("ts", 0) > 0 else int(round(raw_score))
     old_m = prev_reg.get("mode", "MEDIUM")
-    mode_since = prev_reg.get("mode_since", now_t - 180.0)
+    mode_since = prev_reg.get("mode_since", now_t)
     fills_fpm = fills_1h / 60.0
     _stuck_n = getattr(api, "_live_stuck_cnt", 0)
     _eq_15m = getattr(api, "_live_15m_eq", 0.0)
@@ -1398,8 +1398,16 @@ def compute_composite_regime(api, bbos, fills_1h, p_5m, p_15m):
         raw_m = "MEDIUM"
     else:
         raw_m = "LOW"
-    # Enforce 180s (3-min) hold timer, except immediate step-down from HIGH if stuck >= 4
-    if raw_m != old_m and ((now_t - mode_since) >= 180.0 or (old_m == "HIGH" and _stuck_n >= 4)):
+    _h_since = getattr(api, "_high_since_ts", 0.0)
+    if raw_m == "HIGH":
+        if _h_since <= 0.0:
+            _h_since = now_t
+    else:
+        _h_since = 0.0
+    api._high_since_ts = _h_since
+    _high_ready = (_h_since > 0.0 and (now_t - _h_since) >= 180.0)
+    # Require 3 continuous minutes of HIGH fills before borrowing $1,800; allow immediate step-down if stuck >= 4
+    if raw_m != old_m and ((raw_m == "HIGH" and _high_ready) or (raw_m != "HIGH" and (now_t - mode_since) >= 180.0) or (old_m == "HIGH" and _stuck_n >= 4)):
         if (old_m == "HIGH" and raw_m == "LOW") or (old_m == "LOW" and raw_m == "HIGH"):
             mode = "MEDIUM"
         else:
