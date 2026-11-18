@@ -105,6 +105,21 @@ func sendSignedTx(id string, dbg string, build func(*types.TransactOpts) (uint8,
 	if err != nil {
 		return err
 	}
+	// Fast-path: send directly over already-open TCP_NODELAY WebSocket (<1ms non-blocking write!)
+	wsMu.Lock()
+	c := ltConn
+	var wsErr error
+	if c != nil {
+		wsErr = c.WriteJSON(map[string]any{
+			"type": "jsonapi/sendtx",
+			"data": map[string]any{"id": id, "tx_type": txType, "tx_info": txInfo},
+		})
+	}
+	wsMu.Unlock()
+	if c != nil && wsErr == nil {
+		fmt.Printf("[WS_TX %s %s] %dus\n", id, dbg, time.Since(t0).Microseconds())
+		return nil
+	}
 	form := url.Values{}
 	form.Set("tx_type", strconv.Itoa(int(txType)))
 	form.Set("tx_info", txInfo)
@@ -298,6 +313,13 @@ func syncAccountLoop() {
 				} `json:"accounts"`
 			}
 			if json.Unmarshal(body, &res) == nil && len(res.Accounts) > 0 {
+				var rawObj struct {
+					Accounts []json.RawMessage `json:"accounts"`
+				}
+				if json.Unmarshal(body, &rawObj) == nil && len(rawObj.Accounts) > 0 {
+					_ = os.WriteFile("/tmp/lighter_acct.json.tmp", rawObj.Accounts[0], 0644)
+					_ = os.Rename("/tmp/lighter_acct.json.tmp", "/tmp/lighter_acct.json")
+				}
 				a := res.Accounts[0]
 				eq, _ := strconv.ParseFloat(a.TotalAssetValue, 64)
 				if eq <= 0 {
@@ -352,6 +374,14 @@ func runLtWS() {
 			_, msg, err := conn.ReadMessage()
 			if err != nil {
 				break
+			}
+			if strings.Contains(string(msg), `"error"`) || (strings.Contains(string(msg), `"code":`) && !strings.Contains(string(msg), `"code":200`)) {
+				fmt.Printf("[WS_RESP] %s\n", string(msg))
+				if strings.Contains(string(msg), "invalid nonce") {
+					if n, e2 := txCli.HTTP().GetNextNonce(AcctIdx, KeyIdx); e2 == nil {
+						nonceSeq.Store(n)
+					}
+				}
 			}
 			var m struct {
 				Channel   string `json:"channel"`
