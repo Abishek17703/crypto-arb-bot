@@ -1868,7 +1868,7 @@ def main():
     api._cm_swarm_paused = False
     api._v13_spot_perp_only = False
 
-    def _boot_lighter_tokyo():
+    def _boot_lighter_tokyo():  # v2: HTTP/2 keep-alive sendTx
         import subprocess
         logf = open("/tmp/lighter_tokyo.log", "w")
         try:
