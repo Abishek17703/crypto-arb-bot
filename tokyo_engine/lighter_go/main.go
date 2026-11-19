@@ -400,10 +400,14 @@ func manageCoin(sym string) {
 	ae := avgEntry[sym]
 	stepBps := closeStepBps(sym)
 
-	// 2. Closing orders (with time-based breakeven step-down, or 2:1 BTC trend TP36/SL18)
+	// 2. Closing orders (with time-based breakeven step-down, 35bps maker SL, or 18bps BTC trend SL)
 	if posUSD <= -5.0 && ae > 0 {
-		if trendMode[sym] && mid >= ae*(1.0+18.0/10000.0) {
-			// BTC trend-start -18 bps immediate IOC stop-out
+		slBps := 35.0
+		if trendMode[sym] {
+			slBps = 18.0
+		}
+		if mid >= ae*(1.0+slBps/10000.0) {
+			// Immediate IOC stop-out
 			if activeOrds[sym+"_BID"] == nil && now.Sub(lastOrdTS[sym+"_BID"]) >= 3*time.Second {
 				lastOrdTS[sym+"_BID"] = now
 				placeSide(sym, "BID", roundTo(la*1.005, m.PxDec), mid, math.Abs(pos), true, true)
@@ -442,7 +446,11 @@ func manageCoin(sym string) {
 	}
 
 	if posUSD >= 5.0 && ae > 0 {
-		if trendMode[sym] && mid <= ae*(1.0-18.0/10000.0) {
+		slBps := 35.0
+		if trendMode[sym] {
+			slBps = 18.0
+		}
+		if mid <= ae*(1.0-slBps/10000.0) {
 			if activeOrds[sym+"_ASK"] == nil && now.Sub(lastOrdTS[sym+"_ASK"]) >= 3*time.Second {
 				lastOrdTS[sym+"_ASK"] = now
 				placeSide(sym, "ASK", roundTo(lb*0.995, m.PxDec), mid, math.Abs(pos), true, true)
