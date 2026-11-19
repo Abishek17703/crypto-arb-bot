@@ -94,10 +94,10 @@
     @media (max-width: 768px) {
       .wrap { padding: 0.75rem; }
       .controls, .desktop-only { display: none; }
-      .hero { padding: 1rem 1.05rem; align-items: center; }
-      .hero-eq { font-size: 1.85rem; }
-      .hero-right { text-align: left; }
-      .hero-pnl { font-size: 1.25rem; }
+      .hero { padding: 1rem 1.05rem; align-items: flex-start; flex-wrap: nowrap; }
+      .hero-eq { font-size: 1.55rem; }
+      .hero-right { text-align: right; flex-shrink: 0; }
+      .hero-pnl { font-size: 1.15rem; }
       .hero-sub { font-size: 0.74rem; gap: 0.55rem; }
       .sec-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.6rem; }
       .sec-card.span-2 { grid-column: span 2; }
@@ -419,7 +419,7 @@
         <td class="mono"><b>${c.sym}</b></td>
         <td><span class="badge" style="font-size:0.62rem;padding:0.1rem 0.4rem;">CLOSED</span> <span class="${c.side === "LONG" ? "pos" : "neg"}" style="font-size:0.72rem;">${c.side}</span></td>
         <td class="mono">${c.sz.toFixed(4)}</td>
-        <td class="mono">${c.entry === null ? "prev" : "$" + c.entry.toFixed(2)}→$${c.exit.toFixed(2)}</td>
+        <td class="mono">${c.entry === null ? "prev" : "$" + c.entry.toFixed(2)}</td>
         <td class="mono" style="color:var(--muted);">${tgt === null ? "—" : "$" + tgt.toFixed(2)}</td>
         <td class="mono" style="color:var(--muted);">${fmtIST(c.ts)} IST</td>
         <td class="mono ${c.pnl === null ? "" : colorCls(c.pnl)}">${c.pnl === null ? "—" : fmtSigned(c.pnl, 4)}</td>
