@@ -28,7 +28,7 @@ const (
 	KeyIdx       = uint8(4)
 	ChainID      = uint32(304)
 	PrivKey      = "56491130b44362b137b0a3b46dc63d647865876f11ff1613c857f946ec8612f6e4f216d065f4695a"
-	ClipUSD      = 10.60
+	ClipUSD      = 11.00
 	EdgeBps      = 7.5 // High-selectivity 7.5 bps entry around microprice
 	CancelBps    = 1.0 // Instant 1.0 bps anti-trend cancel shield
 	ObiLimit     = 0.45 // Block toxic-flow side when |OBI| > 0.45
@@ -407,14 +407,18 @@ func manageCoin(sym string) {
 	ae := avgEntry[sym]
 	stepBps := closeStepBps(sym)
 
-	// 2. Closing orders (with time-based breakeven step-down, 35bps maker SL, or 18bps BTC trend SL)
-	if posUSD <= -5.0 && ae > 0 {
+	// 2. Closing orders (sub-$10.10 partials use 0%-fee IOC to avoid 21706 min_quote rejection)
+	if pos <= -m.MinB && ae > 0 {
 		slBps := 35.0
 		if trendMode[sym] {
 			slBps = 18.0
 		}
-		if mid >= ae*(1.0+slBps/10000.0) {
-			// Immediate IOC stop-out
+		if posUSD > -10.10 {
+			if (mid <= ae*(1.0-stepBps/10000.0) || mid >= ae*(1.0+slBps/10000.0)) && activeOrds[sym+"_BID"] == nil && now.Sub(lastOrdTS[sym+"_BID"]) >= 15*time.Second {
+				lastOrdTS[sym+"_BID"] = now
+				placeSide(sym, "BID", roundTo(la*1.005, m.PxDec), mid, math.Abs(pos), true, true)
+			}
+		} else if mid >= ae*(1.0+slBps/10000.0) {
 			if activeOrds[sym+"_BID"] == nil && now.Sub(lastOrdTS[sym+"_BID"]) >= 3*time.Second {
 				lastOrdTS[sym+"_BID"] = now
 				placeSide(sym, "BID", roundTo(la*1.005, m.PxDec), mid, math.Abs(pos), true, true)
@@ -432,7 +436,7 @@ func manageCoin(sym string) {
 				placeSide(sym, "BID", wantBid, mid, math.Abs(pos), true, false)
 			}
 		}
-	} else if posUSD < 5.0 && (bidSafe || btcTrendBuy) {
+	} else if math.Abs(posUSD) < 1.0 && (bidSafe || btcTrendBuy) {
 		if btcTrendBuy {
 			trendMode[sym] = true
 			if activeOrds[sym+"_BID"] == nil && now.Sub(lastOrdTS[sym+"_BID"]) >= 5*time.Second {
@@ -452,12 +456,17 @@ func manageCoin(sym string) {
 		}
 	}
 
-	if posUSD >= 5.0 && ae > 0 {
+	if pos >= m.MinB && ae > 0 {
 		slBps := 35.0
 		if trendMode[sym] {
 			slBps = 18.0
 		}
-		if mid <= ae*(1.0-slBps/10000.0) {
+		if posUSD < 10.10 {
+			if (mid >= ae*(1.0+stepBps/10000.0) || mid <= ae*(1.0-slBps/10000.0)) && activeOrds[sym+"_ASK"] == nil && now.Sub(lastOrdTS[sym+"_ASK"]) >= 15*time.Second {
+				lastOrdTS[sym+"_ASK"] = now
+				placeSide(sym, "ASK", roundTo(lb*0.995, m.PxDec), mid, math.Abs(pos), true, true)
+			}
+		} else if mid <= ae*(1.0-slBps/10000.0) {
 			if activeOrds[sym+"_ASK"] == nil && now.Sub(lastOrdTS[sym+"_ASK"]) >= 3*time.Second {
 				lastOrdTS[sym+"_ASK"] = now
 				placeSide(sym, "ASK", roundTo(lb*0.995, m.PxDec), mid, math.Abs(pos), true, true)
@@ -475,7 +484,7 @@ func manageCoin(sym string) {
 				placeSide(sym, "ASK", wantAsk, mid, math.Abs(pos), true, false)
 			}
 		}
-	} else if posUSD > -5.0 && (askSafe || btcTrendSell) {
+	} else if math.Abs(posUSD) < 1.0 && (askSafe || btcTrendSell) {
 		if btcTrendSell {
 			trendMode[sym] = true
 			if activeOrds[sym+"_ASK"] == nil && now.Sub(lastOrdTS[sym+"_ASK"]) >= 5*time.Second {
@@ -505,7 +514,7 @@ func manageCoin(sym string) {
 func syncAccountLoop() {
 	hc := &http.Client{Timeout: 6 * time.Second}
 	url := fmt.Sprintf("%s/api/v1/account?by=index&value=%d", BaseURL, AcctIdx)
-	trUrl := fmt.Sprintf("%s/api/v1/trades?account_index=%d&limit=30&sort_by=timestamp", BaseURL, AcctIdx)
+	trUrl := fmt.Sprintf("%s/api/v1/trades?account_index=%d&limit=100&sort_by=timestamp", BaseURL, AcctIdx)
 	loopCnt := 0
 	for {
 		loopCnt++
@@ -549,6 +558,7 @@ func syncAccountLoop() {
 				if eq <= 0 {
 					eq, _ = strconv.ParseFloat(a.Collateral, 64)
 				}
+				orphanLeak := false
 				mu.Lock()
 				if eq > 0 {
 					eqNow = eq
@@ -569,6 +579,9 @@ func syncAccountLoop() {
 							posOpenTS[sym] = time.Time{}
 							trendMode[sym] = false
 						}
+						if p.OpenOrderCount > 2 {
+							orphanLeak = true
+						}
 						if p.OpenOrderCount == 0 || math.Abs(sz-prevPos) > 1e-6 {
 							for _, s := range []string{"BID", "ASK"} {
 								if ao := activeOrds[sym+"_"+s]; ao != nil && time.Since(ao.TS) > 2*time.Second {
@@ -579,6 +592,12 @@ func syncAccountLoop() {
 					}
 				}
 				mu.Unlock()
+				if orphanLeak {
+					if n, e2 := txCli.HTTP().GetNextNonce(AcctIdx, KeyIdx); e2 == nil {
+						nonceSeq.Store(n)
+					}
+					cancelAll()
+				}
 				if eq > 0 && eq <= StopEqUSD {
 					fmt.Printf("[STOP-LOSS] Equity $%.4f <= $%.2f, closing & halting!\n", eq, StopEqUSD)
 					useWsSend = false
@@ -742,6 +761,13 @@ func runLtWS() {
 							delete(bookBids[sym], b.Price)
 						} else {
 							bookBids[sym][b.Price] = sz
+							if bp, err := strconv.ParseFloat(b.Price, 64); err == nil {
+								for apStr := range bookAsks[sym] {
+									if ap, e2 := strconv.ParseFloat(apStr, 64); e2 == nil && ap <= bp {
+										delete(bookAsks[sym], apStr)
+									}
+								}
+							}
 						}
 					}
 					for _, a := range m.OrderBook.Asks {
@@ -750,6 +776,13 @@ func runLtWS() {
 							delete(bookAsks[sym], a.Price)
 						} else {
 							bookAsks[sym][a.Price] = sz
+							if ap, err := strconv.ParseFloat(a.Price, 64); err == nil {
+								for bpStr := range bookBids[sym] {
+									if bp, e2 := strconv.ParseFloat(bpStr, 64); e2 == nil && bp >= ap {
+										delete(bookBids[sym], bpStr)
+									}
+								}
+							}
 						}
 					}
 					recomputeBBO(sym)
