@@ -203,8 +203,8 @@
 
     let seedUsd = parseFloat(localStorage.getItem(SEED_KEY) || "100.00");
     document.getElementById("seedInput").value = seedUsd.toFixed(2);
-    let savedHist = JSON.parse(localStorage.getItem(STORE_KEY) || "[]").filter(x => x.t > LAST_SEED_TS);
-    let eqHist = [...HIST_SEED_PTS, ...savedHist];
+    let savedHist = JSON.parse(localStorage.getItem(STORE_KEY) || "[]");
+    let eqHist = savedHist.length ? savedHist : [...HIST_SEED_PTS];
     let lossStats = JSON.parse(localStorage.getItem(LOSS_KEY) || "null") || {...HIST_LOSS_INIT};
     let rrBase = JSON.parse(localStorage.getItem(RR_KEY) || "null");
     let didInitialScroll = false;
@@ -218,9 +218,11 @@
       }
     }
     function resetHistory() {
-      eqHist = [...HIST_SEED_PTS];
-      lossStats = {...HIST_LOSS_INIT};
-      localStorage.setItem(STORE_KEY, "[]");
+      const curEq = lastData ? parseFloat(lastData.total_asset_value ?? lastData.collateral ?? seedUsd) : seedUsd;
+      const now = Date.now();
+      eqHist = [{ t: now, v: curEq }];
+      lossStats = { lastCol: lastData ? parseFloat(lastData.collateral ?? curEq) : curEq, lossSum: 0, lossCnt: 0 };
+      localStorage.setItem(STORE_KEY, JSON.stringify(eqHist));
       localStorage.setItem(LOSS_KEY, JSON.stringify(lossStats));
       render();
     }
