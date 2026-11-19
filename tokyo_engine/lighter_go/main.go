@@ -48,8 +48,8 @@ type Market struct {
 }
 
 var markets = map[string]Market{
-	"ETH":  {Sym: "ETH", ID: 0, SzDec: 4, PxDec: 2, MinB: 0.0020, AllowEntry: true, ClipUSD: 65.0},
-	"BTC":  {Sym: "BTC", ID: 1, SzDec: 5, PxDec: 1, MinB: 0.00007, AllowEntry: true, ClipUSD: 135.0},
+	"ETH":  {Sym: "ETH", ID: 0, SzDec: 4, PxDec: 2, MinB: 0.0020, AllowEntry: true, ClipUSD: 45.0},
+	"BTC":  {Sym: "BTC", ID: 1, SzDec: 5, PxDec: 1, MinB: 0.00007, AllowEntry: true, ClipUSD: 75.0},
 	"SOL":  {Sym: "SOL", ID: 2, SzDec: 3, PxDec: 3, MinB: 0.055, AllowEntry: false, ClipUSD: 12.0},
 	"HYPE": {Sym: "HYPE", ID: 24, SzDec: 2, PxDec: 4, MinB: 0.07, AllowEntry: false, ClipUSD: 12.0},
 	"ZEC":  {Sym: "ZEC", ID: 90, SzDec: 3, PxDec: 3, MinB: 0.004, AllowEntry: false, ClipUSD: 12.0},
@@ -71,11 +71,14 @@ type MarketState struct {
 	bnMid       float64
 	bnMicro     float64
 	bnObi       float64
-	emaFast     float64
-	emaSlow     float64
-	lastEmaTS   time.Time
-	basisBps    float64
-	lastBasisTS time.Time
+	emaUltra      float64
+	emaFast       float64
+	emaSlow       float64
+	lastEmaTS     time.Time
+	basisBps      float64
+	lastBasisTS   time.Time
+	dropCoolUntil time.Time
+	pumpCoolUntil time.Time
 	bookBids    map[string]float64
 	bookAsks    map[string]float64
 	ltBid       float64
@@ -480,11 +483,20 @@ func manageCoin(sym string) {
 	tick := math.Pow10(-m.PxDec)
 	now := time.Now()
 
-	ef, es := st.emaFast, st.emaSlow
-	trendBps, impBps := 0.0, 0.0
+	ef, es, eu := st.emaFast, st.emaSlow, st.emaUltra
+	trendBps, impBps, vel3sBps := 0.0, 0.0, 0.0
 	if ef > 0 && es > 0 {
 		trendBps = (ef - es) / es * 10000.0
 		impBps = (mid - ef) / ef * 10000.0
+	}
+	if eu > 0 {
+		vel3sBps = (mid - eu) / eu * 10000.0
+		if vel3sBps <= -2.5 {
+			st.dropCoolUntil = now.Add(30 * time.Second)
+		}
+		if vel3sBps >= 2.5 {
+			st.pumpCoolUntil = now.Add(30 * time.Second)
+		}
 	}
 	ltMid := 0.5 * (lb + la)
 	instBasis := (ltMid - mid) / mid * 10000.0
@@ -498,16 +510,12 @@ func manageCoin(sym string) {
 	}
 	fairLt := micro * (1.0 + st.basisBps/10000.0)
 
-	// High-quality entry filters: Calm-market band (|trendBps|<=1.0, |impBps|<=1.0) + OBI (0.25) + dynamic correlated net cap (0.85x eq)
-	curEq := float64(eqNow.Load()) / 1e6
-	if curEq < 50.0 {
-		curEq = 100.0
-	}
-	netCap := curEq * 0.85
+	// Anti-Drop Shield: strict $15 correlated single-direction lock + 3s falling-knife breaker
+	netCap := 15.0
 	inCool := now.Before(st.stopCoolUntil) || now.Sub(st.lastFillTS) < 8*time.Second
-	calmMkt := math.Abs(trendBps) <= 2.5 && math.Abs(impBps) <= 2.5
-	bidSafe := m.AllowEntry && !inCool && calmMkt && obi >= -ObiLimit && netUSD < netCap
-	askSafe := m.AllowEntry && !inCool && calmMkt && obi <= ObiLimit && netUSD > -netCap
+	calmMkt := math.Abs(trendBps) <= 2.2 && math.Abs(impBps) <= 2.0
+	bidSafe := m.AllowEntry && !inCool && now.After(st.dropCoolUntil) && vel3sBps > -2.0 && calmMkt && obi >= -ObiLimit && netUSD < netCap
+	askSafe := m.AllowEntry && !inCool && now.After(st.pumpCoolUntil) && vel3sBps < 2.0 && calmMkt && obi <= ObiLimit && netUSD > -netCap
 
 	// BTC Trend-Start breakout (18 bps) vs 0%-fee Stale-Quote IOC Snipe (>= 5 bps lag vs fairLt, fast 3.5bps scalp!)
 	staleSnipeBuy := m.AllowEntry && !inCool && math.Abs(posUSD) < 1.0 && netUSD < netCap && (fairLt-la)/la*10000.0 >= 5.0 && obi >= 0.25
@@ -564,13 +572,13 @@ func manageCoin(sym string) {
 
 	// 2. Closing orders: GTT instant cross + Defensive Lead-Lag Bailout + 180s time-scratch
 	if pos <= -m.MinB && ae > 0 {
-		slBps := 20.0
+		slBps := 14.0
 		if st.trendMode {
-			slBps = 18.0
+			slBps = 16.0
 		} else if holdS >= 150.0 {
-			slBps = 12.0
+			slBps = 10.0
 		}
-		defBailShort := (fairLt-la)/la*10000.0 >= 4.5 && la <= ae*(1.0+8.0/10000.0)
+		defBailShort := ((fairLt-la)/la*10000.0 >= 4.0 && la <= ae*(1.0+8.0/10000.0)) || (vel3sBps >= 5.0 && mid > ae)
 		timeScratchShort := !st.trendMode && holdS >= 180.0 && la <= ae*(1.0+8.0/10000.0)
 		if posUSD > -10.10 {
 			if (fairLt <= ae*(1.0-stepBps/10000.0) || mid >= ae*(1.0+slBps/10000.0) || defBailShort || timeScratchShort) && st.activeOrds["BID"] == nil && now.Sub(st.lastOrdTS["BID"]) >= 5*time.Second && takeWriteSlot(true) {
@@ -626,13 +634,13 @@ func manageCoin(sym string) {
 	}
 
 	if pos >= m.MinB && ae > 0 {
-		slBps := 20.0
+		slBps := 14.0
 		if st.trendMode {
-			slBps = 18.0
+			slBps = 16.0
 		} else if holdS >= 150.0 {
-			slBps = 12.0
+			slBps = 10.0
 		}
-		defBailLong := (lb-fairLt)/lb*10000.0 >= 4.5 && lb >= ae*(1.0-8.0/10000.0)
+		defBailLong := ((lb-fairLt)/lb*10000.0 >= 4.0 && lb >= ae*(1.0-8.0/10000.0)) || (vel3sBps <= -5.0 && mid < ae)
 		timeScratchLong := !st.trendMode && holdS >= 180.0 && lb >= ae*(1.0-8.0/10000.0)
 		if posUSD < 10.10 {
 			if (fairLt >= ae*(1.0+stepBps/10000.0) || mid <= ae*(1.0-slBps/10000.0) || defBailLong || timeScratchLong) && st.activeOrds["ASK"] == nil && now.Sub(st.lastOrdTS["ASK"]) >= 5*time.Second && takeWriteSlot(true) {
@@ -759,7 +767,7 @@ func rebalanceFromTrades(tb []byte) {
 	if curEq < 50.0 {
 		curEq = 100.0
 	}
-	totBudget := curEq * 2.0 // Dynamic 2.0x auto-compounding notional (~10% of 20x margin, no cap!)
+	totBudget := curEq * 1.2 // Smooth 1.2x auto-compounding notional (~$75 BTC / ~$45 ETH, max -$0.10 SL)
 	diff := math.Max(-0.5, math.Min(0.5, pnl["BTC"]-pnl["ETH"]))
 	btcShare := math.Max(0.50, math.Min(0.75, 0.65+diff*0.20))
 	btcClip := totBudget * btcShare
@@ -1220,6 +1228,7 @@ func runBnWS() {
 					st.bnMicro = microVal
 					st.netMicroUSD.Store(int64(st.pos * mVal * 1e6))
 					if st.emaFast == 0 {
+						st.emaUltra = mVal
 						st.emaFast = mVal
 						st.emaSlow = mVal
 						st.bnObi = obiVal
@@ -1227,6 +1236,7 @@ func runBnWS() {
 					} else {
 						dt := math.Min(5.0, math.Max(0.001, now.Sub(st.lastEmaTS).Seconds()))
 						st.lastEmaTS = now
+						st.emaUltra += (1.0 - math.Exp(-dt/3.0)) * (mVal - st.emaUltra)
 						st.emaFast += (1.0 - math.Exp(-dt/20.0)) * (mVal - st.emaFast)
 						st.emaSlow += (1.0 - math.Exp(-dt/180.0)) * (mVal - st.emaSlow)
 						st.bnObi += (1.0 - math.Exp(-dt/3.0)) * (obiVal - st.bnObi)
