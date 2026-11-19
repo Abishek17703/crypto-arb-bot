@@ -1,0 +1,453 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Lighter Live</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg: #080c14;
+      --card: #101724;
+      --card-2: #0c121d;
+      --border: #1d293d;
+      --text: #f8fafc;
+      --muted: #8b9bb4;
+      --green: #10b981;
+      --red: #ef4444;
+    }
+    html, body {
+      min-height: 100vh;
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Inter, Arial, sans-serif;
+      -webkit-font-smoothing: antialiased;
+    }
+    .wrap { max-width: 72rem; margin: 0 auto; padding: 1.25rem; }
+    .mono { font-family: ui-monospace, SFMono-Regular, monospace; font-variant-numeric: tabular-nums; }
+    .pos { color: var(--green); }
+    .neg { color: var(--red); }
+
+    /* Top Bar */
+    .topbar {
+      display: flex; justify-content: space-between; align-items: center; gap: 0.75rem;
+      margin-bottom: 1rem; flex-wrap: wrap;
+    }
+    .brand { display: flex; align-items: center; gap: 0.55rem; font-weight: 700; font-size: 1.05rem; }
+    .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--green); box-shadow: 0 0 8px var(--green); }
+    .badge {
+      font-size: 0.68rem; font-weight: 600; padding: 0.18rem 0.55rem; border-radius: 999px;
+      background: rgba(16,185,129,0.12); color: var(--green); border: 1px solid rgba(16,185,129,0.28);
+    }
+    .controls { display: flex; align-items: center; gap: 0.45rem; }
+    .seed-input {
+      width: 76px; background: var(--card); border: 1px solid var(--border); color: var(--text);
+      border-radius: 0.45rem; padding: 0.28rem 0.45rem; font-size: 0.8rem;
+    }
+    .btn {
+      background: var(--card); border: 1px solid var(--border); color: var(--muted);
+      border-radius: 0.45rem; padding: 0.3rem 0.6rem; font-size: 0.75rem; cursor: pointer;
+    }
+    .btn:hover { color: var(--text); border-color: #334155; }
+
+    /* Tier 1: Hero Card */
+    .hero {
+      background: linear-gradient(135deg, #111a2b 0%, #0d1422 100%);
+      border: 1px solid #26354d; border-radius: 1.1rem; padding: 1.35rem 1.5rem;
+      margin-bottom: 1rem;
+      display: flex; justify-content: space-between; align-items: flex-end; gap: 1rem; flex-wrap: wrap;
+    }
+    .hero-lbl { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); font-weight: 600; }
+    .hero-eq { font-size: 2.5rem; font-weight: 800; line-height: 1.1; margin-top: 0.25rem; letter-spacing: -0.02em; }
+    .hero-sub { font-size: 0.82rem; color: var(--muted); margin-top: 0.5rem; display: flex; gap: 0.85rem; flex-wrap: wrap; }
+    .hero-right { text-align: right; }
+    .hero-pnl { font-size: 1.65rem; font-weight: 700; line-height: 1.1; margin-top: 0.25rem; }
+    .hero-roi { font-size: 0.78rem; color: var(--muted); margin-top: 0.35rem; }
+
+    /* Tier 2: Secondary Metrics */
+    .sec-grid {
+      display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0.85rem;
+      margin-bottom: 1rem;
+    }
+    .sec-card {
+      background: var(--card); border: 1px solid var(--border); border-radius: 0.85rem; padding: 0.9rem 1rem;
+    }
+    .lbl { font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); font-weight: 600; }
+    .sec-val { font-size: 1.2rem; font-weight: 700; margin-top: 0.25rem; }
+    .sec-sub { font-size: 0.75rem; color: var(--muted); margin-top: 0.2rem; }
+    .tf-row { display: flex; gap: 0.75rem; margin-top: 0.35rem; flex-wrap: wrap; font-size: 0.78rem; }
+
+    /* Tier 3: Chart & Positions */
+    .main-grid { display: grid; grid-template-columns: 1.15fr 1fr; gap: 1rem; }
+    .card {
+      min-width: 0;
+      background: var(--card); border: 1px solid var(--border); border-radius: 0.95rem; padding: 1.05rem;
+    }
+    .card-hd { display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.6rem; }
+    .chart-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; width: 100%; }
+    .chart-scroll svg { height: 185px; display: block; }
+    .tbl-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+    table { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
+    th, td { text-align: left; padding: 0.5rem 0.35rem; border-bottom: 1px solid var(--border); white-space: nowrap; }
+    th { color: var(--muted); font-weight: 600; font-size: 0.68rem; text-transform: uppercase; }
+
+    @media (max-width: 768px) {
+      .wrap { padding: 0.75rem; }
+      .controls, .desktop-only { display: none; }
+      .hero { padding: 1rem 1.05rem; align-items: center; }
+      .hero-eq { font-size: 1.85rem; }
+      .hero-right { text-align: left; }
+      .hero-pnl { font-size: 1.25rem; }
+      .hero-sub { font-size: 0.74rem; gap: 0.55rem; }
+      .sec-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.6rem; }
+      .sec-card.span-2 { grid-column: span 2; }
+      .sec-card { padding: 0.75rem 0.8rem; }
+      .sec-val { font-size: 1.05rem; }
+      .main-grid { grid-template-columns: 1fr; gap: 0.75rem; }
+      .chart-scroll svg { height: 135px; }
+      table { font-size: 0.74rem; }
+      th, td { padding: 0.42rem 0.25rem; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="topbar">
+      <div class="brand">
+        <span class="dot" id="liveDot"></span>
+        <span>Lighter Live</span>
+        <span class="badge" id="tierBadge">STANDARD • 0% FEE</span>
+        <span class="desktop-only mono" id="acctSub" style="font-size:0.75rem;color:var(--muted);font-weight:400;margin-left:0.4rem;">#770015</span>
+      </div>
+      <div class="controls">
+        <span class="lbl">Seed</span>
+        <input id="seedInput" class="seed-input mono" type="number" step="0.01" value="15.00" />
+        <button class="btn" onclick="saveSeed()">Save</button>
+        <button class="btn" onclick="resetHistory()">Reset</button>
+      </div>
+    </div>
+
+    <!-- Tier 1: Hero Equity & Run Rate -->
+    <div class="hero">
+      <div>
+        <div class="hero-lbl">Total Equity (USDC)</div>
+        <div class="hero-eq mono" id="eqVal">$--.--</div>
+        <div class="hero-sub mono" id="realSub">
+          <span>Net: $0.0000</span>
+          <span>Realized: $0.0000</span>
+          <span>Losses: -$0.0000</span>
+          <span>Open: $0.0000</span>
+        </div>
+      </div>
+      <div class="hero-right">
+        <div class="hero-lbl" style="display:inline-flex;align-items:center;gap:0.4rem;">
+          <span>Run Rate</span>
+          <button class="btn" id="rrBtn" onclick="refreshRunRate()" title="Refresh Run Rate" style="padding:0.1rem 0.38rem;font-size:0.7rem;line-height:1.1;">↻</button>
+        </div>
+        <div class="hero-pnl mono" id="hrRate">$0.0000/hr</div>
+        <div class="hero-roi mono" id="dayRate">$0.00/day</div>
+      </div>
+    </div>
+
+    <!-- Tier 2: Recent Windows -->
+    <div class="sec-grid" style="grid-template-columns:1fr;">
+      <div class="sec-card">
+        <div class="lbl">Recent Windows</div>
+        <div class="tf-row mono">
+          <span>5m <b id="tf5m">$0.000</b></span>
+          <span>15m <b id="tf15m">$0.000</b></span>
+          <span>1h <b id="tf1h">$0.000</b></span>
+          <span class="desktop-only">24h <b id="tf24h">$0.000</b></span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Tier 3: Equity Curve & Open Positions -->
+    <div class="main-grid">
+      <div class="card">
+        <div class="card-hd">
+          <div class="lbl">Equity Curve</div>
+          <div class="sec-sub mono desktop-only" id="chartRange" style="margin:0;">--</div>
+        </div>
+        <div class="chart-scroll" id="chartScroll">
+          <svg id="eqSvg" viewBox="0 0 600 185" preserveAspectRatio="none" style="width:100%;">
+            <line id="seedLine" x1="0" y1="92" x2="600" y2="92" stroke="#334155" stroke-width="1" stroke-dasharray="4 4" />
+            <polyline id="eqLine" fill="none" stroke="#10b981" stroke-width="2.5" points="0,92 600,92" />
+          </svg>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-hd">
+          <div class="lbl">Positions &amp; Orders</div>
+        </div>
+        <div class="tbl-wrap">
+          <table>
+            <thead><tr><th>Mkt</th><th>Side</th><th>Size</th><th>Entry</th><th>Ords / Time</th><th>uPnL</th></tr></thead>
+            <tbody id="posBody"><tr><td colspan="6" style="color:var(--muted);">No open positions or orders</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const ACCT_INDEX = 770015;
+    const API_URL = "https://crypto-arb-bot-tokyo-bin-767579108352.s3.ap-northeast-1.amazonaws.com/live-telemetry.json?t=";
+    const STORE_KEY = "lighter_eq_hist_v2_" + ACCT_INDEX;
+    const SEED_KEY = "lighter_seed_v2_" + ACCT_INDEX;
+    const LOSS_KEY = "lighter_loss_v2_" + ACCT_INDEX;
+    const RR_KEY = "lighter_rr_base_v1_" + ACCT_INDEX;
+    const HIST_SEED_PTS = [{"t":1795034533087,"v":15.0006},{"t":1795034732075,"v":15.0171},{"t":1795034751494,"v":15.0182},{"t":1795034793086,"v":15.0196},{"t":1795035300933,"v":15.0135},{"t":1795035534396,"v":15.0153},{"t":1795035544152,"v":15.0326},{"t":1795035605150,"v":15.0324},{"t":1795035664334,"v":15.0244},{"t":1795035847259,"v":15.0218},{"t":1795035880032,"v":15.026},{"t":1795035880133,"v":15.0111},{"t":1795035897212,"v":15.0128},{"t":1795035903922,"v":15.0178},{"t":1795035906576,"v":15.0175},{"t":1795035907246,"v":15.0197},{"t":1795035916786,"v":15.0202},{"t":1795035916956,"v":15.0206},{"t":1795035917538,"v":15.021},{"t":1795035917788,"v":15.0251},{"t":1795035954302,"v":15.0255},{"t":1795035997541,"v":15.0248},{"t":1795036004131,"v":15.025},{"t":1795036020036,"v":15.0268},{"t":1795036033599,"v":15.0276},{"t":1795036035084,"v":15.0294},{"t":1795036038877,"v":15.0298},{"t":1795036038939,"v":15.0298},{"t":1795036072191,"v":15.0284},{"t":1795036073132,"v":15.0267},{"t":1795036103073,"v":15.0185},{"t":1795036103625,"v":15.019},{"t":1795036111373,"v":15.0222},{"t":1795036119955,"v":15.027},{"t":1795036137802,"v":15.0235},{"t":1795036171572,"v":15.0214},{"t":1795036171774,"v":15.0251},{"t":1795036175139,"v":15.0251},{"t":1795036175185,"v":15.0255},{"t":1795036180286,"v":15.0241},{"t":1795036184513,"v":15.0242},{"t":1795036184700,"v":15.0243},{"t":1795036185482,"v":15.025},{"t":1795036202994,"v":15.0317},{"t":1795036203636,"v":15.0322},{"t":1795036204417,"v":15.0324},{"t":1795036207813,"v":15.0326},{"t":1795036207854,"v":15.0342},{"t":1795036210783,"v":15.0352},{"t":1795036265811,"v":15.0308},{"t":1795036300173,"v":15.0253},{"t":1795036317957,"v":15.0196},{"t":1795036318118,"v":15.0243},{"t":1795036321493,"v":15.0239},{"t":1795036322857,"v":15.024},{"t":1795036364446,"v":15.0237},{"t":1795036364552,"v":15.0248},{"t":1795036364732,"v":15.0245},{"t":1795036366052,"v":15.0218},{"t":1795036377675,"v":15.0219},{"t":1795036398624,"v":15.0221},{"t":1795036401290,"v":15.0205},{"t":1795036445140,"v":15.0207},{"t":1795036463271,"v":15.0207},{"t":1795036469306,"v":15.0207},{"t":1795036535129,"v":15.0203},{"t":1795036543009,"v":15.0204},{"t":1795036543858,"v":15.0204},{"t":1795036558152,"v":15.0206},{"t":1795036574804,"v":15.0141},{"t":1795036582645,"v":15.0142},{"t":1795036583488,"v":15.0143},{"t":1795036584647,"v":15.0148},{"t":1795036623678,"v":15.0154},{"t":1795036691505,"v":14.9952},{"t":1795036692978,"v":14.9942},{"t":1795036700439,"v":14.9777},{"t":1795036715866,"v":14.9641},{"t":1795036720444,"v":14.9622},{"t":1795036723177,"v":14.9607},{"t":1795036726775,"v":14.9607},{"t":1795036764714,"v":14.9647},{"t":1795036783688,"v":14.962},{"t":1795036791534,"v":14.9587},{"t":1795036795307,"v":14.9583},{"t":1795036812850,"v":14.9623},{"t":1795036816008,"v":14.9623},{"t":1795036967687,"v":14.9645},{"t":1795037030734,"v":14.9666},{"t":1795037035911,"v":14.9689},{"t":1795037068766,"v":14.9727},{"t":1795037069450,"v":14.9749},{"t":1795037080008,"v":14.9805},{"t":1795037294535,"v":14.9892},{"t":1795037294633,"v":14.99},{"t":1795037526474,"v":15.0016},{"t":1795037527063,"v":14.9985},{"t":1795037527476,"v":14.9804},{"t":1795041604847,"v":14.9826},{"t":1795041608451,"v":14.9847},{"t":1795041618190,"v":14.988},{"t":1795041654467,"v":14.9941},{"t":1795041673050,"v":14.9952},{"t":1795041673944,"v":14.9964},{"t":1795041675834,"v":15.0132},{"t":1795041835008,"v":15.0134},{"t":1795041835008,"v":15.0153},{"t":1795041863340,"v":15.0181},{"t":1795041996383,"v":15.0298},{"t":1795042757109,"v":15.0299},{"t":1795042757109,"v":15.0324},{"t":1795043169030,"v":15.0327},{"t":1795043169510,"v":15.0361},{"t":1795043215014,"v":15.0362},{"t":1795043217539,"v":15.0382},{"t":1795043277255,"v":15.0403},{"t":1795043608023,"v":15.0424},{"t":1795044397098,"v":15.0445},{"t":1795045203206,"v":15.0466},{"t":1795045913819,"v":15.0488},{"t":1795046118747,"v":15.0509},{"t":1795046832627,"v":15.053},{"t":1795047783144,"v":15.0551},{"t":1795048829807,"v":15.0562},{"t":1795048830935,"v":15.0572},{"t":1795048831500,"v":15.0573},{"t":1795048873519,"v":15.0617},{"t":1795048940498,"v":15.066},{"t":1795049329424,"v":15.0682},{"t":1795049879873,"v":15.0703},{"t":1795049979321,"v":15.0706},{"t":1795049979479,"v":15.0747},{"t":1795050422417,"v":15.0769},{"t":1795050684257,"v":15.079},{"t":1795051028946,"v":15.0812},{"t":1795051239779,"v":15.0833},{"t":1795052433482,"v":15.0854},{"t":1795052527307,"v":15.0876},{"t":1795052887041,"v":15.0898},{"t":1795054444902,"v":15.0919},{"t":1795058627066,"v":15.094},{"t":1795058747901,"v":15.1027},{"t":1795058945591,"v":15.1048},{"t":1795059327482,"v":15.107},{"t":1795059423646,"v":15.1091},{"t":1795059442363,"v":15.1094},{"t":1795059442712,"v":15.1144},{"t":1795059442931,"v":15.1156},{"t":1795059463669,"v":15.0007},{"t":1795060291694,"v":15.0028},{"t":1795060291694,"v":15.0029},{"t":1795060446001,"v":15.0092},{"t":1795060802302,"v":15.0114},{"t":1795061235467,"v":15.0116},{"t":1795061235608,"v":15.0135},{"t":1795062121348,"v":15.0156},{"t":1795062121348,"v":15.0157},{"t":1795062238937,"v":15.0158},{"t":1795062239021,"v":15.0243},{"t":1795062510521,"v":15.0352}];
+    const LAST_SEED_TS = HIST_SEED_PTS[HIST_SEED_PTS.length - 1].t;
+    const HIST_LOSS_INIT = {"lastCol":15.035161,"lossSum":-0.276371,"lossCnt":36};
+
+    let seedUsd = parseFloat(localStorage.getItem(SEED_KEY) || "100.00");
+    document.getElementById("seedInput").value = seedUsd.toFixed(2);
+    let savedHist = JSON.parse(localStorage.getItem(STORE_KEY) || "[]").filter(x => x.t > LAST_SEED_TS);
+    let eqHist = [...HIST_SEED_PTS, ...savedHist];
+    let lossStats = JSON.parse(localStorage.getItem(LOSS_KEY) || "null") || {...HIST_LOSS_INIT};
+    let rrBase = JSON.parse(localStorage.getItem(RR_KEY) || "null");
+    let didInitialScroll = false;
+
+    function saveSeed() {
+      const v = parseFloat(document.getElementById("seedInput").value);
+      if (!isNaN(v) && v > 0) {
+        seedUsd = v;
+        localStorage.setItem(SEED_KEY, String(v));
+        render();
+      }
+    }
+    function resetHistory() {
+      eqHist = [...HIST_SEED_PTS];
+      lossStats = {...HIST_LOSS_INIT};
+      localStorage.setItem(STORE_KEY, "[]");
+      localStorage.setItem(LOSS_KEY, JSON.stringify(lossStats));
+      render();
+    }
+    function fmtSigned(v, dec = 4) {
+      return `${v >= 0 ? "+" : "-"}$${Math.abs(v).toFixed(dec)}`;
+    }
+    function colorCls(v) { return v >= 0 ? "pos" : "neg"; }
+
+    function windowDelta(msAgo, nowTs, curEq) {
+      const targetTs = nowTs - msAgo;
+      let ref = eqHist.length ? eqHist[0] : null;
+      for (let i = eqHist.length - 1; i >= 0; i--) {
+        if (eqHist[i].t <= targetTs) { ref = eqHist[i]; break; }
+      }
+      return ref ? curEq - ref.v : 0;
+    }
+
+    let lastData = null;
+    let lastTrades = [];
+    const POS_TIMERS = {};
+    function fmtAgo(ms) {
+      if (!ms || ms < 0) return "0s";
+      const s = Math.floor(ms / 1000);
+      if (s < 60) return `${s}s`;
+      const m = Math.floor(s / 60);
+      if (m < 60) return `${m}m ${s % 60}s`;
+      const h = Math.floor(m / 60);
+      return `${h}h ${m % 60}m`;
+    }
+    function pairClosedTrades(trades, positions) {
+      const sorted = [...trades].sort((a, b) => (a.timestamp - b.timestamp) || (a.trade_id - b.trade_id));
+      const realPos = {};
+      for (const p of (positions || [])) {
+        const sym = p.symbol || ("MKT-" + p.market_id);
+        const r = parseFloat(p.position || 0);
+        realPos[sym] = (p.sign !== undefined && p.sign < 0 && r > 0) ? -r : r;
+      }
+      const net = {};
+      for (const t of sorted) {
+        const sym = t.market_symbol || ("MKT-" + t.market_id);
+        const sz = parseFloat(t.size || 0);
+        net[sym] = (net[sym] || 0) + (t.bid_account_id === ACCT_INDEX ? sz : -sz);
+      }
+      const pos = {}, cost = {}, closed = [];
+      for (const sym of Object.keys(net)) {
+        const s0 = (realPos[sym] || 0) - net[sym];
+        pos[sym] = Math.abs(s0) < 1e-8 ? 0 : s0;
+        cost[sym] = Math.abs(s0) < 1e-8 ? 0 : null;
+      }
+      for (const t of sorted) {
+        const sym = t.market_symbol || ("MKT-" + t.market_id);
+        const sz = parseFloat(t.size || 0), px = parseFloat(t.price || 0);
+        const dq = (t.bid_account_id === ACCT_INDEX) ? sz : -sz;
+        const p0 = pos[sym] || 0, c0 = cost[sym];
+        if (Math.abs(p0) < 1e-8 || (p0 > 0 && dq > 0) || (p0 < 0 && dq < 0)) {
+          pos[sym] = p0 + dq;
+          cost[sym] = c0 === null ? null : c0 + dq * px;
+        } else {
+          const cq = Math.min(Math.abs(p0), Math.abs(dq));
+          if (cq > 1e-8) {
+            const avgIn = c0 === null ? null : Math.abs(c0 / p0);
+            const pnl = avgIn === null ? null : (p0 > 0 ? cq * (px - avgIn) : cq * (avgIn - px));
+            closed.push({ sym, side: p0 > 0 ? "LONG" : "SHORT", sz: cq, entry: avgIn, exit: px, pnl, ts: t.timestamp });
+          }
+          const rem = p0 + dq;
+          if (Math.abs(rem) < 1e-8) { pos[sym] = 0; cost[sym] = 0; }
+          else if ((p0 > 0 && rem > 0) || (p0 < 0 && rem < 0)) { pos[sym] = rem; cost[sym] = c0 === null ? null : rem * Math.abs(c0 / p0); }
+          else { pos[sym] = rem; cost[sym] = rem * px; }
+        }
+      }
+      return closed.reverse().slice(0, 8);
+    }
+    function render() {
+      if (!lastData) return;
+      const eq = parseFloat(lastData.total_asset_value ?? lastData.collateral ?? 0);
+      const col = parseFloat(lastData.collateral ?? 0);
+      const nowTs = Date.now();
+
+      const realPnl = col - seedUsd;
+      const unrealPnl = eq - col;
+      if (lossStats.lastCol !== null && col < lossStats.lastCol - 1e-6) {
+        lossStats.lossSum += (col - lossStats.lastCol);
+        lossStats.lossCnt += 1;
+      }
+      lossStats.lastCol = col;
+      localStorage.setItem(LOSS_KEY, JSON.stringify(lossStats));
+
+      const pnl = eq - seedUsd;
+      const roi = seedUsd > 0 ? ((pnl / seedUsd) * 100).toFixed(2) : "0.00";
+      document.getElementById("eqVal").textContent = `$${eq.toFixed(4)}`;
+      document.getElementById("realSub").innerHTML =
+        `<span>Net <b class="${colorCls(pnl)}">${fmtSigned(pnl, 4)} (${roi}%)</b></span>` +
+        `<span>Realized <b class="${colorCls(realPnl)}">${fmtSigned(realPnl, 4)}</b></span>` +
+        `<span>Losses <b class="neg">-$${Math.abs(lossStats.lossSum).toFixed(4)} (${lossStats.lossCnt})</b></span>` +
+        `<span>Open <b class="${colorCls(unrealPnl)}">${fmtSigned(unrealPnl, 4)}</b></span>`;
+
+      const d5m = windowDelta(5 * 60e3, nowTs, eq);
+      const d15m = windowDelta(15 * 60e3, nowTs, eq);
+      const d1h = windowDelta(60 * 60e3, nowTs, eq);
+      const d24h = windowDelta(24 * 3600e3, nowTs, eq);
+
+      const basePt = rrBase || (eqHist.length > 1 ? eqHist[0] : null);
+      const elapsedMs = basePt ? Math.max(nowTs - basePt.t, 0) : 0;
+      const elapsedHrs = Math.max(elapsedMs / 3600e3, 1 / 60);
+      const hrRate = !basePt || elapsedMs < 3000 ? 0 : (elapsedHrs >= 1.0 ? d1h : (eq - basePt.v) / elapsedHrs);
+      const hrEl = document.getElementById("hrRate");
+      hrEl.textContent = `${fmtSigned(hrRate, 4)}/hr`;
+      hrEl.className = "hero-pnl mono " + colorCls(hrRate);
+      document.getElementById("dayRate").textContent = `${fmtSigned(hrRate * 24, 2)}/day`;
+
+      for (const [id, val] of [["tf5m", d5m], ["tf15m", d15m], ["tf1h", d1h], ["tf24h", d24h]]) {
+        const el = document.getElementById(id);
+        el.textContent = fmtSigned(val, 3);
+        el.className = colorCls(val);
+      }
+
+      const allMkts = (lastData.positions || []).filter(p => Math.abs(parseFloat(p.position || 0)) > 0 || (p.open_order_count || 0) > 0);
+
+      const tier = lastData.account_type === 0 ? "STANDARD • 0% FEE" : "PREMIUM";
+      document.getElementById("tierBadge").textContent = tier;
+      document.getElementById("acctSub").textContent = `#${ACCT_INDEX} • ${new Date().toLocaleTimeString()}`;
+
+      if (eqHist.length >= 2) {
+        const sc = document.getElementById("chartScroll");
+        const svg = document.getElementById("eqSvg");
+        const atRight = sc.scrollLeft + sc.clientWidth >= sc.scrollWidth - 24;
+        const svgW = Math.max(sc.clientWidth || 560, eqHist.length * 6);
+        svg.setAttribute("viewBox", `0 0 ${svgW} 185`);
+        svg.style.width = `${svgW}px`;
+        const vals = eqHist.map(x => x.v);
+        const minV = Math.min(...vals, seedUsd), maxV = Math.max(...vals, seedUsd);
+        const span = Math.max(maxV - minV, 0.001);
+        const pts = eqHist.map((x, idx) => {
+          const px = (idx / (eqHist.length - 1)) * svgW;
+          const py = 172 - ((x.v - minV) / span) * 158;
+          return `${px.toFixed(1)},${py.toFixed(1)}`;
+        }).join(" ");
+        const seedY = (172 - ((seedUsd - minV) / span) * 158).toFixed(1);
+        const sLine = document.getElementById("seedLine");
+        sLine.setAttribute("x2", svgW);
+        sLine.setAttribute("y1", seedY);
+        sLine.setAttribute("y2", seedY);
+        const line = document.getElementById("eqLine");
+        line.setAttribute("points", pts);
+        line.setAttribute("stroke", pnl >= 0 ? "#10b981" : "#ef4444");
+        document.getElementById("chartRange").textContent = `$${minV.toFixed(4)} – $${maxV.toFixed(4)}`;
+        if (!didInitialScroll || atRight) {
+          sc.scrollLeft = sc.scrollWidth;
+          didInitialScroll = true;
+        }
+      }
+
+      const closedList = pairClosedTrades(lastTrades, lastData.positions);
+      const tbody = document.getElementById("posBody");
+      const openRows = allMkts.map(p => {
+        const sym = p.symbol || ("MKT-" + p.market_id);
+        const rawSz = parseFloat(p.position || 0);
+        const sz = (p.sign !== undefined && p.sign < 0 && rawSz > 0) ? -rawSz : rawSz;
+        const upnl = parseFloat(p.unrealized_pnl || 0);
+        const sideLbl = sz === 0 ? "QUOTE" : (sz > 0 ? "LONG" : "SHORT");
+        const ords = p.open_order_count || 0;
+        const stKey = `${sideLbl}_${ords}`;
+        if (!POS_TIMERS[sym] || POS_TIMERS[sym].key !== stKey) {
+          POS_TIMERS[sym] = { key: stKey, ts: nowTs };
+        }
+        const elapsed = fmtAgo(nowTs - POS_TIMERS[sym].ts);
+        return `<tr>
+          <td class="mono"><b>${sym}</b></td>
+          <td class="${sz === 0 ? "" : (sz > 0 ? "pos" : "neg")}">${sideLbl}</td>
+          <td class="mono">${Math.abs(sz)}</td>
+          <td class="mono">$${parseFloat(p.avg_entry_price || 0).toFixed(2)}</td>
+          <td class="mono">${ords} <span style="color:var(--muted);">· ${elapsed}</span></td>
+          <td class="mono ${colorCls(upnl)}">${fmtSigned(upnl, 4)}</td>
+        </tr>`;
+      });
+      const closedRows = closedList.map(c => `<tr>
+        <td class="mono"><b>${c.sym}</b></td>
+        <td><span class="badge" style="font-size:0.62rem;padding:0.1rem 0.4rem;">CLOSED</span> <span class="${c.side === "LONG" ? "pos" : "neg"}" style="font-size:0.72rem;">${c.side}</span></td>
+        <td class="mono">${c.sz.toFixed(4)}</td>
+        <td class="mono">${c.entry === null ? "prev" : "$" + c.entry.toFixed(2)}→$${c.exit.toFixed(2)}</td>
+        <td class="mono" style="color:var(--muted);">${fmtAgo(nowTs - c.ts)} ago</td>
+        <td class="mono ${c.pnl === null ? "" : colorCls(c.pnl)}">${c.pnl === null ? "—" : fmtSigned(c.pnl, 4)}</td>
+      </tr>`);
+      const rows = [...openRows, ...closedRows];
+      tbody.innerHTML = rows.length ? rows.join("") : '<tr><td colspan="6" style="color:var(--muted);">No open positions or orders</td></tr>';
+    }
+
+    async function poll() {
+      try {
+        const res = await fetch(API_URL + Date.now());
+        const data = await res.json();
+        const acct = data.lighterAccount || (data.accounts || [])[0];
+        if (data.lighterTrades) lastTrades = data.lighterTrades;
+        if (!acct) return;
+        lastData = acct;
+        const eq = parseFloat(acct.total_asset_value ?? acct.collateral ?? 0);
+        const now = Date.now();
+        if (!eqHist.length || now - eqHist[eqHist.length - 1].t >= 5000) {
+          eqHist.push({ t: now, v: eq });
+          if (eqHist.length > 2500) eqHist = eqHist.slice(-2500);
+          localStorage.setItem(STORE_KEY, JSON.stringify(eqHist.filter(x => x.t > LAST_SEED_TS)));
+        }
+        document.getElementById("liveDot").style.background = "#10b981";
+        render();
+      } catch (e) {
+        document.getElementById("liveDot").style.background = "#ef4444";
+      }
+    }
+
+    async function refreshRunRate() {
+      const btn = document.getElementById("rrBtn");
+      if (btn) btn.textContent = "…";
+      await poll();
+      if (lastData) {
+        const eq = parseFloat(lastData.total_asset_value ?? lastData.collateral ?? 0);
+        rrBase = { t: Date.now(), v: eq };
+        localStorage.setItem(RR_KEY, JSON.stringify(rrBase));
+      }
+      render();
+      if (btn) {
+        btn.textContent = "✓";
+        setTimeout(() => { btn.textContent = "↻"; }, 800);
+      }
+    }
+
+    poll();
+    setInterval(poll, 2000);
+  </script>
+</body>
+</html>
