@@ -32,8 +32,7 @@ const (
 	EdgeBps      = 7.5 // High-selectivity 7.5 bps entry around microprice
 	CancelBps    = 1.0 // Instant 1.0 bps anti-trend cancel shield
 	ObiLimit     = 0.45 // Block toxic-flow side when |OBI| > 0.45
-	StopEqUSD    = 14.85
-	TakeFlatEq   = 15.002
+	StopEqUSD    = 14.50
 )
 
 type Market struct {
@@ -46,8 +45,8 @@ type Market struct {
 }
 
 var markets = map[string]Market{
-	"ETH": {Sym: "ETH", ID: 0, SzDec: 4, PxDec: 2, MinB: 0.0020, AllowEntry: false},
-	"BTC": {Sym: "BTC", ID: 1, SzDec: 5, PxDec: 1, MinB: 0.00007, AllowEntry: false},
+	"ETH": {Sym: "ETH", ID: 0, SzDec: 4, PxDec: 2, MinB: 0.0020, AllowEntry: true},
+	"BTC": {Sym: "BTC", ID: 1, SzDec: 5, PxDec: 1, MinB: 0.00007, AllowEntry: true},
 	"SOL": {Sym: "SOL", ID: 2, SzDec: 3, PxDec: 3, MinB: 0.055, AllowEntry: false},
 }
 var idToSym = map[int64]string{0: "ETH", 1: "BTC", 2: "SOL"}
@@ -231,7 +230,7 @@ func modifySide(sym, side string, newPxF, midF float64) {
 	}(ao.COI, m.ID, ao.BaseInt)
 }
 
-func placeSide(sym, side string, pxF, midF, customSz float64, isClose bool) {
+func placeSide(sym, side string, pxF, midF, customSz float64, isClose, isIOC bool) {
 	m := markets[sym]
 	baseF := customSz
 	if baseF <= 0 {
@@ -255,8 +254,15 @@ func placeSide(sym, side string, pxF, midF, customSz float64, isClose bool) {
 	}
 	activeOrds[sym+"_"+side] = &ActiveOrder{COI: coi, Px: pxF, BaseInt: baseInt, RefMid: midF, IsClose: isClose, TS: time.Now()}
 	go func() {
+		var ordType uint8 = 0
+		var tif uint8 = 2
 		exp := time.Now().Add(28 * 24 * time.Hour).UnixMilli()
-		dbg := fmt.Sprintf("%s_%s px=%.4f ro=%d", sym, side, pxF, redOnly)
+		if isIOC {
+			ordType = 1 // MARKET
+			tif = 0     // IOC
+			exp = 0
+		}
+		dbg := fmt.Sprintf("%s_%s px=%.4f ro=%d ioc=%v", sym, side, pxF, redOnly, isIOC)
 		err := sendSignedTx(fmt.Sprintf("o_%d", coi), dbg, func(opts *types.TransactOpts) (uint8, string, error) {
 			ti, e := txCli.GetCreateOrderTransaction(&types.CreateOrderTxReq{
 				MarketIndex:      m.ID,
@@ -264,8 +270,8 @@ func placeSide(sym, side string, pxF, midF, customSz float64, isClose bool) {
 				BaseAmount:       baseInt,
 				Price:            pxInt,
 				IsAsk:            isAsk,
-				Type:             0,
-				TimeInForce:      2,
+				Type:             ordType,
+				TimeInForce:      tif,
 				ReduceOnly:       redOnly,
 				OrderExpiry:      exp,
 			}, opts)
@@ -311,7 +317,7 @@ func recomputeBBO(sym string) {
 
 func closeStepBps(sym string) float64 {
 	if trendMode[sym] {
-		return 24.0 // 2:1 trend-start target on BTC
+		return 36.0 // 2:1 trend-start target on BTC (TP36/SL18)
 	}
 	if t0, ok := posOpenTS[sym]; ok && !t0.IsZero() {
 		mins := time.Since(t0).Minutes()
@@ -355,9 +361,9 @@ func manageCoin(sym string) {
 	bidSafe := m.AllowEntry && trendBps >= -1.5 && impBps >= -1.5 && obi >= -ObiLimit && totalNetUSD < 6.0
 	askSafe := m.AllowEntry && trendBps <= 1.5 && impBps <= 1.5 && obi <= ObiLimit && totalNetUSD > -6.0
 
-	// BTC Trend-Start breakout override (only when flat & strong impulse + OBI confirm)
-	btcTrendBuy := sym == "BTC" && math.Abs(posUSD) < 5.0 && impBps >= 12.0 && trendBps > 0 && obi >= 0.25
-	btcTrendSell := sym == "BTC" && math.Abs(posUSD) < 5.0 && impBps <= -12.0 && trendBps < 0 && obi <= -0.25
+	// BTC Trend-Start breakout override (18 bps impulse + OBI confirm -> immediate 0%-fee IOC entry)
+	btcTrendBuy := sym == "BTC" && math.Abs(posUSD) < 5.0 && impBps >= 18.0 && trendBps > 0 && obi >= 0.25
+	btcTrendSell := sym == "BTC" && math.Abs(posUSD) < 5.0 && impBps <= -18.0 && trendBps < 0 && obi <= -0.25
 
 	// 1. Manage resting orders: ModifyOrder (1 write) or Cancel on toxic flow
 	for _, side := range []string{"BID", "ASK"} {
@@ -394,13 +400,13 @@ func manageCoin(sym string) {
 	ae := avgEntry[sym]
 	stepBps := closeStepBps(sym)
 
-	// 2. Closing orders (with time-based breakeven step-down, or 2:1 BTC trend SL/TP)
+	// 2. Closing orders (with time-based breakeven step-down, or 2:1 BTC trend TP36/SL18)
 	if posUSD <= -5.0 && ae > 0 {
-		if trendMode[sym] && mid >= ae*(1.0+12.0/10000.0) {
-			// BTC trend-start -12 bps stop-out
+		if trendMode[sym] && mid >= ae*(1.0+18.0/10000.0) {
+			// BTC trend-start -18 bps immediate IOC stop-out
 			if activeOrds[sym+"_BID"] == nil && now.Sub(lastOrdTS[sym+"_BID"]) >= 3*time.Second {
 				lastOrdTS[sym+"_BID"] = now
-				placeSide(sym, "BID", roundTo(lb, m.PxDec), mid, math.Abs(pos), true)
+				placeSide(sym, "BID", roundTo(la*1.005, m.PxDec), mid, math.Abs(pos), true, true)
 			}
 		} else {
 			wantBid := roundTo(math.Min(lb, ae*(1.0-stepBps/10000.0)), m.PxDec)
@@ -412,32 +418,34 @@ func manageCoin(sym string) {
 				modifySide(sym, "BID", wantBid, mid)
 			} else if ao == nil && now.Sub(lastOrdTS[sym+"_BID"]) >= 4*time.Second {
 				lastOrdTS[sym+"_BID"] = now
-				placeSide(sym, "BID", wantBid, mid, math.Abs(pos), true)
+				placeSide(sym, "BID", wantBid, mid, math.Abs(pos), true, false)
 			}
 		}
 	} else if posUSD < 5.0 && (bidSafe || btcTrendBuy) {
-		eBps := EdgeBps
 		if btcTrendBuy {
-			eBps = 1.0
 			trendMode[sym] = true
+			if activeOrds[sym+"_BID"] == nil && now.Sub(lastOrdTS[sym+"_BID"]) >= 5*time.Second {
+				lastOrdTS[sym+"_BID"] = now
+				placeSide(sym, "BID", roundTo(la*1.005, m.PxDec), mid, 0, false, true)
+			}
 		} else {
 			trendMode[sym] = false
-		}
-		wantBid := roundTo(math.Min(lb, micro*(1.0-eBps/10000.0)), m.PxDec)
-		if wantBid >= la {
-			wantBid = roundTo(la-tick, m.PxDec)
-		}
-		if activeOrds[sym+"_BID"] == nil && now.Sub(lastOrdTS[sym+"_BID"]) >= 5*time.Second {
-			lastOrdTS[sym+"_BID"] = now
-			placeSide(sym, "BID", wantBid, mid, 0, false)
+			wantBid := roundTo(math.Min(lb, micro*(1.0-EdgeBps/10000.0)), m.PxDec)
+			if wantBid >= la {
+				wantBid = roundTo(la-tick, m.PxDec)
+			}
+			if activeOrds[sym+"_BID"] == nil && now.Sub(lastOrdTS[sym+"_BID"]) >= 5*time.Second {
+				lastOrdTS[sym+"_BID"] = now
+				placeSide(sym, "BID", wantBid, mid, 0, false, false)
+			}
 		}
 	}
 
 	if posUSD >= 5.0 && ae > 0 {
-		if trendMode[sym] && mid <= ae*(1.0-12.0/10000.0) {
+		if trendMode[sym] && mid <= ae*(1.0-18.0/10000.0) {
 			if activeOrds[sym+"_ASK"] == nil && now.Sub(lastOrdTS[sym+"_ASK"]) >= 3*time.Second {
 				lastOrdTS[sym+"_ASK"] = now
-				placeSide(sym, "ASK", roundTo(la, m.PxDec), mid, math.Abs(pos), true)
+				placeSide(sym, "ASK", roundTo(lb*0.995, m.PxDec), mid, math.Abs(pos), true, true)
 			}
 		} else {
 			wantAsk := roundTo(math.Max(la, ae*(1.0+stepBps/10000.0)), m.PxDec)
@@ -449,24 +457,26 @@ func manageCoin(sym string) {
 				modifySide(sym, "ASK", wantAsk, mid)
 			} else if ao == nil && now.Sub(lastOrdTS[sym+"_ASK"]) >= 4*time.Second {
 				lastOrdTS[sym+"_ASK"] = now
-				placeSide(sym, "ASK", wantAsk, mid, math.Abs(pos), true)
+				placeSide(sym, "ASK", wantAsk, mid, math.Abs(pos), true, false)
 			}
 		}
 	} else if posUSD > -5.0 && (askSafe || btcTrendSell) {
-		eBps := EdgeBps
 		if btcTrendSell {
-			eBps = 1.0
 			trendMode[sym] = true
+			if activeOrds[sym+"_ASK"] == nil && now.Sub(lastOrdTS[sym+"_ASK"]) >= 5*time.Second {
+				lastOrdTS[sym+"_ASK"] = now
+				placeSide(sym, "ASK", roundTo(lb*0.995, m.PxDec), mid, 0, false, true)
+			}
 		} else {
 			trendMode[sym] = false
-		}
-		wantAsk := roundTo(math.Max(la, micro*(1.0+eBps/10000.0)), m.PxDec)
-		if wantAsk <= lb {
-			wantAsk = roundTo(lb+tick, m.PxDec)
-		}
-		if activeOrds[sym+"_ASK"] == nil && now.Sub(lastOrdTS[sym+"_ASK"]) >= 5*time.Second {
-			lastOrdTS[sym+"_ASK"] = now
-			placeSide(sym, "ASK", wantAsk, mid, 0, false)
+			wantAsk := roundTo(math.Max(la, micro*(1.0+EdgeBps/10000.0)), m.PxDec)
+			if wantAsk <= lb {
+				wantAsk = roundTo(lb+tick, m.PxDec)
+			}
+			if activeOrds[sym+"_ASK"] == nil && now.Sub(lastOrdTS[sym+"_ASK"]) >= 5*time.Second {
+				lastOrdTS[sym+"_ASK"] = now
+				placeSide(sym, "ASK", wantAsk, mid, 0, false, false)
+			}
 		}
 	}
 
@@ -541,8 +551,8 @@ func syncAccountLoop() {
 					}
 				}
 				mu.Unlock()
-				if eq >= TakeFlatEq || (eq > 0 && eq <= StopEqUSD) {
-					fmt.Printf("[STOP-AT-TARGET] Equity $%.4f (target >=$%.3f or <=$%.2f), closing & halting!\n", eq, TakeFlatEq, StopEqUSD)
+				if eq > 0 && eq <= StopEqUSD {
+					fmt.Printf("[STOP-LOSS] Equity $%.4f <= $%.2f, closing & halting!\n", eq, StopEqUSD)
 					useWsSend = false
 					cancelAll()
 					mu.Lock()
@@ -644,6 +654,48 @@ func runLtWS() {
 						Size  string `json:"size"`
 					} `json:"asks"`
 				} `json:"order_book"`
+			}
+			if json.Unmarshal(msg, &m) == nil && strings.HasPrefix(m.Channel, "account_all:") {
+				var accEv struct {
+					Positions map[string]struct {
+						Position      string `json:"position"`
+						Sign          int    `json:"sign"`
+						AvgEntryPrice string `json:"avg_entry_price"`
+					} `json:"positions"`
+				}
+				if json.Unmarshal(msg, &accEv) == nil && len(accEv.Positions) > 0 {
+					var touched []string
+					mu.Lock()
+					for midStr, p := range accEv.Positions {
+						midID, _ := strconv.ParseInt(midStr, 10, 64)
+						if sym, ok := idToSym[midID]; ok {
+							sz, _ := strconv.ParseFloat(p.Position, 64)
+							if p.Sign < 0 && sz > 0 {
+								sz = -sz
+							}
+							prev := positions[sym]
+							positions[sym] = sz
+							if ae, e := strconv.ParseFloat(p.AvgEntryPrice, 64); e == nil && ae > 0 {
+								avgEntry[sym] = ae
+							}
+							if math.Abs(sz) > 1e-6 && math.Abs(prev) < 1e-6 {
+								posOpenTS[sym] = time.Now()
+							} else if math.Abs(sz) < 1e-6 {
+								posOpenTS[sym] = time.Time{}
+								trendMode[sym] = false
+							}
+							if math.Abs(sz-prev) > 1e-6 {
+								delete(activeOrds, sym+"_BID")
+								delete(activeOrds, sym+"_ASK")
+								touched = append(touched, sym)
+							}
+						}
+					}
+					mu.Unlock()
+					for _, sym := range touched {
+						manageCoin(sym)
+					}
+				}
 			}
 			if json.Unmarshal(msg, &m) == nil && strings.HasPrefix(m.Channel, "order_book:") {
 				idStr := strings.TrimPrefix(m.Channel, "order_book:")
