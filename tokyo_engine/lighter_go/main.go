@@ -618,20 +618,21 @@ func manageCoin(sym string) {
 	netCap := 15.0
 	otherLong := otherDirExposureUSD(sym, true)
 	otherShort := otherDirExposureUSD(sym, false)
+	coinActive := m.AllowEntry && st.dynClipUSD >= 0
 	inCool := now.Before(st.stopCoolUntil) || now.Sub(st.lastFillTS) < 8*time.Second
 	calmMkt := math.Abs(trendBps) <= 2.2 && math.Abs(impBps) <= 2.0
-	bidSafe := m.AllowEntry && !inCool && now.After(st.dropCoolUntil) && vel3sBps > -2.0 && calmMkt && obi >= -ObiLimit && otherLong < netCap
-	askSafe := m.AllowEntry && !inCool && now.After(st.pumpCoolUntil) && vel3sBps < 2.0 && calmMkt && obi <= ObiLimit && otherShort < netCap
+	bidSafe := coinActive && !inCool && now.After(st.dropCoolUntil) && vel3sBps > -2.0 && calmMkt && obi >= -ObiLimit && otherLong < netCap
+	askSafe := coinActive && !inCool && now.After(st.pumpCoolUntil) && vel3sBps < 2.0 && calmMkt && obi <= ObiLimit && otherShort < netCap
 
 	edge := st.dynEdgeBps
 	if edge <= 0 {
 		edge = m.EdgeBps
 	}
 
-	// Strict Limit-Capped Stale-Quote Snipe ONLY (18bps wick-chasing TAKER pureTrend REMOVED!)
-	notBleeding := st.rollPnlMicro.Load() >= 0
-	staleSnipeBuy := m.AllowEntry && notBleeding && !inCool && now.After(st.dropCoolUntil) && math.Abs(posUSD) < 1.0 && otherLong < netCap && (fairLt-la)/la*10000.0 >= 6.0 && vel3sBps >= 1.0 && trendBps >= -1.0 && obi >= 0.35
-	staleSnipeSell := m.AllowEntry && notBleeding && !inCool && now.After(st.pumpCoolUntil) && math.Abs(posUSD) < 1.0 && otherShort < netCap && (lb-fairLt)/lb*10000.0 >= 6.0 && vel3sBps <= -1.0 && trendBps <= 1.0 && obi <= -0.35
+	// Strict Limit-Capped Stale-Quote Snipe ONLY (gated on active non-bleeding leader!)
+	notBleeding := coinActive && st.rollPnlMicro.Load() >= 0
+	staleSnipeBuy := notBleeding && !inCool && now.After(st.dropCoolUntil) && math.Abs(posUSD) < 1.0 && otherLong < netCap && (fairLt-la)/la*10000.0 >= 6.0 && vel3sBps >= 1.0 && trendBps >= -1.0 && obi >= 0.35
+	staleSnipeSell := notBleeding && !inCool && now.After(st.pumpCoolUntil) && math.Abs(posUSD) < 1.0 && otherShort < netCap && (lb-fairLt)/lb*10000.0 >= 6.0 && vel3sBps <= -1.0 && trendBps <= 1.0 && obi <= -0.35
 	btcTrendBuy := staleSnipeBuy
 	btcTrendSell := staleSnipeSell
 
@@ -713,8 +714,12 @@ func manageCoin(sym string) {
 				placeSide(sym, "BID", roundTo(la*1.0015, m.PxDec), mid, math.Abs(pos), true, true)
 			}
 		} else {
-			wantBid := roundTo(ae*(1.0-stepBps/10000.0), m.PxDec)
-			if stepBps > 0 && fairLt < wantBid {
+			effStep := stepBps
+			if stepBps > 0 && vel3sBps <= -2.0 && obi <= -0.30 {
+				effStep = 8.5 // Momentum-Ride TP while strong downward velocity pushes short deeper into profit
+			}
+			wantBid := roundTo(ae*(1.0-effStep/10000.0), m.PxDec)
+			if effStep > 0 && fairLt < wantBid {
 				wantBid = roundTo(fairLt, m.PxDec)
 			}
 			if ao := st.activeOrds["BID"]; ao != nil && ao.IsClose && !ao.IsIOC && math.Abs(ao.Px-wantBid) >= tick*2 && now.Sub(st.lastOrdTS["BID"]) >= 500*time.Millisecond && takeWriteSlot(true) {
@@ -776,8 +781,12 @@ func manageCoin(sym string) {
 				placeSide(sym, "ASK", roundTo(lb*0.9985, m.PxDec), mid, math.Abs(pos), true, true)
 			}
 		} else {
-			wantAsk := roundTo(ae*(1.0+stepBps/10000.0), m.PxDec)
-			if stepBps > 0 && fairLt > wantAsk {
+			effStep := stepBps
+			if stepBps > 0 && vel3sBps >= 2.0 && obi >= 0.30 {
+				effStep = 8.5 // Momentum-Ride TP while strong upward velocity pushes long deeper into profit
+			}
+			wantAsk := roundTo(ae*(1.0+effStep/10000.0), m.PxDec)
+			if effStep > 0 && fairLt > wantAsk {
 				wantAsk = roundTo(fairLt, m.PxDec)
 			}
 			if ao := st.activeOrds["ASK"]; ao != nil && ao.IsClose && !ao.IsIOC && math.Abs(ao.Px-wantAsk) >= tick*2 && now.Sub(st.lastOrdTS["ASK"]) >= 500*time.Millisecond && takeWriteSlot(true) {
@@ -819,7 +828,7 @@ func manageCoin(sym string) {
 	}
 	logMu.Unlock()
 	if shouldLog {
-		fmt.Printf("[%s] GO-TOKYO v41 Eq=$%.4f | %s Pos=%.5f | Net=$%.2f | OBI=%.2f\n",
+		fmt.Printf("[%s] GO-TOKYO v42 Eq=$%.4f | %s Pos=%.5f | Net=$%.2f | OBI=%.2f\n",
 			now.Format("15:04:05"), float64(eqNow.Load())/1e6, sym, pos, netUSD, obi)
 	}
 }
@@ -880,10 +889,18 @@ func rebalanceFromTrades(tb []byte) {
 		}
 		score[s] = pnl[s] + 0.08*(wr-0.75)
 	}
-	totBudget := curEq * 1.35 // Capped 1.35x pair budget (~$120 max leader clip -> max tight SL ~$0.07)
+	totBudget := curEq * 1.30 // Capped 1.30x pair budget (~$125 max leader clip -> max tight SL ~$0.07)
 	btcShare := 0.50 + 0.40*math.Tanh((score["BTC"]-score["ETH"])*4.0)
 	btcClip := math.Max(12.0, totBudget*btcShare)
 	ethClip := math.Max(12.0, totBudget-btcClip)
+	// Dynamic Zero-Clip Pause: if a coin's 30m-decayed PnL < -$0.10 (and the other coin is stronger), pause it until 30m decay heals!
+	if pnl["ETH"] < -0.10 && score["BTC"] > score["ETH"] {
+		ethClip = -1.0
+		btcClip = totBudget
+	} else if pnl["BTC"] < -0.10 && score["ETH"] > score["BTC"] {
+		btcClip = -1.0
+		ethClip = totBudget
+	}
 	for sym, clip := range map[string]float64{"BTC": btcClip, "ETH": ethClip} {
 		st := mktStates[sym]
 		dynEdge := 5.5
