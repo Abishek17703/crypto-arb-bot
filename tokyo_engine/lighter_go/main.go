@@ -31,7 +31,7 @@ const (
 	ClipUSD      = 55.00
 	EdgeBps      = 6.0  // Symmetric 6.0 bps entry around basis-adjusted fairLt
 	CancelBps    = 1.5  // 1.5 bps anti-trend cancel shield (avoids 1-tick thrashing)
-	ObiLimit     = 0.25 // Block toxic-flow side when |OBI| > 0.25
+	ObiLimit     = 0.35 // Block sustained toxic-flow side when 3s-smoothed |OBI| > 0.35
 	StopEqUSD    = 95.00
 )
 
@@ -450,7 +450,7 @@ func manageCoin(sym string) {
 	}
 	netCap := curEq * 0.85
 	inCool := now.Before(st.stopCoolUntil) || now.Sub(st.lastFillTS) < 8*time.Second
-	calmMkt := math.Abs(trendBps) <= 1.0 && math.Abs(impBps) <= 1.0
+	calmMkt := math.Abs(trendBps) <= 2.5 && math.Abs(impBps) <= 2.5
 	bidSafe := m.AllowEntry && !inCool && calmMkt && obi >= -ObiLimit && netUSD < netCap
 	askSafe := m.AllowEntry && !inCool && calmMkt && obi <= ObiLimit && netUSD > -netCap
 
@@ -1106,17 +1106,18 @@ func runBnWS() {
 					st.mu.Lock()
 					st.bnMid = mVal
 					st.bnMicro = microVal
-					st.bnObi = obiVal
 					st.netMicroUSD.Store(int64(st.pos * mVal * 1e6))
 					if st.emaFast == 0 {
 						st.emaFast = mVal
 						st.emaSlow = mVal
+						st.bnObi = obiVal
 						st.lastEmaTS = now
 					} else {
 						dt := math.Min(5.0, math.Max(0.001, now.Sub(st.lastEmaTS).Seconds()))
 						st.lastEmaTS = now
 						st.emaFast += (1.0 - math.Exp(-dt/20.0)) * (mVal - st.emaFast)
 						st.emaSlow += (1.0 - math.Exp(-dt/180.0)) * (mVal - st.emaSlow)
+						st.bnObi += (1.0 - math.Exp(-dt/3.0)) * (obiVal - st.bnObi)
 					}
 					st.mu.Unlock()
 					manageCoin(sym)
