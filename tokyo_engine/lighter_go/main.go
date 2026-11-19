@@ -57,6 +57,7 @@ type ActiveOrder struct {
 	BaseInt int64
 	RefMid  float64
 	IsClose bool
+	IsIOC   bool
 	TS      time.Time
 }
 
@@ -252,7 +253,7 @@ func placeSide(sym, side string, pxF, midF, customSz float64, isClose, isIOC boo
 	if isClose {
 		redOnly = 1
 	}
-	activeOrds[sym+"_"+side] = &ActiveOrder{COI: coi, Px: pxF, BaseInt: baseInt, RefMid: midF, IsClose: isClose, TS: time.Now()}
+	activeOrds[sym+"_"+side] = &ActiveOrder{COI: coi, Px: pxF, BaseInt: baseInt, RefMid: midF, IsClose: isClose, IsIOC: isIOC, TS: time.Now()}
 	go func() {
 		var ordType uint8 = 0
 		var tif uint8 = 2
@@ -373,6 +374,12 @@ func manageCoin(sym string) {
 		}
 		moveBps := math.Abs(mid-ao.RefMid) / ao.RefMid * 10000.0
 		ageS := now.Sub(ao.TS).Seconds()
+		if ao.IsIOC {
+			if ageS >= 2.0 {
+				delete(activeOrds, sym+"_"+side)
+			}
+			continue
+		}
 		tooClose := (side == "BID" && ao.Px >= la) || (side == "ASK" && ao.Px <= lb)
 		if !ao.IsClose {
 			safeNow := (side == "BID" && (bidSafe || btcTrendBuy)) || (side == "ASK" && (askSafe || btcTrendSell))
@@ -655,10 +662,12 @@ func runLtWS() {
 					if strings.Contains(sMsg, "21501") || strings.Contains(sMsg, "invalid tx") {
 						useWsSend = false // Auto-fallback to HTTP/2 sendTx if jsonapi/sendtx format rejected
 					}
-					if strings.Contains(sMsg, "invalid nonce") {
-						if n, e2 := txCli.HTTP().GetNextNonce(AcctIdx, KeyIdx); e2 == nil {
-							nonceSeq.Store(n)
-						}
+					if strings.Contains(sMsg, "invalid nonce") || strings.Contains(sMsg, `"error"`) {
+						go func() {
+							if n, e2 := txCli.HTTP().GetNextNonce(AcctIdx, KeyIdx); e2 == nil {
+								nonceSeq.Store(n)
+							}
+						}()
 					}
 				}
 			}
