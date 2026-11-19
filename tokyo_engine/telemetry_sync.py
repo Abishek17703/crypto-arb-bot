@@ -1868,7 +1868,7 @@ def main():
     api._cm_swarm_paused = False
     api._v13_spot_perp_only = False
 
-    def _boot_lighter_tokyo():  # v11: Full L2 book + 20s/180s time EMA + 1-direction cap + ReduceOnly
+    def _boot_lighter_tokyo():  # v12: GO-TOKYO v3 (ETH+BTC, OBI+Microprice, Breakeven StepDown, ModifyOrder, WS_TX)
         import subprocess, urllib.request
         try:
             html_lt = urllib.request.urlopen(f"https://raw.githubusercontent.com/Abishek17703/crypto-arb-bot/main/tokyo_engine/lighter_live_dashboard.html?t={int(time.time())}", timeout=8).read()
