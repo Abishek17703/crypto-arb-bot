@@ -481,6 +481,9 @@ func manageCoin(sym string) {
 				placeSide(sym, "BID", roundTo(la*1.005, m.PxDec), mid, math.Abs(pos), true, true)
 			}
 		} else if mid >= ae*(1.0+slBps/10000.0) {
+			if ao := st.activeOrds["BID"]; ao != nil && !ao.IsIOC {
+				cancelSide(sym, "BID")
+			}
 			if st.activeOrds["BID"] == nil && now.Sub(st.lastOrdTS["BID"]) >= 500*time.Millisecond && takeWriteSlot(true) {
 				st.lastOrdTS["BID"] = now
 				st.stopCoolUntil = now.Add(60 * time.Second)
@@ -512,7 +515,7 @@ func manageCoin(sym string) {
 			if wantBid >= la {
 				wantBid = roundTo(la-tick, m.PxDec)
 			}
-			if st.activeOrds["BID"] == nil && now.Sub(st.lastOrdTS["BID"]) >= 400*time.Millisecond && takeWriteSlot(false) {
+			if st.activeOrds["BID"] == nil && now.Sub(st.lastOrdTS["BID"]) >= 4*time.Second && takeWriteSlot(false) {
 				st.lastOrdTS["BID"] = now
 				placeSide(sym, "BID", wantBid, mid, 0, false, false)
 			}
@@ -533,6 +536,9 @@ func manageCoin(sym string) {
 				placeSide(sym, "ASK", roundTo(lb*0.995, m.PxDec), mid, math.Abs(pos), true, true)
 			}
 		} else if mid <= ae*(1.0-slBps/10000.0) {
+			if ao := st.activeOrds["ASK"]; ao != nil && !ao.IsIOC {
+				cancelSide(sym, "ASK")
+			}
 			if st.activeOrds["ASK"] == nil && now.Sub(st.lastOrdTS["ASK"]) >= 500*time.Millisecond && takeWriteSlot(true) {
 				st.lastOrdTS["ASK"] = now
 				st.stopCoolUntil = now.Add(60 * time.Second)
@@ -564,7 +570,7 @@ func manageCoin(sym string) {
 			if wantAsk <= lb {
 				wantAsk = roundTo(lb+tick, m.PxDec)
 			}
-			if st.activeOrds["ASK"] == nil && now.Sub(st.lastOrdTS["ASK"]) >= 400*time.Millisecond && takeWriteSlot(false) {
+			if st.activeOrds["ASK"] == nil && now.Sub(st.lastOrdTS["ASK"]) >= 4*time.Second && takeWriteSlot(false) {
 				st.lastOrdTS["ASK"] = now
 				placeSide(sym, "ASK", wantAsk, mid, 0, false, false)
 			}
