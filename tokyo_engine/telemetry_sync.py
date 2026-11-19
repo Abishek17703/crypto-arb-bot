@@ -1868,7 +1868,7 @@ def main():
     api._cm_swarm_paused = False
     api._v13_spot_perp_only = False
 
-    def _boot_lighter_tokyo():  # v40: exact sequencer bid/ask_account_pnl + 30m recency decay + IOC gate on laggards
+    def _boot_lighter_tokyo():  # v41: symmetric 1:1 R:R (+4.8 TP / -5.8 SL), kill 18bps taker wick-chase, cap snipe limit px
         import subprocess, urllib.request
         try:
             html_lt = urllib.request.urlopen(f"https://raw.githubusercontent.com/Abishek17703/crypto-arb-bot/main/tokyo_engine/lighter_live_dashboard.html?t={int(time.time())}", timeout=8).read()
