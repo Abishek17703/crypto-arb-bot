@@ -631,10 +631,10 @@ func manageCoin(sym string) {
 		edge = m.EdgeBps
 	}
 
-	// Dynamic Trend-Start breakout (18 bps for non-bleeding leader) + 0%-fee Stale-Quote IOC Snipe
-	notBleeding := st.rollPnlMicro.Load() >= 0
-	staleSnipeBuy := m.AllowEntry && !inCool && math.Abs(posUSD) < 1.0 && otherLong < netCap && (fairLt-la)/la*10000.0 >= 5.0 && obi >= 0.25
-	staleSnipeSell := m.AllowEntry && !inCool && math.Abs(posUSD) < 1.0 && otherShort < netCap && (lb-fairLt)/lb*10000.0 >= 5.0 && obi <= -0.25
+	// Dynamic Trend-Start breakout + 0%-fee Stale-Quote IOC Snipe (gated on non-bleeding rolling score!)
+	notBleeding := st.rollPnlMicro.Load() >= -20000
+	staleSnipeBuy := m.AllowEntry && notBleeding && !inCool && math.Abs(posUSD) < 1.0 && otherLong < netCap && (fairLt-la)/la*10000.0 >= 5.0 && obi >= 0.25
+	staleSnipeSell := m.AllowEntry && notBleeding && !inCool && math.Abs(posUSD) < 1.0 && otherShort < netCap && (lb-fairLt)/lb*10000.0 >= 5.0 && obi <= -0.25
 	pureTrendBuy := m.AllowEntry && notBleeding && !inCool && math.Abs(posUSD) < 1.0 && otherLong < netCap && impBps >= 18.0 && trendBps > 0 && obi >= 0.25
 	pureTrendSell := m.AllowEntry && notBleeding && !inCool && math.Abs(posUSD) < 1.0 && otherShort < netCap && impBps <= -18.0 && trendBps < 0 && obi <= -0.25
 	btcTrendBuy := pureTrendBuy || staleSnipeBuy
@@ -822,7 +822,7 @@ func manageCoin(sym string) {
 	}
 	logMu.Unlock()
 	if shouldLog {
-		fmt.Printf("[%s] GO-TOKYO v22 Eq=$%.4f | %s Pos=%.5f | Net=$%.2f | OBI=%.2f\n",
+		fmt.Printf("[%s] GO-TOKYO v40 Eq=$%.4f | %s Pos=%.5f | Net=$%.2f | OBI=%.2f\n",
 			now.Format("15:04:05"), float64(eqNow.Load())/1e6, sym, pos, netUSD, obi)
 	}
 }
@@ -831,62 +831,44 @@ func rebalanceFromTrades(tb []byte) {
 	var resp struct {
 		Trades []struct {
 			Symbol string `json:"market_symbol"`
-			Size   string `json:"size"`
-			Price  string `json:"price"`
 			BidID  int64  `json:"bid_account_id"`
+			AskID  int64  `json:"ask_account_id"`
+			BidPnl string `json:"bid_account_pnl"`
+			AskPnl string `json:"ask_account_pnl"`
 			TS     int64  `json:"timestamp"`
-			ID     int64  `json:"trade_id"`
 		} `json:"trades"`
 	}
 	if json.Unmarshal(tb, &resp) != nil || len(resp.Trades) == 0 {
 		return
 	}
-	pos := map[string]float64{}
-	cost := map[string]float64{}
+	nowMS := time.Now().UnixMilli()
 	pnl := map[string]float64{"BTC": 0, "ETH": 0}
-	wins := map[string]int{"BTC": 0, "ETH": 0}
-	closes := map[string]int{"BTC": 0, "ETH": 0}
-	for i := len(resp.Trades) - 1; i >= 0; i-- {
-		t := resp.Trades[i]
+	wins := map[string]float64{"BTC": 0, "ETH": 0}
+	closes := map[string]float64{"BTC": 0, "ETH": 0}
+	for _, t := range resp.Trades {
 		s := t.Symbol
 		if s != "BTC" && s != "ETH" {
 			continue
 		}
-		sz, _ := strconv.ParseFloat(t.Size, 64)
-		px, _ := strconv.ParseFloat(t.Price, 64)
-		dq := -sz
+		pStr := ""
 		if t.BidID == AcctIdx {
-			dq = sz
+			pStr = t.BidPnl
+		} else if t.AskID == AcctIdx {
+			pStr = t.AskPnl
 		}
-		p0, c0 := pos[s], cost[s]
-		if math.Abs(p0) < 1e-8 || (p0 > 0 && dq > 0) || (p0 < 0 && dq < 0) {
-			pos[s] = p0 + dq
-			cost[s] = c0 + dq*px
-		} else {
-			cq := math.Min(math.Abs(p0), math.Abs(dq))
-			if cq > 1e-8 {
-				ai := math.Abs(c0 / p0)
-				realized := cq * (px - ai)
-				if p0 < 0 {
-					realized = cq * (ai - px)
-				}
-				pnl[s] += realized
-				closes[s]++
-				if realized >= 0 {
-					wins[s]++
-				}
-			}
-			rem := p0 + dq
-			if math.Abs(rem) < 1e-8 {
-				pos[s] = 0
-				cost[s] = 0
-			} else if (p0 > 0 && rem > 0) || (p0 < 0 && rem < 0) {
-				pos[s] = rem
-				cost[s] = rem * math.Abs(c0/p0)
-			} else {
-				pos[s] = rem
-				cost[s] = rem * px
-			}
+		if pStr == "" {
+			continue
+		}
+		realized, err := strconv.ParseFloat(pStr, 64)
+		if err != nil || math.Abs(realized) < 1e-8 {
+			continue
+		}
+		ageMin := math.Max(0.0, float64(nowMS-t.TS)/60000.0)
+		w := math.Exp(-ageMin / 30.0)
+		pnl[s] += realized * w
+		closes[s] += w
+		if realized > 0 {
+			wins[s] += w
 		}
 	}
 	curEq := float64(eqNow.Load()) / 1e6
@@ -896,8 +878,8 @@ func rebalanceFromTrades(tb []byte) {
 	score := map[string]float64{}
 	for _, s := range []string{"BTC", "ETH"} {
 		wr := 0.75
-		if closes[s] > 0 {
-			wr = float64(wins[s]) / float64(closes[s])
+		if closes[s] > 0.05 {
+			wr = wins[s] / closes[s]
 		}
 		score[s] = pnl[s] + 0.08*(wr-0.75)
 	}
