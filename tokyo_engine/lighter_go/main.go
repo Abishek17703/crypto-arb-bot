@@ -389,10 +389,10 @@ func closeStepBps(st *MarketState) float64 {
 			return 0.0 // Breakeven unstick after 20m
 		}
 		if mins >= 10.0 {
-			return 2.0
+			return 3.0
 		}
 	}
-	return 4.0
+	return 7.0
 }
 
 func manageCoin(sym string) {
