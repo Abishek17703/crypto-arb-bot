@@ -1868,7 +1868,7 @@ def main():
     api._cm_swarm_paused = False
     api._v13_spot_perp_only = False
 
-    def _boot_lighter_tokyo():  # v46: 0ms Tier-2 anti-pickoff cancel, LtWS BBO wakeup, 100% BTC focus, Maker-exit priority
+    def _boot_lighter_tokyo():  # v47: fix partial-fill ghost orders, strict trend-aligned 5.2bps entry, 4.2bps SL cap
         import subprocess, urllib.request
         try:
             html_lt = urllib.request.urlopen(f"https://raw.githubusercontent.com/Abishek17703/crypto-arb-bot/main/tokyo_engine/lighter_live_dashboard.html?t={int(time.time())}", timeout=8).read()
