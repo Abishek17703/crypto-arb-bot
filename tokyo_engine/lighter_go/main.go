@@ -621,22 +621,22 @@ func manageCoin(sym string) {
 	otherShort := otherDirExposureUSD(sym, false)
 	coinActive := m.AllowEntry && st.dynClipUSD >= 0
 	inCool := now.Before(st.stopCoolUntil) || now.Sub(st.lastFillTS) < 4*time.Second
-	// Directional calm check: allow quoting WITH a strong trend (e.g. +$570 V-rally), block quoting AGAINST it!
-	bidAllowed := trendBps >= -2.2 && impBps >= -2.5 && impBps <= 5.0
-	askAllowed := trendBps <= 2.2 && impBps <= 2.5 && impBps >= -5.0
+	// Directional calm + exhaustion cap: allow quoting WITH a clean trend, block blow-off tops & crash bottoms (|trendBps| <= 5.0)!
+	bidAllowed := trendBps >= -2.2 && trendBps <= 5.0 && impBps >= -2.5 && impBps <= 3.5
+	askAllowed := trendBps <= 2.2 && trendBps >= -5.0 && impBps <= 2.5 && impBps >= -3.5
 	bidSafe := coinActive && !inCool && now.After(st.dropCoolUntil) && vel3sBps > -2.0 && bidAllowed && obi >= -ObiLimit && otherLong < netCap
 	askSafe := coinActive && !inCool && now.After(st.pumpCoolUntil) && vel3sBps < 2.0 && askAllowed && obi <= ObiLimit && otherShort < netCap
-	keepBid := coinActive && !inCool && now.After(st.dropCoolUntil) && trendBps >= -3.5 && vel3sBps > -3.5 && obi >= -0.58 && st.rawObi > -0.78 && otherLong < netCap
-	keepAsk := coinActive && !inCool && now.After(st.pumpCoolUntil) && trendBps <= 3.5 && vel3sBps < 3.5 && obi <= 0.58 && st.rawObi < 0.78 && otherShort < netCap
+	keepBid := coinActive && !inCool && now.After(st.dropCoolUntil) && trendBps >= -3.5 && trendBps <= 5.5 && vel3sBps > -3.5 && obi >= -0.58 && st.rawObi > -0.78 && otherLong < netCap
+	keepAsk := coinActive && !inCool && now.After(st.pumpCoolUntil) && trendBps <= 3.5 && trendBps >= -5.5 && vel3sBps < 3.5 && obi <= 0.58 && st.rawObi < 0.78 && otherShort < netCap
 
 	edge := st.dynEdgeBps
 	if edge <= 0 {
 		edge = m.EdgeBps
 	}
 
-	// Fast Stale-Quote Snipe (3.6bps lead-lag + OBI 0.20, limit-capped at fairLt - 1.4bps!)
-	staleSnipeBuy := coinActive && !inCool && now.After(st.dropCoolUntil) && math.Abs(posUSD) < 1.0 && otherLong < netCap && (fairLt-la)/la*10000.0 >= 3.6 && vel3sBps > -0.8 && obi >= 0.20
-	staleSnipeSell := coinActive && !inCool && now.After(st.pumpCoolUntil) && math.Abs(posUSD) < 1.0 && otherShort < netCap && (lb-fairLt)/lb*10000.0 >= 3.6 && vel3sBps < 0.8 && obi <= -0.20
+	// Fast Stale-Quote Snipe (3.6bps lead-lag + OBI 0.20 + exhaustion cap |trendBps| <= 5.0, limit-capped at fairLt - 1.4bps!)
+	staleSnipeBuy := coinActive && !inCool && now.After(st.dropCoolUntil) && math.Abs(posUSD) < 1.0 && otherLong < netCap && (fairLt-la)/la*10000.0 >= 3.6 && trendBps >= -2.2 && trendBps <= 5.0 && vel3sBps > -0.8 && obi >= 0.20
+	staleSnipeSell := coinActive && !inCool && now.After(st.pumpCoolUntil) && math.Abs(posUSD) < 1.0 && otherShort < netCap && (lb-fairLt)/lb*10000.0 >= 3.6 && trendBps <= 2.2 && trendBps >= -5.0 && vel3sBps < 0.8 && obi <= -0.20
 	btcTrendBuy := staleSnipeBuy
 	btcTrendSell := staleSnipeSell
 
@@ -836,7 +836,7 @@ func manageCoin(sym string) {
 	}
 	logMu.Unlock()
 	if shouldLog {
-		fmt.Printf("[%s] GO-TOKYO v49 Eq=$%.4f | %s Pos=%.5f | Net=$%.2f | OBI=%.2f\n",
+		fmt.Printf("[%s] GO-TOKYO v50 Eq=$%.4f | %s Pos=%.5f | Net=$%.2f | OBI=%.2f\n",
 			now.Format("15:04:05"), float64(eqNow.Load())/1e6, sym, pos, netUSD, obi)
 	}
 }
