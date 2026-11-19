@@ -45,14 +45,15 @@ type Market struct {
 	MinB       float64
 	AllowEntry bool
 	ClipUSD    float64
+	EdgeBps    float64
 }
 
 var markets = map[string]Market{
-	"ETH":  {Sym: "ETH", ID: 0, SzDec: 4, PxDec: 2, MinB: 0.0020, AllowEntry: true, ClipUSD: 45.0},
-	"BTC":  {Sym: "BTC", ID: 1, SzDec: 5, PxDec: 1, MinB: 0.00007, AllowEntry: true, ClipUSD: 75.0},
-	"SOL":  {Sym: "SOL", ID: 2, SzDec: 3, PxDec: 3, MinB: 0.055, AllowEntry: false, ClipUSD: 12.0},
-	"HYPE": {Sym: "HYPE", ID: 24, SzDec: 2, PxDec: 4, MinB: 0.07, AllowEntry: false, ClipUSD: 12.0},
-	"ZEC":  {Sym: "ZEC", ID: 90, SzDec: 3, PxDec: 3, MinB: 0.004, AllowEntry: false, ClipUSD: 12.0},
+	"ETH":  {Sym: "ETH", ID: 0, SzDec: 4, PxDec: 2, MinB: 0.0020, AllowEntry: true, ClipUSD: 30.0, EdgeBps: 9.5},
+	"BTC":  {Sym: "BTC", ID: 1, SzDec: 5, PxDec: 1, MinB: 0.00007, AllowEntry: true, ClipUSD: 90.0, EdgeBps: 6.0},
+	"SOL":  {Sym: "SOL", ID: 2, SzDec: 3, PxDec: 3, MinB: 0.055, AllowEntry: false, ClipUSD: 12.0, EdgeBps: 8.0},
+	"HYPE": {Sym: "HYPE", ID: 24, SzDec: 2, PxDec: 4, MinB: 0.07, AllowEntry: false, ClipUSD: 12.0, EdgeBps: 10.0},
+	"ZEC":  {Sym: "ZEC", ID: 90, SzDec: 3, PxDec: 3, MinB: 0.004, AllowEntry: false, ClipUSD: 12.0, EdgeBps: 10.0},
 }
 var idToSym = map[int64]string{0: "ETH", 1: "BTC", 2: "SOL", 24: "HYPE", 90: "ZEC"}
 
@@ -612,9 +613,9 @@ func manageCoin(sym string) {
 					cancelSide(sym, side)
 				}
 			} else if (moveBps >= CancelBps || ageS >= 35.0 || tooClose) && now.Sub(st.lastOrdTS[side]) >= 400*time.Millisecond && takeWriteSlot(false) {
-				newPx := roundTo(math.Min(lb, fairLt*(1.0-EdgeBps/10000.0)), m.PxDec)
+				newPx := roundTo(math.Min(lb, fairLt*(1.0-m.EdgeBps/10000.0)), m.PxDec)
 				if side == "ASK" {
-					newPx = roundTo(math.Max(la, fairLt*(1.0+EdgeBps/10000.0)), m.PxDec)
+					newPx = roundTo(math.Max(la, fairLt*(1.0+m.EdgeBps/10000.0)), m.PxDec)
 				}
 				if side == "BID" && newPx >= la {
 					newPx = roundTo(la-tick, m.PxDec)
@@ -643,7 +644,7 @@ func manageCoin(sym string) {
 		} else if holdS >= 150.0 {
 			slBps = 10.0
 		}
-		defBailShort := ((fairLt-la)/la*10000.0 >= 4.0 && la <= ae*(1.0+8.0/10000.0)) || (vel3sBps >= 5.0 && mid > ae)
+		defBailShort := (vel3sBps >= 8.5 && mid >= ae*(1.0+6.0/10000.0))
 		timeScratchShort := !st.trendMode && holdS >= 180.0 && la <= ae*(1.0+8.0/10000.0)
 		if posUSD > -10.10 {
 			if (fairLt <= ae*(1.0-stepBps/10000.0) || mid >= ae*(1.0+slBps/10000.0) || defBailShort || timeScratchShort) && st.activeOrds["BID"] == nil && now.Sub(st.lastOrdTS["BID"]) >= 5*time.Second && takeWriteSlot(true) {
@@ -683,7 +684,7 @@ func manageCoin(sym string) {
 			}
 		} else {
 			st.trendMode = false
-			wantBid := roundTo(math.Min(lb, fairLt*(1.0-EdgeBps/10000.0)), m.PxDec)
+			wantBid := roundTo(math.Min(lb, fairLt*(1.0-m.EdgeBps/10000.0)), m.PxDec)
 			if wantBid >= la {
 				wantBid = roundTo(la-tick, m.PxDec)
 			}
@@ -705,7 +706,7 @@ func manageCoin(sym string) {
 		} else if holdS >= 150.0 {
 			slBps = 10.0
 		}
-		defBailLong := ((lb-fairLt)/lb*10000.0 >= 4.0 && lb >= ae*(1.0-8.0/10000.0)) || (vel3sBps <= -5.0 && mid < ae)
+		defBailLong := (vel3sBps <= -8.5 && mid <= ae*(1.0-6.0/10000.0))
 		timeScratchLong := !st.trendMode && holdS >= 180.0 && lb >= ae*(1.0-8.0/10000.0)
 		if posUSD < 10.10 {
 			if (fairLt >= ae*(1.0+stepBps/10000.0) || mid <= ae*(1.0-slBps/10000.0) || defBailLong || timeScratchLong) && st.activeOrds["ASK"] == nil && now.Sub(st.lastOrdTS["ASK"]) >= 5*time.Second && takeWriteSlot(true) {
@@ -745,7 +746,7 @@ func manageCoin(sym string) {
 			}
 		} else {
 			st.trendMode = false
-			wantAsk := roundTo(math.Max(la, fairLt*(1.0+EdgeBps/10000.0)), m.PxDec)
+			wantAsk := roundTo(math.Max(la, fairLt*(1.0+m.EdgeBps/10000.0)), m.PxDec)
 			if wantAsk <= lb {
 				wantAsk = roundTo(lb+tick, m.PxDec)
 			}
@@ -834,7 +835,7 @@ func rebalanceFromTrades(tb []byte) {
 	}
 	totBudget := curEq * 1.2 // Smooth 1.2x auto-compounding notional (~$75 BTC / ~$45 ETH, max -$0.10 SL)
 	diff := math.Max(-0.5, math.Min(0.5, pnl["BTC"]-pnl["ETH"]))
-	btcShare := math.Max(0.50, math.Min(0.75, 0.65+diff*0.20))
+	btcShare := math.Max(0.65, math.Min(0.82, 0.75+diff*0.15))
 	btcClip := totBudget * btcShare
 	ethClip := totBudget - btcClip
 	for sym, clip := range map[string]float64{"BTC": btcClip, "ETH": ethClip} {
