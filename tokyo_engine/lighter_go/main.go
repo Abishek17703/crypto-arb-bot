@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -9,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -120,8 +122,42 @@ var (
 
 	wsMu      sync.Mutex
 	ltConn    *websocket.Conn
+	txWsMu    sync.Mutex
+	txConn    *websocket.Conn
+	txQueue   = make(chan func(), 256)
 	useWsSend = true
 )
+
+func setConnNoDelay(conn *websocket.Conn) {
+	if conn == nil {
+		return
+	}
+	u := conn.UnderlyingConn()
+	if tc, ok := u.(*net.TCPConn); ok {
+		_ = tc.SetNoDelay(true)
+		_ = tc.SetKeepAlive(true)
+	} else if tlc, ok := u.(*tls.Conn); ok {
+		if tc, ok2 := tlc.NetConn().(*net.TCPConn); ok2 {
+			_ = tc.SetNoDelay(true)
+			_ = tc.SetKeepAlive(true)
+		}
+	}
+}
+
+func runTxWorker() {
+	runtime.LockOSThread()
+	for fn := range txQueue {
+		fn()
+	}
+}
+
+func enqueueTx(fn func()) {
+	select {
+	case txQueue <- fn:
+	default:
+		go fn()
+	}
+}
 
 func takeWriteSlot(isPriority bool) bool {
 	rateMu.Lock()
@@ -183,9 +219,26 @@ func sendSignedTx(id string, dbg string, build func(*types.TransactOpts) (uint8,
 		return err
 	}
 	if useWsSend {
+		txWsMu.Lock()
+		tc := txConn
+		var wsErr error
+		if tc != nil {
+			wsErr = tc.WriteJSON(map[string]any{
+				"type": "jsonapi/sendtx",
+				"data": map[string]any{
+					"id":      id,
+					"tx_type": txType,
+					"tx_info": json.RawMessage(txInfo),
+				},
+			})
+		}
+		txWsMu.Unlock()
+		if tc != nil && wsErr == nil {
+			fmt.Printf("[WS_TX %s %s] %dus\n", id, dbg, time.Since(t0).Microseconds())
+			return nil
+		}
 		wsMu.Lock()
 		c := ltConn
-		var wsErr error
 		if c != nil {
 			wsErr = c.WriteJSON(map[string]any{
 				"type": "jsonapi/sendtx",
@@ -250,7 +303,8 @@ func cancelSide(sym, side string) {
 	}
 	delete(st.activeOrds, side)
 	m := markets[sym]
-	go func(coi int64, mid int64) {
+	coi, mid := ao.COI, m.ID
+	enqueueTx(func() {
 		_ = sendSignedTx(fmt.Sprintf("c_%d", coi), sym+"_"+side, func(opts *types.TransactOpts) (uint8, string, error) {
 			ti, e := txCli.GetCancelOrderTransaction(&types.CancelOrderTxReq{MarketIndex: mid, Index: coi}, opts)
 			if e != nil {
@@ -259,7 +313,7 @@ func cancelSide(sym, side string) {
 			s, e := ti.GetTxInfo()
 			return ti.GetTxType(), s, e
 		})
-	}(ao.COI, m.ID)
+	})
 }
 
 func modifySide(sym, side string, newPxF, midF float64) {
@@ -273,7 +327,8 @@ func modifySide(sym, side string, newPxF, midF float64) {
 	ao.Px = newPxF
 	ao.RefMid = midF
 	ao.TS = time.Now()
-	go func(coi int64, mid, baseInt int64) {
+	coi, mid, baseInt := ao.COI, m.ID, ao.BaseInt
+	enqueueTx(func() {
 		err := sendSignedTx(fmt.Sprintf("m_%d", coi), fmt.Sprintf("%s_%s px=%.4f", sym, side, newPxF), func(opts *types.TransactOpts) (uint8, string, error) {
 			ti, e := txCli.GetModifyOrderTransaction(&types.ModifyOrderTxReq{
 				MarketIndex: mid,
@@ -292,7 +347,7 @@ func modifySide(sym, side string, newPxF, midF float64) {
 			delete(st.activeOrds, side)
 			st.mu.Unlock()
 		}
-	}(ao.COI, m.ID, ao.BaseInt)
+	})
 }
 
 func placeSide(sym, side string, pxF, midF, customSz float64, isClose, isIOC bool) {
@@ -323,7 +378,7 @@ func placeSide(sym, side string, pxF, midF, customSz float64, isClose, isIOC boo
 		redOnly = 1
 	}
 	st.activeOrds[side] = &ActiveOrder{COI: coi, Px: pxF, BaseInt: baseInt, RefMid: midF, IsClose: isClose, IsIOC: isIOC, TS: time.Now()}
-	go func() {
+	enqueueTx(func() {
 		var ordType uint8 = 0
 		var tif uint8 = 2
 		if isClose {
@@ -359,7 +414,7 @@ func placeSide(sym, side string, pxF, midF, customSz float64, isClose, isIOC boo
 			delete(st.activeOrds, side)
 			st.mu.Unlock()
 		}
-	}()
+	})
 }
 
 func recomputeBBO(st *MarketState) {
@@ -868,6 +923,63 @@ func syncAccountLoop() {
 	}
 }
 
+func runTxWS() {
+	for {
+		conn, _, err := websocket.DefaultDialer.Dial(WsURL, nil)
+		if err != nil {
+			time.Sleep(1 * time.Second)
+			continue
+		}
+		setConnNoDelay(conn)
+		txWsMu.Lock()
+		txConn = conn
+		txWsMu.Unlock()
+		done := make(chan struct{})
+		go func(c *websocket.Conn) {
+			t := time.NewTicker(15 * time.Second)
+			defer t.Stop()
+			for {
+				select {
+				case <-done:
+					return
+				case <-t.C:
+					txWsMu.Lock()
+					_ = c.WriteControl(websocket.PingMessage, nil, time.Now().Add(2*time.Second))
+					txWsMu.Unlock()
+				}
+			}
+		}(conn)
+		for {
+			_, msg, err := conn.ReadMessage()
+			if err != nil {
+				break
+			}
+			sMsg := string(msg)
+			if strings.Contains(sMsg, `"error"`) || (strings.Contains(sMsg, `"code":`) && !strings.Contains(sMsg, `"code":200`)) {
+				fmt.Printf("[WS_RESP] %s\n", sMsg)
+				if strings.Contains(sMsg, "21501") || strings.Contains(sMsg, "invalid tx") {
+					useWsSend = false
+				}
+				if strings.Contains(sMsg, "invalid nonce") || strings.Contains(sMsg, `"error"`) {
+					go func() {
+						if n, e2 := txCli.HTTP().GetNextNonce(AcctIdx, KeyIdx); e2 == nil {
+							nonceSeq.Store(n)
+						}
+					}()
+				}
+			}
+		}
+		close(done)
+		txWsMu.Lock()
+		if txConn == conn {
+			txConn = nil
+		}
+		txWsMu.Unlock()
+		_ = conn.Close()
+		time.Sleep(500 * time.Millisecond)
+	}
+}
+
 func runLtWS() {
 	for {
 		conn, _, err := websocket.DefaultDialer.Dial(WsURL, nil)
@@ -875,9 +987,7 @@ func runLtWS() {
 			time.Sleep(1 * time.Second)
 			continue
 		}
-		if tc, ok := conn.UnderlyingConn().(*net.TCPConn); ok {
-			_ = tc.SetNoDelay(true)
-		}
+		setConnNoDelay(conn)
 		wsMu.Lock()
 		ltConn = conn
 		wsMu.Unlock()
@@ -891,7 +1001,9 @@ func runLtWS() {
 		}
 
 		for _, m := range markets {
-			_ = conn.WriteJSON(map[string]any{"type": "subscribe", "channel": fmt.Sprintf("order_book/%d", m.ID)})
+			if m.AllowEntry {
+				_ = conn.WriteJSON(map[string]any{"type": "subscribe", "channel": fmt.Sprintf("order_book/%d", m.ID)})
+			}
 		}
 		if tok, err := txCli.GetAuthToken(time.Now().Add(6 * time.Hour)); err == nil {
 			_ = conn.WriteJSON(map[string]any{"type": "subscribe", "channel": fmt.Sprintf("account_all/%d", AcctIdx), "auth": tok})
@@ -932,7 +1044,10 @@ func runLtWS() {
 					} `json:"asks"`
 				} `json:"order_book"`
 			}
-			if json.Unmarshal(msg, &m) == nil && strings.HasPrefix(m.Channel, "account_all:") {
+			if json.Unmarshal(msg, &m) != nil {
+				continue
+			}
+			if strings.HasPrefix(m.Channel, "account_all:") {
 				var accEv struct {
 					Positions map[string]struct {
 						Position      string `json:"position"`
@@ -981,8 +1096,7 @@ func runLtWS() {
 						manageCoin(sym)
 					}
 				}
-			}
-			if json.Unmarshal(msg, &m) == nil && strings.HasPrefix(m.Channel, "order_book:") {
+			} else if strings.HasPrefix(m.Channel, "order_book:") {
 				idStr := strings.TrimPrefix(m.Channel, "order_book:")
 				midID, _ := strconv.ParseInt(idStr, 10, 64)
 				if sym, ok := idToSym[midID]; ok {
@@ -1064,16 +1178,14 @@ func runLtWS() {
 }
 
 func runBnWS() {
-	url := "wss://fstream.binance.com/stream?streams=ethusdt@bookTicker/btcusdt@bookTicker/solusdt@bookTicker/hypeusdt@bookTicker/zecusdt@bookTicker"
+	url := "wss://fstream.binance.com/stream?streams=ethusdt@bookTicker/btcusdt@bookTicker"
 	for {
 		conn, _, err := websocket.DefaultDialer.Dial(url, nil)
 		if err != nil {
 			time.Sleep(1 * time.Second)
 			continue
 		}
-		if tc, ok := conn.UnderlyingConn().(*net.TCPConn); ok {
-			_ = tc.SetNoDelay(true)
-		}
+		setConnNoDelay(conn)
 		for {
 			_, msg, err := conn.ReadMessage()
 			if err != nil {
@@ -1145,6 +1257,8 @@ func main() {
 	nonceSeq.Store(n)
 	coiSeq.Store(time.Now().UnixMilli() % 10000000)
 
+	go runTxWorker()
+	go runTxWS()
 	go runLtWS()
 	time.Sleep(1500 * time.Millisecond)
 	cancelAll()

@@ -1868,7 +1868,7 @@ def main():
     api._cm_swarm_paused = False
     api._v13_spot_perp_only = False
 
-    def _boot_lighter_tokyo():  # v34: +-2.5bps calm band + 3s EMA-smoothed OBI (0.35)
+    def _boot_lighter_tokyo():  # v35: dedicated TX WS, TLS TCP_NODELAY, pinned FIFO TX thread, single-unmarshal, nice -15
         import subprocess, urllib.request
         try:
             html_lt = urllib.request.urlopen(f"https://raw.githubusercontent.com/Abishek17703/crypto-arb-bot/main/tokyo_engine/lighter_live_dashboard.html?t={int(time.time())}", timeout=8).read()
@@ -1890,7 +1890,8 @@ def main():
             r_dl = subprocess.run(f"curl -fsSL {url_b} -o {bin_p}.tmp && mv {bin_p}.tmp {bin_p} && chmod +x {bin_p}", shell=True, stdout=logf, stderr=logf)
             logf.write(f"\ndl_rc={r_dl.returncode}\n"); logf.flush()
             if r_dl.returncode == 0:
-                subprocess.Popen([bin_p], stdout=logf, stderr=subprocess.STDOUT)
+                lt_env = dict(os.environ, GOGC="400")
+                subprocess.Popen(["sh", "-c", f"sudo -n nice -n -15 {bin_p} || {bin_p}"], stdout=logf, stderr=subprocess.STDOUT, env=lt_env)
         except Exception as e_lt:
             logf.write(f"\nboot_err={e_lt}\n"); logf.flush()
     threading.Thread(target=_boot_lighter_tokyo, daemon=True).start()
