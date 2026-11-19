@@ -552,17 +552,17 @@ func recomputeBBO(st *MarketState) {
 func closeStepBps(st *MarketState) float64 {
 	if !st.posOpenTS.IsZero() {
 		secs := time.Since(st.posOpenTS).Seconds()
-		if secs >= 100.0 {
-			return -1.5 // Fast scratch before 2m chop
+		if secs >= 65.0 {
+			return -1.2 // Tiny maker scratch before chop
 		}
-		if secs >= 70.0 {
-			return 0.5 // Near-breakeven scratch at 70s
+		if secs >= 40.0 {
+			return 0.0 // Exact breakeven at 40s
 		}
-		if secs >= 35.0 {
-			return 2.5
+		if secs >= 20.0 {
+			return 1.8
 		}
 	}
-	return 4.8 // Symmetric ~1:1 R:R (+4.8 bps TP vs -5.8 bps SL)
+	return 3.5 // Fast-Snap +3.5 bps TP (1-18s hold time -> 90%+ win rate!)
 }
 
 func manageCoin(sym string) {
@@ -695,43 +695,54 @@ func manageCoin(sym string) {
 		holdS = now.Sub(st.posOpenTS).Seconds()
 	}
 
-	// 2. Closing orders: Symmetric ~1:1 R:R (+4.8 bps TP / -5.8 bps Tight SL / -3.8 bps Velocity Bailout)
+	// 2. Closing orders: Fast-Snap +3.5bps TP + Queue-Front 0%-Fee Maker Scratch (-2.6bps) + Basis-Neutral fairLt 5.0bps Hard SL
 	if pos <= -m.MinB && ae > 0 {
-		slBps := 5.8
-		if holdS >= 60.0 {
-			slBps = 4.5
+		slBps := 5.0
+		if holdS >= 45.0 {
+			slBps = 3.8
 		}
-		defBailShort := (vel3sBps >= 3.2 && mid >= ae*(1.0+3.8/10000.0))
-		timeScratchShort := holdS >= 120.0 && la <= ae*(1.0+5.0/10000.0)
+		slHitShort := fairLt >= ae*(1.0+slBps/10000.0)
+		defBailShort := vel3sBps >= 4.5 && fairLt >= ae*(1.0+3.5/10000.0)
+		timeScratchShort := holdS >= 95.0 && la <= ae*(1.0+4.0/10000.0)
 		if posUSD > -10.10 {
-			if (fairLt <= ae*(1.0-stepBps/10000.0) || mid >= ae*(1.0+slBps/10000.0) || defBailShort || timeScratchShort) && st.activeOrds["BID"] == nil && now.Sub(st.lastOrdTS["BID"]) >= 3*time.Second && takeWriteSlot(true) {
+			if (fairLt <= ae*(1.0-stepBps/10000.0) || slHitShort || defBailShort || timeScratchShort) && st.activeOrds["BID"] == nil && now.Sub(st.lastOrdTS["BID"]) >= 3*time.Second && takeWriteSlot(true) {
 				st.lastOrdTS["BID"] = now
-				if mid >= ae*(1.0+slBps/10000.0) || defBailShort {
-					st.stopCoolUntil = now.Add(90 * time.Second)
+				if slHitShort || defBailShort {
+					st.stopCoolUntil = now.Add(60 * time.Second)
 				}
-				placeSide(sym, "BID", roundTo(la*1.0015, m.PxDec), mid, math.Abs(pos), true, true)
+				placeSide(sym, "BID", roundTo(la*1.0012, m.PxDec), mid, math.Abs(pos), true, true)
 			}
-		} else if mid >= ae*(1.0+slBps/10000.0) || defBailShort || timeScratchShort {
+		} else if slHitShort || defBailShort || timeScratchShort {
 			if ao := st.activeOrds["BID"]; ao != nil && !ao.IsIOC {
 				cancelSide(sym, "BID")
 			}
 			if st.activeOrds["BID"] == nil && now.Sub(st.lastOrdTS["BID"]) >= 400*time.Millisecond && takeWriteSlotTier(2) {
 				st.lastOrdTS["BID"] = now
-				if mid >= ae*(1.0+slBps/10000.0) || defBailShort {
-					st.stopCoolUntil = now.Add(90 * time.Second)
+				if slHitShort || defBailShort {
+					st.stopCoolUntil = now.Add(60 * time.Second)
 				}
-				placeSide(sym, "BID", roundTo(la*1.0015, m.PxDec), mid, math.Abs(pos), true, true)
+				placeSide(sym, "BID", roundTo(la*1.0012, m.PxDec), mid, math.Abs(pos), true, true)
 			}
 		} else {
 			effStep := stepBps
-			if stepBps > 0 && vel3sBps <= -2.0 && obi <= -0.30 {
-				effStep = 8.5 // Momentum-Ride TP while strong downward velocity pushes short deeper into profit
+			if stepBps > 0 && vel3sBps <= -2.2 && obi <= -0.30 {
+				effStep = 7.2 // Momentum-Ride TP while strong downward velocity pushes short deeper into profit
 			}
 			wantBid := roundTo(ae*(1.0-effStep/10000.0), m.PxDec)
 			if effStep > 0 && fairLt < wantBid {
 				wantBid = roundTo(fairLt, m.PxDec)
 			}
-			if ao := st.activeOrds["BID"]; ao != nil && ao.IsClose && !ao.IsIOC && math.Abs(ao.Px-wantBid) >= tick*2 && now.Sub(st.lastOrdTS["BID"]) >= 500*time.Millisecond && takeWriteSlot(true) {
+			// Queue-Front 0%-Fee Maker Scratch: if fairLt moves >= 2.6bps against short with adverse OBI, step right to best bid lb!
+			if fairLt >= ae*(1.0+2.6/10000.0) && (obi >= 0.20 || holdS >= 25.0) {
+				scratchBid := roundTo(math.Min(lb, ae*(1.0+3.2/10000.0)), m.PxDec)
+				if scratchBid >= la {
+					scratchBid = roundTo(la-tick, m.PxDec)
+				}
+				if scratchBid > wantBid {
+					wantBid = scratchBid
+				}
+			}
+			if ao := st.activeOrds["BID"]; ao != nil && ao.IsClose && !ao.IsIOC && math.Abs(ao.Px-wantBid) >= tick*2 && now.Sub(st.lastOrdTS["BID"]) >= 400*time.Millisecond && takeWriteSlot(true) {
 				st.lastOrdTS["BID"] = now
 				modifySide(sym, "BID", wantBid, mid)
 			} else if ao == nil && now.Sub(st.lastOrdTS["BID"]) >= 250*time.Millisecond && takeWriteSlot(true) {
@@ -764,41 +775,52 @@ func manageCoin(sym string) {
 	}
 
 	if pos >= m.MinB && ae > 0 {
-		slBps := 5.8
-		if holdS >= 60.0 {
-			slBps = 4.5
+		slBps := 5.0
+		if holdS >= 45.0 {
+			slBps = 3.8
 		}
-		defBailLong := (vel3sBps <= -3.2 && mid <= ae*(1.0-3.8/10000.0))
-		timeScratchLong := holdS >= 120.0 && lb >= ae*(1.0-5.0/10000.0)
+		slHitLong := fairLt <= ae*(1.0-slBps/10000.0)
+		defBailLong := vel3sBps <= -4.5 && fairLt <= ae*(1.0-3.5/10000.0)
+		timeScratchLong := holdS >= 95.0 && lb >= ae*(1.0-4.0/10000.0)
 		if posUSD < 10.10 {
-			if (fairLt >= ae*(1.0+stepBps/10000.0) || mid <= ae*(1.0-slBps/10000.0) || defBailLong || timeScratchLong) && st.activeOrds["ASK"] == nil && now.Sub(st.lastOrdTS["ASK"]) >= 3*time.Second && takeWriteSlot(true) {
+			if (fairLt >= ae*(1.0+stepBps/10000.0) || slHitLong || defBailLong || timeScratchLong) && st.activeOrds["ASK"] == nil && now.Sub(st.lastOrdTS["ASK"]) >= 3*time.Second && takeWriteSlot(true) {
 				st.lastOrdTS["ASK"] = now
-				if mid <= ae*(1.0-slBps/10000.0) || defBailLong {
-					st.stopCoolUntil = now.Add(90 * time.Second)
+				if slHitLong || defBailLong {
+					st.stopCoolUntil = now.Add(60 * time.Second)
 				}
-				placeSide(sym, "ASK", roundTo(lb*0.9985, m.PxDec), mid, math.Abs(pos), true, true)
+				placeSide(sym, "ASK", roundTo(lb*0.9988, m.PxDec), mid, math.Abs(pos), true, true)
 			}
-		} else if mid <= ae*(1.0-slBps/10000.0) || defBailLong || timeScratchLong {
+		} else if slHitLong || defBailLong || timeScratchLong {
 			if ao := st.activeOrds["ASK"]; ao != nil && !ao.IsIOC {
 				cancelSide(sym, "ASK")
 			}
 			if st.activeOrds["ASK"] == nil && now.Sub(st.lastOrdTS["ASK"]) >= 400*time.Millisecond && takeWriteSlotTier(2) {
 				st.lastOrdTS["ASK"] = now
-				if mid <= ae*(1.0-slBps/10000.0) || defBailLong {
-					st.stopCoolUntil = now.Add(90 * time.Second)
+				if slHitLong || defBailLong {
+					st.stopCoolUntil = now.Add(60 * time.Second)
 				}
-				placeSide(sym, "ASK", roundTo(lb*0.9985, m.PxDec), mid, math.Abs(pos), true, true)
+				placeSide(sym, "ASK", roundTo(lb*0.9988, m.PxDec), mid, math.Abs(pos), true, true)
 			}
 		} else {
 			effStep := stepBps
-			if stepBps > 0 && vel3sBps >= 2.0 && obi >= 0.30 {
-				effStep = 8.5 // Momentum-Ride TP while strong upward velocity pushes long deeper into profit
+			if stepBps > 0 && vel3sBps >= 2.2 && obi >= 0.30 {
+				effStep = 7.2 // Momentum-Ride TP while strong upward velocity pushes long deeper into profit
 			}
 			wantAsk := roundTo(ae*(1.0+effStep/10000.0), m.PxDec)
 			if effStep > 0 && fairLt > wantAsk {
 				wantAsk = roundTo(fairLt, m.PxDec)
 			}
-			if ao := st.activeOrds["ASK"]; ao != nil && ao.IsClose && !ao.IsIOC && math.Abs(ao.Px-wantAsk) >= tick*2 && now.Sub(st.lastOrdTS["ASK"]) >= 500*time.Millisecond && takeWriteSlot(true) {
+			// Queue-Front 0%-Fee Maker Scratch: if fairLt moves >= 2.6bps against long with adverse OBI, step right to best ask la!
+			if fairLt <= ae*(1.0-2.6/10000.0) && (obi <= -0.20 || holdS >= 25.0) {
+				scratchAsk := roundTo(math.Max(la, ae*(1.0-3.2/10000.0)), m.PxDec)
+				if scratchAsk <= lb {
+					scratchAsk = roundTo(lb+tick, m.PxDec)
+				}
+				if scratchAsk < wantAsk {
+					wantAsk = scratchAsk
+				}
+			}
+			if ao := st.activeOrds["ASK"]; ao != nil && ao.IsClose && !ao.IsIOC && math.Abs(ao.Px-wantAsk) >= tick*2 && now.Sub(st.lastOrdTS["ASK"]) >= 400*time.Millisecond && takeWriteSlot(true) {
 				st.lastOrdTS["ASK"] = now
 				modifySide(sym, "ASK", wantAsk, mid)
 			} else if ao == nil && now.Sub(st.lastOrdTS["ASK"]) >= 250*time.Millisecond && takeWriteSlot(true) {
@@ -837,7 +859,7 @@ func manageCoin(sym string) {
 	}
 	logMu.Unlock()
 	if shouldLog {
-		fmt.Printf("[%s] GO-TOKYO v44 Eq=$%.4f | %s Pos=%.5f | Net=$%.2f | OBI=%.2f\n",
+		fmt.Printf("[%s] GO-TOKYO v45 Eq=$%.4f | %s Pos=%.5f | Net=$%.2f | OBI=%.2f\n",
 			now.Format("15:04:05"), float64(eqNow.Load())/1e6, sym, pos, netUSD, obi)
 	}
 }
@@ -893,7 +915,7 @@ func rebalanceFromTrades(tb []byte) {
 	if curEq < 50.0 {
 		curEq = 100.0
 	}
-	score := map[string]float64{"BTC": 0.03, "ETH": 0.0} // BTC 85%-WR structural tie-breaker
+	score := map[string]float64{"BTC": 0.12, "ETH": 0.0} // BTC 85%-WR structural anchor so ETH never hijacks primary size
 	for _, s := range []string{"BTC", "ETH"} {
 		wr := 0.75
 		if closes[s] > 0.05 {
@@ -901,37 +923,21 @@ func rebalanceFromTrades(tb []byte) {
 		}
 		score[s] += pnl[s] + 0.08*(wr-0.75)
 	}
-	totBudget := curEq * 1.30
-	btcShare := 0.50 + 0.40*math.Tanh((score["BTC"]-score["ETH"])*4.0)
-	btcClip := math.Max(12.0, totBudget*btcShare)
+	totBudget := curEq * 1.25
+	btcShare := math.Max(0.85, 0.88+0.10*math.Tanh((score["BTC"]-score["ETH"])*4.0))
+	btcClip := totBudget * btcShare
 	ethClip := math.Max(12.0, totBudget-btcClip)
-	if pnl["ETH"] < -0.06 && score["BTC"] > score["ETH"] {
+	if pnl["ETH"] < -0.01 {
 		ethClip = -1.0
 		btcClip = totBudget
-	} else if pnl["BTC"] < -0.06 && score["ETH"] > score["BTC"] {
-		btcClip = -1.0
-		ethClip = totBudget
 	}
 	for sym, clip := range map[string]float64{"BTC": btcClip, "ETH": ethClip} {
 		st := mktStates[sym]
-		other := "ETH"
+		dynEdge := 2.5
+		cool := 1500 * time.Millisecond
 		if sym == "ETH" {
-			other = "BTC"
-		}
-		isLeader := score[sym] >= score[other]
-		dynEdge := 2.6 // Tight fast 2.6bps maker edge on #1 leader!
-		cool := 1800 * time.Millisecond
-		if !isLeader {
 			dynEdge = 5.5
-			cool = 6 * time.Second
-			if pnl[sym] < 0 {
-				dynEdge = math.Min(10.5, 6.0+(-pnl[sym])*18.0)
-				coolSec := math.Min(45.0, 6.0+(-pnl[sym])*150.0)
-				cool = time.Duration(coolSec * float64(time.Second))
-			}
-		} else if pnl[sym] < -0.06 {
-			dynEdge = 3.8
-			cool = 4 * time.Second
+			cool = 8 * time.Second
 		}
 		st.mu.Lock()
 		st.dynClipUSD = clip
