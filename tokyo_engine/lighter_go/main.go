@@ -50,7 +50,7 @@ type Market struct {
 
 var markets = map[string]Market{
 	"ETH":  {Sym: "ETH", ID: 0, SzDec: 4, PxDec: 2, MinB: 0.0020, AllowEntry: false, ClipUSD: 15.0, EdgeBps: 8.0},
-	"BTC":  {Sym: "BTC", ID: 1, SzDec: 5, PxDec: 1, MinB: 0.00007, AllowEntry: true, ClipUSD: 90.0, EdgeBps: 6.0},
+	"BTC":  {Sym: "BTC", ID: 1, SzDec: 5, PxDec: 1, MinB: 0.00007, AllowEntry: true, ClipUSD: 90.0, EdgeBps: 3.8},
 	"SOL":  {Sym: "SOL", ID: 2, SzDec: 3, PxDec: 3, MinB: 0.055, AllowEntry: false, ClipUSD: 12.0, EdgeBps: 8.0},
 	"HYPE": {Sym: "HYPE", ID: 24, SzDec: 2, PxDec: 4, MinB: 0.07, AllowEntry: false, ClipUSD: 12.0, EdgeBps: 10.0},
 	"ZEC":  {Sym: "ZEC", ID: 90, SzDec: 3, PxDec: 3, MinB: 0.004, AllowEntry: false, ClipUSD: 12.0, EdgeBps: 10.0},
@@ -620,21 +620,23 @@ func manageCoin(sym string) {
 	otherLong := otherDirExposureUSD(sym, true)
 	otherShort := otherDirExposureUSD(sym, false)
 	coinActive := m.AllowEntry && st.dynClipUSD >= 0
-	inCool := now.Before(st.stopCoolUntil) || now.Sub(st.lastFillTS) < 6*time.Second
-	calmMkt := math.Abs(trendBps) <= 2.2 && math.Abs(impBps) <= 2.0
-	bidSafe := coinActive && !inCool && now.After(st.dropCoolUntil) && vel3sBps > -2.0 && calmMkt && obi >= -ObiLimit && otherLong < netCap
-	askSafe := coinActive && !inCool && now.After(st.pumpCoolUntil) && vel3sBps < 2.0 && calmMkt && obi <= ObiLimit && otherShort < netCap
-	keepBid := coinActive && !inCool && now.After(st.dropCoolUntil) && vel3sBps > -3.5 && obi >= -0.58 && st.rawObi > -0.78 && otherLong < netCap
-	keepAsk := coinActive && !inCool && now.After(st.pumpCoolUntil) && vel3sBps < 3.5 && obi <= 0.58 && st.rawObi < 0.78 && otherShort < netCap
+	inCool := now.Before(st.stopCoolUntil) || now.Sub(st.lastFillTS) < 4*time.Second
+	// Directional calm check: allow quoting WITH a strong trend (e.g. +$570 V-rally), block quoting AGAINST it!
+	bidAllowed := trendBps >= -2.2 && impBps >= -2.5 && impBps <= 5.0
+	askAllowed := trendBps <= 2.2 && impBps <= 2.5 && impBps >= -5.0
+	bidSafe := coinActive && !inCool && now.After(st.dropCoolUntil) && vel3sBps > -2.0 && bidAllowed && obi >= -ObiLimit && otherLong < netCap
+	askSafe := coinActive && !inCool && now.After(st.pumpCoolUntil) && vel3sBps < 2.0 && askAllowed && obi <= ObiLimit && otherShort < netCap
+	keepBid := coinActive && !inCool && now.After(st.dropCoolUntil) && trendBps >= -3.5 && vel3sBps > -3.5 && obi >= -0.58 && st.rawObi > -0.78 && otherLong < netCap
+	keepAsk := coinActive && !inCool && now.After(st.pumpCoolUntil) && trendBps <= 3.5 && vel3sBps < 3.5 && obi <= 0.58 && st.rawObi < 0.78 && otherShort < netCap
 
 	edge := st.dynEdgeBps
 	if edge <= 0 {
 		edge = m.EdgeBps
 	}
 
-	// Proven v38 Stale-Quote Snipe (5.0bps lead-lag + OBI 0.25, limit-capped at fairLt - 1.5bps!)
-	staleSnipeBuy := coinActive && !inCool && now.After(st.dropCoolUntil) && math.Abs(posUSD) < 1.0 && otherLong < netCap && (fairLt-la)/la*10000.0 >= 5.0 && vel3sBps > -1.0 && obi >= 0.25
-	staleSnipeSell := coinActive && !inCool && now.After(st.pumpCoolUntil) && math.Abs(posUSD) < 1.0 && otherShort < netCap && (lb-fairLt)/lb*10000.0 >= 5.0 && vel3sBps < 1.0 && obi <= -0.25
+	// Fast Stale-Quote Snipe (3.6bps lead-lag + OBI 0.20, limit-capped at fairLt - 1.4bps!)
+	staleSnipeBuy := coinActive && !inCool && now.After(st.dropCoolUntil) && math.Abs(posUSD) < 1.0 && otherLong < netCap && (fairLt-la)/la*10000.0 >= 3.6 && vel3sBps > -0.8 && obi >= 0.20
+	staleSnipeSell := coinActive && !inCool && now.After(st.pumpCoolUntil) && math.Abs(posUSD) < 1.0 && otherShort < netCap && (lb-fairLt)/lb*10000.0 >= 3.6 && vel3sBps < 0.8 && obi <= -0.20
 	btcTrendBuy := staleSnipeBuy
 	btcTrendSell := staleSnipeSell
 
@@ -659,8 +661,8 @@ func manageCoin(sym string) {
 		}
 		tooClose := (side == "BID" && ao.Px >= la) || (side == "ASK" && ao.Px <= lb)
 		if !ao.IsClose {
-			// 0ms Tier-2 Anti-Pickoff Shield: pull 6.0bps resting quote if Binance fairLt moves within 2.0 bps!
-			aboutToGetPickedOff := (side == "BID" && fairLt <= ao.Px*(1.0+2.0/10000.0)) || (side == "ASK" && fairLt >= ao.Px*(1.0-2.0/10000.0))
+			// 0ms Tier-2 Anti-Pickoff Shield: pull 3.8bps resting quote if Binance fairLt moves within 1.4 bps!
+			aboutToGetPickedOff := (side == "BID" && fairLt <= ao.Px*(1.0+1.4/10000.0)) || (side == "ASK" && fairLt >= ao.Px*(1.0-1.4/10000.0))
 			safeNow := !aboutToGetPickedOff && ((side == "BID" && (keepBid || btcTrendBuy)) || (side == "ASK" && (keepAsk || btcTrendSell)))
 			if !safeNow {
 				if (aboutToGetPickedOff && takeWriteSlotTier(2)) || (!aboutToGetPickedOff && takeWriteSlot(true)) {
@@ -834,7 +836,7 @@ func manageCoin(sym string) {
 	}
 	logMu.Unlock()
 	if shouldLog {
-		fmt.Printf("[%s] GO-TOKYO v48 Eq=$%.4f | %s Pos=%.5f | Net=$%.2f | OBI=%.2f\n",
+		fmt.Printf("[%s] GO-TOKYO v49 Eq=$%.4f | %s Pos=%.5f | Net=$%.2f | OBI=%.2f\n",
 			now.Format("15:04:05"), float64(eqNow.Load())/1e6, sym, pos, netUSD, obi)
 	}
 }
@@ -904,8 +906,8 @@ func rebalanceFromTrades(tb []byte) {
 	}
 	for sym, clip := range map[string]float64{"BTC": btcClip, "ETH": -1.0} {
 		st := mktStates[sym]
-		dynEdge := 6.0
-		cool := 4 * time.Second
+		dynEdge := 3.8
+		cool := 2 * time.Second
 		if sym == "ETH" {
 			dynEdge = 8.0
 			cool = 15 * time.Second
