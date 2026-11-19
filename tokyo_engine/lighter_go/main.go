@@ -46,8 +46,8 @@ type Market struct {
 }
 
 var markets = map[string]Market{
-	"ETH":  {Sym: "ETH", ID: 0, SzDec: 4, PxDec: 2, MinB: 0.0020, AllowEntry: true, ClipUSD: 55.0},
-	"BTC":  {Sym: "BTC", ID: 1, SzDec: 5, PxDec: 1, MinB: 0.00007, AllowEntry: true, ClipUSD: 35.0},
+	"ETH":  {Sym: "ETH", ID: 0, SzDec: 4, PxDec: 2, MinB: 0.0020, AllowEntry: true, ClipUSD: 25.0},
+	"BTC":  {Sym: "BTC", ID: 1, SzDec: 5, PxDec: 1, MinB: 0.00007, AllowEntry: true, ClipUSD: 60.0},
 	"SOL":  {Sym: "SOL", ID: 2, SzDec: 3, PxDec: 3, MinB: 0.055, AllowEntry: false, ClipUSD: 12.0},
 	"HYPE": {Sym: "HYPE", ID: 24, SzDec: 2, PxDec: 4, MinB: 0.07, AllowEntry: false, ClipUSD: 12.0},
 	"ZEC":  {Sym: "ZEC", ID: 90, SzDec: 3, PxDec: 3, MinB: 0.004, AllowEntry: false, ClipUSD: 12.0},
@@ -82,9 +82,12 @@ type MarketState struct {
 	lastFillTS    time.Time
 	stopCoolUntil time.Time
 	trendMode     bool
-	activeOrds  map[string]*ActiveOrder
-	lastOrdTS   map[string]time.Time
-	netMicroUSD atomic.Int64
+	dynClipUSD    float64
+	entryCool     time.Duration
+	rollPnl       float64
+	activeOrds    map[string]*ActiveOrder
+	lastOrdTS     map[string]time.Time
+	netMicroUSD   atomic.Int64
 }
 
 func newMarketState() *MarketState {
@@ -93,6 +96,7 @@ func newMarketState() *MarketState {
 		bookAsks:   map[string]float64{},
 		activeOrds: map[string]*ActiveOrder{},
 		lastOrdTS:  map[string]time.Time{},
+		entryCool:  4 * time.Second,
 	}
 }
 
@@ -294,7 +298,11 @@ func placeSide(sym, side string, pxF, midF, customSz float64, isClose, isIOC boo
 	m := markets[sym]
 	baseF := customSz
 	if baseF <= 0 {
-		baseF = math.Max(m.MinB, m.ClipUSD/pxF)
+		clip := st.dynClipUSD
+		if clip <= 0 {
+			clip = m.ClipUSD
+		}
+		baseF = math.Max(m.MinB, clip/pxF)
 	}
 	baseInt := int64(math.Round(baseF * math.Pow10(m.SzDec)))
 	if !isClose {
@@ -381,10 +389,10 @@ func closeStepBps(st *MarketState) float64 {
 			return 0.0 // Breakeven unstick after 20m
 		}
 		if mins >= 10.0 {
-			return 2.5
+			return 2.0
 		}
 	}
-	return 6.0
+	return 4.0
 }
 
 func manageCoin(sym string) {
@@ -478,7 +486,7 @@ func manageCoin(sym string) {
 			if (mid <= ae*(1.0-stepBps/10000.0) || mid >= ae*(1.0+slBps/10000.0)) && st.activeOrds["BID"] == nil && now.Sub(st.lastOrdTS["BID"]) >= 5*time.Second && takeWriteSlot(true) {
 				st.lastOrdTS["BID"] = now
 				if mid >= ae*(1.0+slBps/10000.0) {
-					st.stopCoolUntil = now.Add(60 * time.Second)
+					st.stopCoolUntil = now.Add(180 * time.Second)
 				}
 				placeSide(sym, "BID", roundTo(la*1.005, m.PxDec), mid, math.Abs(pos), true, true)
 			}
@@ -488,7 +496,7 @@ func manageCoin(sym string) {
 			}
 			if st.activeOrds["BID"] == nil && now.Sub(st.lastOrdTS["BID"]) >= 500*time.Millisecond && takeWriteSlot(true) {
 				st.lastOrdTS["BID"] = now
-				st.stopCoolUntil = now.Add(60 * time.Second)
+				st.stopCoolUntil = now.Add(180 * time.Second)
 				placeSide(sym, "BID", roundTo(la*1.005, m.PxDec), mid, math.Abs(pos), true, true)
 			}
 		} else {
@@ -517,7 +525,11 @@ func manageCoin(sym string) {
 			if wantBid >= la {
 				wantBid = roundTo(la-tick, m.PxDec)
 			}
-			if st.activeOrds["BID"] == nil && now.Sub(st.lastOrdTS["BID"]) >= 4*time.Second && takeWriteSlot(false) {
+			eCool := st.entryCool
+			if eCool < 4*time.Second {
+				eCool = 4 * time.Second
+			}
+			if st.activeOrds["BID"] == nil && now.Sub(st.lastOrdTS["BID"]) >= eCool && takeWriteSlot(false) {
 				st.lastOrdTS["BID"] = now
 				placeSide(sym, "BID", wantBid, mid, 0, false, false)
 			}
@@ -533,7 +545,7 @@ func manageCoin(sym string) {
 			if (mid >= ae*(1.0+stepBps/10000.0) || mid <= ae*(1.0-slBps/10000.0)) && st.activeOrds["ASK"] == nil && now.Sub(st.lastOrdTS["ASK"]) >= 5*time.Second && takeWriteSlot(true) {
 				st.lastOrdTS["ASK"] = now
 				if mid <= ae*(1.0-slBps/10000.0) {
-					st.stopCoolUntil = now.Add(60 * time.Second)
+					st.stopCoolUntil = now.Add(180 * time.Second)
 				}
 				placeSide(sym, "ASK", roundTo(lb*0.995, m.PxDec), mid, math.Abs(pos), true, true)
 			}
@@ -543,7 +555,7 @@ func manageCoin(sym string) {
 			}
 			if st.activeOrds["ASK"] == nil && now.Sub(st.lastOrdTS["ASK"]) >= 500*time.Millisecond && takeWriteSlot(true) {
 				st.lastOrdTS["ASK"] = now
-				st.stopCoolUntil = now.Add(60 * time.Second)
+				st.stopCoolUntil = now.Add(180 * time.Second)
 				placeSide(sym, "ASK", roundTo(lb*0.995, m.PxDec), mid, math.Abs(pos), true, true)
 			}
 		} else {
@@ -572,7 +584,11 @@ func manageCoin(sym string) {
 			if wantAsk <= lb {
 				wantAsk = roundTo(lb+tick, m.PxDec)
 			}
-			if st.activeOrds["ASK"] == nil && now.Sub(st.lastOrdTS["ASK"]) >= 4*time.Second && takeWriteSlot(false) {
+			eCool := st.entryCool
+			if eCool < 4*time.Second {
+				eCool = 4 * time.Second
+			}
+			if st.activeOrds["ASK"] == nil && now.Sub(st.lastOrdTS["ASK"]) >= eCool && takeWriteSlot(false) {
 				st.lastOrdTS["ASK"] = now
 				placeSide(sym, "ASK", wantAsk, mid, 0, false, false)
 			}
@@ -591,6 +607,79 @@ func manageCoin(sym string) {
 	}
 }
 
+func rebalanceFromTrades(tb []byte) {
+	var resp struct {
+		Trades []struct {
+			Symbol string `json:"market_symbol"`
+			Size   string `json:"size"`
+			Price  string `json:"price"`
+			BidID  int64  `json:"bid_account_id"`
+			TS     int64  `json:"timestamp"`
+			ID     int64  `json:"trade_id"`
+		} `json:"trades"`
+	}
+	if json.Unmarshal(tb, &resp) != nil || len(resp.Trades) == 0 {
+		return
+	}
+	pos := map[string]float64{}
+	cost := map[string]float64{}
+	pnl := map[string]float64{"BTC": 0, "ETH": 0}
+	for i := len(resp.Trades) - 1; i >= 0; i-- {
+		t := resp.Trades[i]
+		s := t.Symbol
+		if s != "BTC" && s != "ETH" {
+			continue
+		}
+		sz, _ := strconv.ParseFloat(t.Size, 64)
+		px, _ := strconv.ParseFloat(t.Price, 64)
+		dq := -sz
+		if t.BidID == AcctIdx {
+			dq = sz
+		}
+		p0, c0 := pos[s], cost[s]
+		if math.Abs(p0) < 1e-8 || (p0 > 0 && dq > 0) || (p0 < 0 && dq < 0) {
+			pos[s] = p0 + dq
+			cost[s] = c0 + dq*px
+		} else {
+			cq := math.Min(math.Abs(p0), math.Abs(dq))
+			if cq > 1e-8 {
+				ai := math.Abs(c0 / p0)
+				if p0 > 0 {
+					pnl[s] += cq * (px - ai)
+				} else {
+					pnl[s] += cq * (ai - px)
+				}
+			}
+			rem := p0 + dq
+			if math.Abs(rem) < 1e-8 {
+				pos[s] = 0
+				cost[s] = 0
+			} else if (p0 > 0 && rem > 0) || (p0 < 0 && rem < 0) {
+				pos[s] = rem
+				cost[s] = rem * math.Abs(c0/p0)
+			} else {
+				pos[s] = rem
+				cost[s] = rem * px
+			}
+		}
+	}
+	diff := math.Max(-0.5, math.Min(0.5, pnl["BTC"]-pnl["ETH"]))
+	btcClip := math.Max(20.0, math.Min(65.0, 42.5+diff*45.0))
+	ethClip := 85.0 - btcClip
+	for sym, clip := range map[string]float64{"BTC": btcClip, "ETH": ethClip} {
+		st := mktStates[sym]
+		cool := 4 * time.Second
+		if pnl[sym] < -0.05 {
+			cool = 20 * time.Second
+		}
+		st.mu.Lock()
+		st.dynClipUSD = clip
+		st.entryCool = cool
+		st.rollPnl = pnl[sym]
+		st.mu.Unlock()
+	}
+}
+
 func syncAccountLoop() {
 	hc := &http.Client{Timeout: 6 * time.Second}
 	url := fmt.Sprintf("%s/api/v1/account?by=index&value=%d", BaseURL, AcctIdx)
@@ -605,6 +694,7 @@ func syncAccountLoop() {
 				if len(tb) > 20 && strings.Contains(string(tb), `"trades"`) {
 					_ = os.WriteFile("/tmp/lighter_trades.json.tmp", tb, 0644)
 					_ = os.Rename("/tmp/lighter_trades.json.tmp", "/tmp/lighter_trades.json")
+					rebalanceFromTrades(tb)
 				}
 			}
 		}
