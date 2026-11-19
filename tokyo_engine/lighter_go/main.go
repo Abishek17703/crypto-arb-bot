@@ -415,10 +415,10 @@ func manageCoin(sym string) {
 		trendBps = (ef - es) / es * 10000.0
 		impBps = (mid - ef) / ef * 10000.0
 	}
-	// High-quality entry filters: Strict Anti-trend shield (0.5bps) + OBI toxic-flow filter (0.25) + 60s post-SL cooldown + 8s post-fill guard
+	// High-quality entry filters: Strict momentum alignment (impBps >= 0 for longs, <= 0 for shorts) + OBI (0.25) + correlated net cap ($30)
 	inCool := now.Before(st.stopCoolUntil) || now.Sub(st.lastFillTS) < 8*time.Second
-	bidSafe := m.AllowEntry && !inCool && trendBps >= -0.5 && impBps >= -0.5 && obi >= -ObiLimit && netUSD < 60.0
-	askSafe := m.AllowEntry && !inCool && trendBps <= 0.5 && impBps <= 0.5 && obi <= ObiLimit && netUSD > -60.0
+	bidSafe := m.AllowEntry && !inCool && trendBps >= 0.0 && impBps >= 0.0 && obi >= -ObiLimit && netUSD < 30.0
+	askSafe := m.AllowEntry && !inCool && trendBps <= 0.0 && impBps <= 0.0 && obi <= ObiLimit && netUSD > -30.0
 
 	// BTC Trend-Start breakout override (18 bps impulse + OBI confirm -> immediate 0%-fee IOC entry)
 	btcTrendBuy := sym == "BTC" && !inCool && math.Abs(posUSD) < 5.0 && impBps >= 18.0 && trendBps > 0 && obi >= 0.25
