@@ -21,7 +21,7 @@ jobs:
           gradle-version: '8.9'
       - name: Build Debug APK
         working-directory: mobile_app
-        run: gradle assembleDebug --no-daemon
+        run: gradle assembleDebug --no-daemon --max-workers=2
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
