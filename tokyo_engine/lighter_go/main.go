@@ -29,8 +29,8 @@ const (
 	ChainID      = uint32(304)
 	PrivKey      = "56491130b44362b137b0a3b46dc63d647865876f11ff1613c857f946ec8612f6e4f216d065f4695a"
 	ClipUSD      = 55.00
-	EdgeBps      = 10.5 // High-selectivity 10.5 bps entry around microprice
-	CancelBps    = 0.5  // Instant 0.5 bps anti-trend cancel shield
+	EdgeBps      = 7.0  // Balanced 7.0 bps entry around microprice for steady fills
+	CancelBps    = 1.5  // 1.5 bps anti-trend cancel shield (avoids 1-tick thrashing)
 	ObiLimit     = 0.25 // Block toxic-flow side when |OBI| > 0.25
 	StopEqUSD    = 95.00
 )
