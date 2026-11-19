@@ -28,11 +28,11 @@ const (
 	KeyIdx       = uint8(4)
 	ChainID      = uint32(304)
 	PrivKey      = "56491130b44362b137b0a3b46dc63d647865876f11ff1613c857f946ec8612f6e4f216d065f4695a"
-	ClipUSD      = 11.00
+	ClipUSD      = 35.00
 	EdgeBps      = 7.5 // High-selectivity 7.5 bps entry around microprice
 	CancelBps    = 1.0 // Instant 1.0 bps anti-trend cancel shield
 	ObiLimit     = 0.45 // Block toxic-flow side when |OBI| > 0.45
-	StopEqUSD    = 14.50
+	StopEqUSD    = 95.00
 )
 
 type Market struct {
@@ -359,8 +359,8 @@ func manageCoin(sym string) {
 		impBps = (mid - ef) / ef * 10000.0
 	}
 	// High-quality entry filters: Anti-trend shield + OBI toxic-flow filter + net delta cap
-	bidSafe := m.AllowEntry && trendBps >= -1.5 && impBps >= -1.5 && obi >= -ObiLimit && totalNetUSD < 6.0
-	askSafe := m.AllowEntry && trendBps <= 1.5 && impBps <= 1.5 && obi <= ObiLimit && totalNetUSD > -6.0
+	bidSafe := m.AllowEntry && trendBps >= -1.5 && impBps >= -1.5 && obi >= -ObiLimit && totalNetUSD < 40.0
+	askSafe := m.AllowEntry && trendBps <= 1.5 && impBps <= 1.5 && obi <= ObiLimit && totalNetUSD > -40.0
 
 	// BTC Trend-Start breakout override (18 bps impulse + OBI confirm -> immediate 0%-fee IOC entry)
 	btcTrendBuy := sym == "BTC" && math.Abs(posUSD) < 5.0 && impBps >= 18.0 && trendBps > 0 && obi >= 0.25
