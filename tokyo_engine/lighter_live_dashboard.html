@@ -222,6 +222,30 @@
     }
 
     let lastData = null;
+    let lastTrades = [];
+    function pairClosedTrades(trades) {
+      const sorted = [...trades].sort((a, b) => (a.timestamp - b.timestamp) || (a.trade_id - b.trade_id));
+      const pos = {}, cost = {}, closed = [];
+      for (const t of sorted) {
+        const sym = t.market_symbol || ("MKT-" + t.market_id);
+        const sz = parseFloat(t.size || 0), px = parseFloat(t.price || 0);
+        const dq = (t.bid_account_id === ACCT_INDEX) ? sz : -sz;
+        const p0 = pos[sym] || 0, c0 = cost[sym] || 0;
+        if (p0 === 0 || (p0 > 0 && dq > 0) || (p0 < 0 && dq < 0)) {
+          pos[sym] = p0 + dq; cost[sym] = c0 + dq * px;
+        } else {
+          const cq = Math.min(Math.abs(p0), Math.abs(dq));
+          const avgIn = Math.abs(c0 / p0);
+          const pnl = p0 > 0 ? cq * (px - avgIn) : cq * (avgIn - px);
+          closed.push({ sym, side: p0 > 0 ? "LONG" : "SHORT", sz: cq, entry: avgIn, exit: px, pnl, ts: t.timestamp });
+          const rem = p0 + dq;
+          if (Math.abs(rem) < 1e-9) { pos[sym] = 0; cost[sym] = 0; }
+          else if ((p0 > 0 && rem > 0) || (p0 < 0 && rem < 0)) { pos[sym] = rem; cost[sym] = rem * avgIn; }
+          else { pos[sym] = rem; cost[sym] = rem * px; }
+        }
+      }
+      return closed.reverse().slice(0, 8);
+    }
     function render() {
       if (!lastData) return;
       const eq = parseFloat(lastData.total_asset_value ?? lastData.collateral ?? 0);
@@ -285,24 +309,31 @@
         document.getElementById("chartRange").textContent = `$${minV.toFixed(4)} – $${maxV.toFixed(4)}`;
       }
 
+      const closedList = pairClosedTrades(lastTrades);
       const tbody = document.getElementById("posBody");
-      if (!allMkts.length) {
-        tbody.innerHTML = '<tr><td colspan="6" style="color:var(--muted);">No open positions or orders</td></tr>';
-      } else {
-        tbody.innerHTML = allMkts.map(p => {
-          const rawSz = parseFloat(p.position || 0);
-          const sz = (p.sign !== undefined && p.sign < 0 && rawSz > 0) ? -rawSz : rawSz;
-          const upnl = parseFloat(p.unrealized_pnl || 0);
-          return `<tr>
-            <td class="mono"><b>${p.symbol || ("MKT-" + p.market_id)}</b></td>
-            <td class="${sz === 0 ? "" : (sz > 0 ? "pos" : "neg")}">${sz === 0 ? "QUOTE" : (sz > 0 ? "LONG" : "SHORT")}</td>
-            <td class="mono">${Math.abs(sz)}</td>
-            <td class="mono">$${parseFloat(p.avg_entry_price || 0).toFixed(2)}</td>
-            <td class="mono">${p.open_order_count || 0}</td>
-            <td class="mono ${colorCls(upnl)}">${fmtSigned(upnl, 4)}</td>
-          </tr>`;
-        }).join("");
-      }
+      const openRows = allMkts.map(p => {
+        const rawSz = parseFloat(p.position || 0);
+        const sz = (p.sign !== undefined && p.sign < 0 && rawSz > 0) ? -rawSz : rawSz;
+        const upnl = parseFloat(p.unrealized_pnl || 0);
+        return `<tr>
+          <td class="mono"><b>${p.symbol || ("MKT-" + p.market_id)}</b></td>
+          <td class="${sz === 0 ? "" : (sz > 0 ? "pos" : "neg")}">${sz === 0 ? "QUOTE" : (sz > 0 ? "LONG" : "SHORT")}</td>
+          <td class="mono">${Math.abs(sz)}</td>
+          <td class="mono">$${parseFloat(p.avg_entry_price || 0).toFixed(2)}</td>
+          <td class="mono">${p.open_order_count || 0}</td>
+          <td class="mono ${colorCls(upnl)}">${fmtSigned(upnl, 4)}</td>
+        </tr>`;
+      });
+      const closedRows = closedList.map(c => `<tr>
+        <td class="mono"><b>${c.sym}</b></td>
+        <td><span class="badge" style="font-size:0.62rem;padding:0.1rem 0.4rem;">CLOSED</span> <span class="${c.side === "LONG" ? "pos" : "neg"}" style="font-size:0.72rem;">${c.side}</span></td>
+        <td class="mono">${c.sz.toFixed(4)}</td>
+        <td class="mono">$${c.entry.toFixed(2)}→$${c.exit.toFixed(2)}</td>
+        <td class="mono" style="color:var(--muted);">—</td>
+        <td class="mono ${colorCls(c.pnl)}">${fmtSigned(c.pnl, 4)}</td>
+      </tr>`);
+      const rows = [...openRows, ...closedRows];
+      tbody.innerHTML = rows.length ? rows.join("") : '<tr><td colspan="6" style="color:var(--muted);">No open positions or orders</td></tr>';
     }
 
     async function poll() {
@@ -310,6 +341,7 @@
         const res = await fetch(API_URL + Date.now());
         const data = await res.json();
         const acct = data.lighterAccount || (data.accounts || [])[0];
+        if (data.lighterTrades) lastTrades = data.lighterTrades;
         if (!acct) return;
         lastData = acct;
         const eq = parseFloat(acct.total_asset_value ?? acct.collateral ?? 0);

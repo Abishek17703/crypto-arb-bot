@@ -490,7 +490,20 @@ func manageCoin(sym string) {
 func syncAccountLoop() {
 	hc := &http.Client{Timeout: 6 * time.Second}
 	url := fmt.Sprintf("%s/api/v1/account?by=index&value=%d", BaseURL, AcctIdx)
+	trUrl := fmt.Sprintf("%s/api/v1/trades?account_index=%d&limit=30&sort_by=timestamp", BaseURL, AcctIdx)
+	loopCnt := 0
 	for {
+		loopCnt++
+		if loopCnt%3 == 1 {
+			if trResp, e := hc.Get(trUrl); e == nil {
+				tb, _ := io.ReadAll(trResp.Body)
+				trResp.Body.Close()
+				if len(tb) > 20 && strings.Contains(string(tb), `"trades"`) {
+					_ = os.WriteFile("/tmp/lighter_trades.json.tmp", tb, 0644)
+					_ = os.Rename("/tmp/lighter_trades.json.tmp", "/tmp/lighter_trades.json")
+				}
+			}
+		}
 		resp, err := hc.Get(url)
 		if err == nil {
 			body, _ := io.ReadAll(resp.Body)
