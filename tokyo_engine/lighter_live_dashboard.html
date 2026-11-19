@@ -7,12 +7,12 @@
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     :root {
-      --bg: #080c14;
-      --card: #101724;
-      --card-2: #0c121d;
-      --border: #1d293d;
+      --bg: #000000;
+      --card: #0a0a0a;
+      --card-2: #050505;
+      --border: #1c1c1e;
       --text: #f8fafc;
-      --muted: #8b9bb4;
+      --muted: #8e8e93;
       --green: #10b981;
       --red: #ef4444;
     }
@@ -52,8 +52,8 @@
 
     /* Tier 1: Hero Card */
     .hero {
-      background: linear-gradient(135deg, #111a2b 0%, #0d1422 100%);
-      border: 1px solid #26354d; border-radius: 1.1rem; padding: 1.35rem 1.5rem;
+      background: linear-gradient(135deg, #0d0d0f 0%, #050505 100%);
+      border: 1px solid #262629; border-radius: 1.1rem; padding: 1.35rem 1.5rem;
       margin-bottom: 1rem;
       display: flex; justify-content: space-between; align-items: flex-end; gap: 1rem; flex-wrap: wrap;
     }
@@ -133,10 +133,7 @@
         <div class="hero-lbl">Total Equity (USDC)</div>
         <div class="hero-eq mono" id="eqVal">$--.--</div>
         <div class="hero-sub mono" id="realSub">
-          <span>Net: $0.0000</span>
-          <span>Realized: $0.0000</span>
-          <span>Losses: -$0.0000</span>
-          <span>Open: $0.0000</span>
+          <span>Net $0.0000 (0.00%)</span>
         </div>
       </div>
       <div class="hero-right">
@@ -320,10 +317,7 @@
       const roi = seedUsd > 0 ? ((pnl / seedUsd) * 100).toFixed(2) : "0.00";
       document.getElementById("eqVal").textContent = `$${eq.toFixed(4)}`;
       document.getElementById("realSub").innerHTML =
-        `<span>Net <b class="${colorCls(pnl)}">${fmtSigned(pnl, 4)} (${roi}%)</b></span>` +
-        `<span>Realized <b class="${colorCls(realPnl)}">${fmtSigned(realPnl, 4)}</b></span>` +
-        `<span>Losses <b class="neg">-$${Math.abs(lossStats.lossSum).toFixed(4)} (${lossStats.lossCnt})</b></span>` +
-        `<span>Open <b class="${colorCls(unrealPnl)}">${fmtSigned(unrealPnl, 4)}</b></span>`;
+        `<span>Net <b class="${colorCls(pnl)}">${fmtSigned(pnl, 4)} (${roi}%)</b></span>`;
 
       const d5m = windowDelta(5 * 60e3, nowTs, eq);
       const d15m = windowDelta(15 * 60e3, nowTs, eq);
@@ -348,7 +342,7 @@
 
       const allMkts = (lastData.positions || []).filter(p => Math.abs(parseFloat(p.position || 0)) > 0 || (p.open_order_count || 0) > 0);
 
-      const tier = lastData.account_type === 0 ? "STANDARD • 0% FEE" : "PREMIUM";
+      const tier = lastData.account_type === 0 ? "0% FEE" : "PRO";
       document.getElementById("tierBadge").textContent = tier;
       document.getElementById("acctSub").textContent = `#${ACCT_INDEX} • ${fmtIST(Date.now())} IST`;
 

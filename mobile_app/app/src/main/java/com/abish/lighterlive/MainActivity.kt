@@ -12,11 +12,11 @@ class MainActivity : AppCompatActivity() {
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        window.statusBarColor = Color.parseColor("#080c14")
-        window.navigationBarColor = Color.parseColor("#080c14")
+        window.statusBarColor = Color.parseColor("#000000")
+        window.navigationBarColor = Color.parseColor("#000000")
 
         val webView = WebView(this)
-        webView.setBackgroundColor(Color.parseColor("#080c14"))
+        webView.setBackgroundColor(Color.parseColor("#000000"))
         webView.settings.apply {
             javaScriptEnabled = true
             domStorageEnabled = true
