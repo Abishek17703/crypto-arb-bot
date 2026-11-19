@@ -92,9 +92,11 @@ type MarketState struct {
 	dynClipUSD    float64
 	entryCool     time.Duration
 	rollPnl       float64
-	activeOrds    map[string]*ActiveOrder
-	lastOrdTS     map[string]time.Time
-	netMicroUSD   atomic.Int64
+	activeOrds      map[string]*ActiveOrder
+	lastOrdTS       map[string]time.Time
+	netMicroUSD     atomic.Int64
+	pendBidMicroUSD atomic.Int64
+	pendAskMicroUSD atomic.Int64
 }
 
 func newMarketState() *MarketState {
@@ -162,7 +164,7 @@ func enqueueTx(fn func()) {
 	}
 }
 
-func takeWriteSlot(isPriority bool) bool {
+func takeWriteSlotTier(tier int) bool {
 	rateMu.Lock()
 	defer rateMu.Unlock()
 	now := time.Now()
@@ -174,15 +176,46 @@ func takeWriteSlot(isPriority bool) bool {
 	if idx > 0 {
 		writeHist = writeHist[idx:]
 	}
-	limit := 34
-	if isPriority {
-		limit = 38
+	limit := 33 // Tier 0: entries & quote modifies
+	if tier == 1 {
+		limit = 37 // Tier 1: TP closes & cancels
+	} else if tier >= 2 {
+		limit = 40 // Tier 2: Emergency SL & Crash Bailouts (never starved!)
 	}
 	if len(writeHist) >= limit {
 		return false
 	}
 	writeHist = append(writeHist, now)
 	return true
+}
+
+func takeWriteSlot(isPriority bool) bool {
+	if isPriority {
+		return takeWriteSlotTier(1)
+	}
+	return takeWriteSlotTier(0)
+}
+
+func otherDirExposureUSD(selfSym string, checkLong bool) float64 {
+	var sum int64
+	for sym, st := range mktStates {
+		if sym == selfSym {
+			continue
+		}
+		n := st.netMicroUSD.Load()
+		if checkLong {
+			if n > 0 {
+				sum += n
+			}
+			sum += st.pendBidMicroUSD.Load()
+		} else {
+			if n < 0 {
+				sum += -n
+			}
+			sum += st.pendAskMicroUSD.Load()
+		}
+	}
+	return float64(sum) / 1e6
 }
 
 func totalNetUSD() float64 {
@@ -294,6 +327,8 @@ func cancelAll() {
 	for _, st := range mktStates {
 		st.mu.Lock()
 		st.activeOrds = map[string]*ActiveOrder{}
+		st.pendBidMicroUSD.Store(0)
+		st.pendAskMicroUSD.Store(0)
 		st.mu.Unlock()
 	}
 }
@@ -305,6 +340,11 @@ func cancelSide(sym, side string) {
 		return
 	}
 	delete(st.activeOrds, side)
+	if side == "BID" {
+		st.pendBidMicroUSD.Store(0)
+	} else {
+		st.pendAskMicroUSD.Store(0)
+	}
 	m := markets[sym]
 	coi, mid := ao.COI, m.ID
 	enqueueTx(func() {
@@ -348,6 +388,11 @@ func modifySide(sym, side string, newPxF, midF float64) {
 		if err != nil {
 			st.mu.Lock()
 			delete(st.activeOrds, side)
+	if side == "BID" {
+		st.pendBidMicroUSD.Store(0)
+	} else {
+		st.pendAskMicroUSD.Store(0)
+	}
 			st.mu.Unlock()
 		}
 	})
@@ -381,6 +426,14 @@ func placeSide(sym, side string, pxF, midF, customSz float64, isClose, isIOC boo
 		redOnly = 1
 	}
 	st.activeOrds[side] = &ActiveOrder{COI: coi, Px: pxF, BaseInt: baseInt, RefMid: midF, IsClose: isClose, IsIOC: isIOC, TS: time.Now()}
+	if !isClose && !isIOC {
+		ordMicro := int64(baseF * pxF * 1e6)
+		if side == "BID" {
+			st.pendBidMicroUSD.Store(ordMicro)
+		} else {
+			st.pendAskMicroUSD.Store(ordMicro)
+		}
+	}
 	enqueueTx(func() {
 		var ordType uint8 = 0
 		var tif uint8 = 2
@@ -415,6 +468,11 @@ func placeSide(sym, side string, pxF, midF, customSz float64, isClose, isIOC boo
 		if err != nil {
 			st.mu.Lock()
 			delete(st.activeOrds, side)
+	if side == "BID" {
+		st.pendBidMicroUSD.Store(0)
+	} else {
+		st.pendAskMicroUSD.Store(0)
+	}
 			st.mu.Unlock()
 		}
 	})
@@ -510,18 +568,20 @@ func manageCoin(sym string) {
 	}
 	fairLt := micro * (1.0 + st.basisBps/10000.0)
 
-	// Anti-Drop Shield: strict $15 correlated single-direction lock + 3s falling-knife breaker
+	// Anti-Drop Shield: strict $15 correlated single-direction lock (including pending quotes!) + 3s falling-knife breaker
 	netCap := 15.0
+	otherLong := otherDirExposureUSD(sym, true)
+	otherShort := otherDirExposureUSD(sym, false)
 	inCool := now.Before(st.stopCoolUntil) || now.Sub(st.lastFillTS) < 8*time.Second
 	calmMkt := math.Abs(trendBps) <= 2.2 && math.Abs(impBps) <= 2.0
-	bidSafe := m.AllowEntry && !inCool && now.After(st.dropCoolUntil) && vel3sBps > -2.0 && calmMkt && obi >= -ObiLimit && netUSD < netCap
-	askSafe := m.AllowEntry && !inCool && now.After(st.pumpCoolUntil) && vel3sBps < 2.0 && calmMkt && obi <= ObiLimit && netUSD > -netCap
+	bidSafe := m.AllowEntry && !inCool && now.After(st.dropCoolUntil) && vel3sBps > -2.0 && calmMkt && obi >= -ObiLimit && otherLong < netCap
+	askSafe := m.AllowEntry && !inCool && now.After(st.pumpCoolUntil) && vel3sBps < 2.0 && calmMkt && obi <= ObiLimit && otherShort < netCap
 
-	// BTC Trend-Start breakout (18 bps) vs 0%-fee Stale-Quote IOC Snipe (>= 5 bps lag vs fairLt, fast 3.5bps scalp!)
-	staleSnipeBuy := m.AllowEntry && !inCool && math.Abs(posUSD) < 1.0 && netUSD < netCap && (fairLt-la)/la*10000.0 >= 5.0 && obi >= 0.25
-	staleSnipeSell := m.AllowEntry && !inCool && math.Abs(posUSD) < 1.0 && netUSD > -netCap && (lb-fairLt)/lb*10000.0 >= 5.0 && obi <= -0.25
-	pureTrendBuy := sym == "BTC" && !inCool && math.Abs(posUSD) < 5.0 && impBps >= 18.0 && trendBps > 0 && obi >= 0.25
-	pureTrendSell := sym == "BTC" && !inCool && math.Abs(posUSD) < 5.0 && impBps <= -18.0 && trendBps < 0 && obi <= -0.25
+	// BTC Trend-Start breakout (18 bps) vs 0%-fee Stale-Quote IOC Snipe (both respect single-direction lock!)
+	staleSnipeBuy := m.AllowEntry && !inCool && math.Abs(posUSD) < 1.0 && otherLong < netCap && (fairLt-la)/la*10000.0 >= 5.0 && obi >= 0.25
+	staleSnipeSell := m.AllowEntry && !inCool && math.Abs(posUSD) < 1.0 && otherShort < netCap && (lb-fairLt)/lb*10000.0 >= 5.0 && obi <= -0.25
+	pureTrendBuy := sym == "BTC" && !inCool && math.Abs(posUSD) < 1.0 && otherLong < netCap && impBps >= 18.0 && trendBps > 0 && obi >= 0.25
+	pureTrendSell := sym == "BTC" && !inCool && math.Abs(posUSD) < 1.0 && otherShort < netCap && impBps <= -18.0 && trendBps < 0 && obi <= -0.25
 	btcTrendBuy := pureTrendBuy || staleSnipeBuy
 	btcTrendSell := pureTrendSell || staleSnipeSell
 
@@ -536,6 +596,11 @@ func manageCoin(sym string) {
 		if ao.IsIOC {
 			if ageS >= 2.0 {
 				delete(st.activeOrds, side)
+	if side == "BID" {
+		st.pendBidMicroUSD.Store(0)
+	} else {
+		st.pendAskMicroUSD.Store(0)
+	}
 			}
 			continue
 		}
@@ -592,7 +657,7 @@ func manageCoin(sym string) {
 			if ao := st.activeOrds["BID"]; ao != nil && !ao.IsIOC {
 				cancelSide(sym, "BID")
 			}
-			if st.activeOrds["BID"] == nil && now.Sub(st.lastOrdTS["BID"]) >= 500*time.Millisecond && takeWriteSlot(true) {
+			if st.activeOrds["BID"] == nil && now.Sub(st.lastOrdTS["BID"]) >= 500*time.Millisecond && takeWriteSlotTier(2) {
 				st.lastOrdTS["BID"] = now
 				if mid >= ae*(1.0+slBps/10000.0) {
 					st.stopCoolUntil = now.Add(180 * time.Second)
@@ -654,7 +719,7 @@ func manageCoin(sym string) {
 			if ao := st.activeOrds["ASK"]; ao != nil && !ao.IsIOC {
 				cancelSide(sym, "ASK")
 			}
-			if st.activeOrds["ASK"] == nil && now.Sub(st.lastOrdTS["ASK"]) >= 500*time.Millisecond && takeWriteSlot(true) {
+			if st.activeOrds["ASK"] == nil && now.Sub(st.lastOrdTS["ASK"]) >= 500*time.Millisecond && takeWriteSlotTier(2) {
 				st.lastOrdTS["ASK"] = now
 				if mid <= ae*(1.0-slBps/10000.0) {
 					st.stopCoolUntil = now.Add(180 * time.Second)
@@ -872,6 +937,11 @@ func syncAccountLoop() {
 							for _, s := range []string{"BID", "ASK"} {
 								if ao := st.activeOrds[s]; ao != nil && time.Since(ao.TS) > 2*time.Second {
 									delete(st.activeOrds, s)
+									if s == "BID" {
+										st.pendBidMicroUSD.Store(0)
+									} else {
+										st.pendAskMicroUSD.Store(0)
+									}
 								}
 							}
 						}
@@ -1093,8 +1163,19 @@ func runLtWS() {
 							}
 							if math.Abs(sz-prev) > 1e-6 {
 								st.lastFillTS = time.Now()
-								delete(st.activeOrds, "BID")
-								delete(st.activeOrds, "ASK")
+								if sz > prev {
+									delete(st.activeOrds, "BID")
+									st.pendBidMicroUSD.Store(0)
+									if ao := st.activeOrds["ASK"]; ao != nil && !ao.IsClose {
+										cancelSide(sym, "ASK")
+									}
+								} else {
+									delete(st.activeOrds, "ASK")
+									st.pendAskMicroUSD.Store(0)
+									if ao := st.activeOrds["BID"]; ao != nil && !ao.IsClose {
+										cancelSide(sym, "BID")
+									}
+								}
 								touched = append(touched, sym)
 							}
 							st.mu.Unlock()
