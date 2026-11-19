@@ -182,7 +182,7 @@
         </div>
         <div class="tbl-wrap">
           <table>
-            <thead><tr><th>Mkt</th><th>Side</th><th>Size</th><th>Entry</th><th>Ords</th><th>uPnL</th></tr></thead>
+            <thead><tr><th>Mkt</th><th>Side</th><th>Size</th><th>Entry</th><th>Ords / Time</th><th>uPnL</th></tr></thead>
             <tbody id="posBody"><tr><td colspan="6" style="color:var(--muted);">No open positions or orders</td></tr></tbody>
           </table>
         </div>
@@ -240,6 +240,16 @@
 
     let lastData = null;
     let lastTrades = [];
+    const POS_TIMERS = {};
+    function fmtAgo(ms) {
+      if (!ms || ms < 0) return "0s";
+      const s = Math.floor(ms / 1000);
+      if (s < 60) return `${s}s`;
+      const m = Math.floor(s / 60);
+      if (m < 60) return `${m}m ${s % 60}s`;
+      const h = Math.floor(m / 60);
+      return `${h}h ${m % 60}m`;
+    }
     function pairClosedTrades(trades, positions) {
       const sorted = [...trades].sort((a, b) => (a.timestamp - b.timestamp) || (a.trade_id - b.trade_id));
       const realPos = {};
@@ -366,15 +376,23 @@
       const closedList = pairClosedTrades(lastTrades, lastData.positions);
       const tbody = document.getElementById("posBody");
       const openRows = allMkts.map(p => {
+        const sym = p.symbol || ("MKT-" + p.market_id);
         const rawSz = parseFloat(p.position || 0);
         const sz = (p.sign !== undefined && p.sign < 0 && rawSz > 0) ? -rawSz : rawSz;
         const upnl = parseFloat(p.unrealized_pnl || 0);
+        const sideLbl = sz === 0 ? "QUOTE" : (sz > 0 ? "LONG" : "SHORT");
+        const ords = p.open_order_count || 0;
+        const stKey = `${sideLbl}_${ords}`;
+        if (!POS_TIMERS[sym] || POS_TIMERS[sym].key !== stKey) {
+          POS_TIMERS[sym] = { key: stKey, ts: nowTs };
+        }
+        const elapsed = fmtAgo(nowTs - POS_TIMERS[sym].ts);
         return `<tr>
-          <td class="mono"><b>${p.symbol || ("MKT-" + p.market_id)}</b></td>
-          <td class="${sz === 0 ? "" : (sz > 0 ? "pos" : "neg")}">${sz === 0 ? "QUOTE" : (sz > 0 ? "LONG" : "SHORT")}</td>
+          <td class="mono"><b>${sym}</b></td>
+          <td class="${sz === 0 ? "" : (sz > 0 ? "pos" : "neg")}">${sideLbl}</td>
           <td class="mono">${Math.abs(sz)}</td>
           <td class="mono">$${parseFloat(p.avg_entry_price || 0).toFixed(2)}</td>
-          <td class="mono">${p.open_order_count || 0}</td>
+          <td class="mono">${ords} <span style="color:var(--muted);">· ${elapsed}</span></td>
           <td class="mono ${colorCls(upnl)}">${fmtSigned(upnl, 4)}</td>
         </tr>`;
       });
@@ -383,7 +401,7 @@
         <td><span class="badge" style="font-size:0.62rem;padding:0.1rem 0.4rem;">CLOSED</span> <span class="${c.side === "LONG" ? "pos" : "neg"}" style="font-size:0.72rem;">${c.side}</span></td>
         <td class="mono">${c.sz.toFixed(4)}</td>
         <td class="mono">${c.entry === null ? "prev" : "$" + c.entry.toFixed(2)}→$${c.exit.toFixed(2)}</td>
-        <td class="mono" style="color:var(--muted);">—</td>
+        <td class="mono" style="color:var(--muted);">${fmtAgo(nowTs - c.ts)} ago</td>
         <td class="mono ${c.pnl === null ? "" : colorCls(c.pnl)}">${c.pnl === null ? "—" : fmtSigned(c.pnl, 4)}</td>
       </tr>`);
       const rows = [...openRows, ...closedRows];
