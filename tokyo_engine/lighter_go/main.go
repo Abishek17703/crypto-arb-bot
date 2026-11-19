@@ -32,7 +32,8 @@ const (
 	EdgeBps      = 7.5 // High-selectivity 7.5 bps entry around microprice
 	CancelBps    = 1.0 // Instant 1.0 bps anti-trend cancel shield
 	ObiLimit     = 0.45 // Block toxic-flow side when |OBI| > 0.45
-	StopEqUSD    = 14.50
+	StopEqUSD    = 14.85
+	TakeFlatEq   = 15.002
 )
 
 type Market struct {
@@ -45,9 +46,9 @@ type Market struct {
 }
 
 var markets = map[string]Market{
-	"ETH": {Sym: "ETH", ID: 0, SzDec: 4, PxDec: 2, MinB: 0.0020, AllowEntry: true},
-	"BTC": {Sym: "BTC", ID: 1, SzDec: 5, PxDec: 1, MinB: 0.00007, AllowEntry: true},
-	"SOL": {Sym: "SOL", ID: 2, SzDec: 3, PxDec: 3, MinB: 0.055, AllowEntry: false}, // Close existing only
+	"ETH": {Sym: "ETH", ID: 0, SzDec: 4, PxDec: 2, MinB: 0.0020, AllowEntry: false},
+	"BTC": {Sym: "BTC", ID: 1, SzDec: 5, PxDec: 1, MinB: 0.00007, AllowEntry: false},
+	"SOL": {Sym: "SOL", ID: 2, SzDec: 3, PxDec: 3, MinB: 0.055, AllowEntry: false},
 }
 var idToSym = map[int64]string{0: "ETH", 1: "BTC", 2: "SOL"}
 
@@ -540,10 +541,43 @@ func syncAccountLoop() {
 					}
 				}
 				mu.Unlock()
-				if eq > 0 && eq <= StopEqUSD {
-					fmt.Printf("[STOP-LOSS] Equity $%.4f <= $%.2f, halting!\n", eq, StopEqUSD)
+				if eq >= TakeFlatEq || (eq > 0 && eq <= StopEqUSD) {
+					fmt.Printf("[STOP-AT-TARGET] Equity $%.4f (target >=$%.3f or <=$%.2f), closing & halting!\n", eq, TakeFlatEq, StopEqUSD)
 					useWsSend = false
 					cancelAll()
+					mu.Lock()
+					for sym, sz := range positions {
+						if math.Abs(sz) >= markets[sym].MinB {
+							m := markets[sym]
+							px := ltAsk[sym] * 1.01
+							var isAsk uint8 = 0
+							if sz > 0 {
+								isAsk = 1
+								px = ltBid[sym] * 0.99
+							}
+							if px > 0 {
+								_ = sendSignedTx("flat_"+sym, sym, func(opts *types.TransactOpts) (uint8, string, error) {
+									ti, e := txCli.GetCreateOrderTransaction(&types.CreateOrderTxReq{
+										MarketIndex:      m.ID,
+										ClientOrderIndex: coiSeq.Add(1),
+										BaseAmount:       int64(math.Round(math.Abs(sz) * math.Pow10(m.SzDec))),
+										Price:            uint32(math.Round(px * math.Pow10(m.PxDec))),
+										IsAsk:            isAsk,
+										Type:             1, // MARKET
+										TimeInForce:      0, // IOC
+										ReduceOnly:       1,
+										OrderExpiry:      0,
+									}, opts)
+									if e != nil {
+										return 0, "", e
+									}
+									s, e := ti.GetTxInfo()
+									return ti.GetTxType(), s, e
+								})
+							}
+						}
+					}
+					mu.Unlock()
 					time.Sleep(1 * time.Second)
 					os.Exit(0)
 				}
