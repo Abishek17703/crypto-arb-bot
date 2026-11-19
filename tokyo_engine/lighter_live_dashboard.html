@@ -140,7 +140,10 @@
         </div>
       </div>
       <div class="hero-right">
-        <div class="hero-lbl">Run Rate</div>
+        <div class="hero-lbl" style="display:inline-flex;align-items:center;gap:0.4rem;">
+          <span>Run Rate</span>
+          <button class="btn" id="rrBtn" onclick="refreshRunRate()" title="Refresh Run Rate" style="padding:0.1rem 0.38rem;font-size:0.7rem;line-height:1.1;">↻</button>
+        </div>
         <div class="hero-pnl mono" id="hrRate">$0.0000/hr</div>
         <div class="hero-roi mono" id="dayRate">$0.00/day</div>
       </div>
@@ -402,6 +405,17 @@
         render();
       } catch (e) {
         document.getElementById("liveDot").style.background = "#ef4444";
+      }
+    }
+
+    async function refreshRunRate() {
+      const btn = document.getElementById("rrBtn");
+      if (btn) btn.textContent = "…";
+      await poll();
+      render();
+      if (btn) {
+        btn.textContent = "✓";
+        setTimeout(() => { btn.textContent = "↻"; }, 800);
       }
     }
 
