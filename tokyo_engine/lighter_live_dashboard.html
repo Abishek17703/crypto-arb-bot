@@ -3,20 +3,18 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Lighter DEX Live Profit &amp; Run-Rate Dashboard</title>
+  <title>Lighter Live</title>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     :root {
-      --bg: #090d16;
-      --card: #111827;
-      --card-2: #0f172a;
-      --border: #1e293b;
+      --bg: #080c14;
+      --card: #101724;
+      --card-2: #0c121d;
+      --border: #1d293d;
       --text: #f8fafc;
-      --muted: #94a3b8;
+      --muted: #8b9bb4;
       --green: #10b981;
       --red: #ef4444;
-      --blue: #38bdf8;
-      --amber: #f59e0b;
     }
     html, body {
       min-height: 100vh;
@@ -25,135 +23,169 @@
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Inter, Arial, sans-serif;
       -webkit-font-smoothing: antialiased;
     }
-    .wrap { max-width: 78rem; margin: 0 auto; padding: 1.25rem; }
-    .header {
-      display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 1rem;
-      background: var(--card); border: 1px solid var(--border); border-radius: 1rem; padding: 1rem 1.25rem;
-      margin-bottom: 1.25rem;
-    }
-    .title { font-size: 1.25rem; font-weight: 700; display: flex; align-items: center; gap: 0.6rem; }
-    .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--green); box-shadow: 0 0 10px var(--green); }
-    .badge {
-      font-size: 0.72rem; font-weight: 600; padding: 0.2rem 0.6rem; border-radius: 999px;
-      background: rgba(16,185,129,0.14); color: var(--green); border: 1px solid rgba(16,185,129,0.3);
-    }
-    .sub { font-size: 0.8rem; color: var(--muted); margin-top: 0.2rem; font-family: ui-monospace, SFMono-Regular, monospace; }
-    .controls { display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; }
-    .seed-input {
-      width: 90px; background: var(--card-2); border: 1px solid var(--border); color: var(--text);
-      border-radius: 0.5rem; padding: 0.35rem 0.5rem; font-size: 0.85rem; font-family: monospace;
-    }
-    .btn {
-      background: var(--card-2); border: 1px solid var(--border); color: var(--text);
-      border-radius: 0.5rem; padding: 0.38rem 0.75rem; font-size: 0.8rem; cursor: pointer;
-    }
-    .btn:hover { border-color: var(--blue); }
-    .grid-4 { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 1rem; margin-bottom: 1.25rem; }
-    .grid-2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 1rem; margin-bottom: 1.25rem; }
-    .card {
-      background: var(--card); border: 1px solid var(--border); border-radius: 1rem; padding: 1.15rem;
-    }
-    .lbl { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); font-weight: 600; }
-    .val { font-size: 1.85rem; font-weight: 700; margin-top: 0.35rem; font-variant-numeric: tabular-nums; }
-    .mini { font-size: 0.8rem; color: var(--muted); margin-top: 0.3rem; font-variant-numeric: tabular-nums; }
+    .wrap { max-width: 72rem; margin: 0 auto; padding: 1.25rem; }
+    .mono { font-family: ui-monospace, SFMono-Regular, monospace; font-variant-numeric: tabular-nums; }
     .pos { color: var(--green); }
     .neg { color: var(--red); }
-    .strip { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 0.75rem; margin-bottom: 1.25rem; }
-    .tf-box {
-      background: var(--card); border: 1px solid var(--border); border-radius: 0.85rem; padding: 0.75rem 0.9rem;
+
+    /* Top Bar */
+    .topbar {
+      display: flex; justify-content: space-between; align-items: center; gap: 0.75rem;
+      margin-bottom: 1rem; flex-wrap: wrap;
     }
-    .tf-val { font-size: 1.05rem; font-weight: 700; margin-top: 0.2rem; font-variant-numeric: tabular-nums; }
-    svg { width: 100%; height: 200px; display: block; margin-top: 0.75rem; }
-    table { width: 100%; border-collapse: collapse; margin-top: 0.75rem; font-size: 0.85rem; }
-    th, td { text-align: left; padding: 0.55rem 0.4rem; border-bottom: 1px solid var(--border); }
-    th { color: var(--muted); font-weight: 600; font-size: 0.75rem; text-transform: uppercase; }
-    .mono { font-family: ui-monospace, SFMono-Regular, monospace; font-variant-numeric: tabular-nums; }
+    .brand { display: flex; align-items: center; gap: 0.55rem; font-weight: 700; font-size: 1.05rem; }
+    .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--green); box-shadow: 0 0 8px var(--green); }
+    .badge {
+      font-size: 0.68rem; font-weight: 600; padding: 0.18rem 0.55rem; border-radius: 999px;
+      background: rgba(16,185,129,0.12); color: var(--green); border: 1px solid rgba(16,185,129,0.28);
+    }
+    .controls { display: flex; align-items: center; gap: 0.45rem; }
+    .seed-input {
+      width: 76px; background: var(--card); border: 1px solid var(--border); color: var(--text);
+      border-radius: 0.45rem; padding: 0.28rem 0.45rem; font-size: 0.8rem;
+    }
+    .btn {
+      background: var(--card); border: 1px solid var(--border); color: var(--muted);
+      border-radius: 0.45rem; padding: 0.3rem 0.6rem; font-size: 0.75rem; cursor: pointer;
+    }
+    .btn:hover { color: var(--text); border-color: #334155; }
+
+    /* Tier 1: Hero Card */
+    .hero {
+      background: linear-gradient(135deg, #111a2b 0%, #0d1422 100%);
+      border: 1px solid #26354d; border-radius: 1.1rem; padding: 1.35rem 1.5rem;
+      margin-bottom: 1rem;
+      display: flex; justify-content: space-between; align-items: flex-end; gap: 1rem; flex-wrap: wrap;
+    }
+    .hero-lbl { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); font-weight: 600; }
+    .hero-eq { font-size: 2.5rem; font-weight: 800; line-height: 1.1; margin-top: 0.25rem; letter-spacing: -0.02em; }
+    .hero-sub { font-size: 0.82rem; color: var(--muted); margin-top: 0.5rem; display: flex; gap: 0.85rem; flex-wrap: wrap; }
+    .hero-right { text-align: right; }
+    .hero-pnl { font-size: 1.65rem; font-weight: 700; line-height: 1.1; margin-top: 0.25rem; }
+    .hero-roi { font-size: 0.78rem; color: var(--muted); margin-top: 0.35rem; }
+
+    /* Tier 2: Secondary Metrics */
+    .sec-grid {
+      display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0.85rem;
+      margin-bottom: 1rem;
+    }
+    .sec-card {
+      background: var(--card); border: 1px solid var(--border); border-radius: 0.85rem; padding: 0.9rem 1rem;
+    }
+    .lbl { font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); font-weight: 600; }
+    .sec-val { font-size: 1.2rem; font-weight: 700; margin-top: 0.25rem; }
+    .sec-sub { font-size: 0.75rem; color: var(--muted); margin-top: 0.2rem; }
+    .tf-row { display: flex; gap: 0.75rem; margin-top: 0.35rem; flex-wrap: wrap; font-size: 0.78rem; }
+
+    /* Tier 3: Chart & Positions */
+    .main-grid { display: grid; grid-template-columns: 1.15fr 1fr; gap: 1rem; }
+    .card {
+      background: var(--card); border: 1px solid var(--border); border-radius: 0.95rem; padding: 1.05rem;
+    }
+    .card-hd { display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.6rem; }
+    svg { width: 100%; height: 185px; display: block; }
     .tbl-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
-    @media (max-width: 640px) {
-      .wrap { padding: 0.7rem; }
-      .header { padding: 0.8rem 0.9rem; margin-bottom: 0.8rem; gap: 0.6rem; }
-      .title { font-size: 1rem; }
-      .sub, .controls .lbl, #availSub, #chartRange { display: none; }
-      .grid-4 { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.65rem; margin-bottom: 0.8rem; }
-      .grid-2 { grid-template-columns: 1fr; gap: 0.75rem; margin-bottom: 0.8rem; }
-      .strip { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0.5rem; margin-bottom: 0.8rem; }
-      .card { padding: 0.8rem; border-radius: 0.8rem; }
-      .val { font-size: 1.25rem; }
-      .mini { font-size: 0.7rem; }
-      svg { height: 140px; }
-      table { font-size: 0.75rem; }
-      th, td { padding: 0.45rem 0.25rem; }
+    table { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
+    th, td { text-align: left; padding: 0.5rem 0.35rem; border-bottom: 1px solid var(--border); white-space: nowrap; }
+    th { color: var(--muted); font-weight: 600; font-size: 0.68rem; text-transform: uppercase; }
+
+    @media (max-width: 768px) {
+      .wrap { padding: 0.75rem; }
+      .controls, .desktop-only { display: none; }
+      .hero { padding: 1rem 1.05rem; align-items: center; }
+      .hero-eq { font-size: 1.85rem; }
+      .hero-right { text-align: left; }
+      .hero-pnl { font-size: 1.25rem; }
+      .hero-sub { font-size: 0.74rem; gap: 0.55rem; }
+      .sec-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.6rem; }
+      .sec-card.span-2 { grid-column: span 2; }
+      .sec-card { padding: 0.75rem 0.8rem; }
+      .sec-val { font-size: 1.05rem; }
+      .main-grid { grid-template-columns: 1fr; gap: 0.75rem; }
+      svg { height: 135px; }
+      table { font-size: 0.74rem; }
+      th, td { padding: 0.42rem 0.25rem; }
     }
   </style>
 </head>
 <body>
   <div class="wrap">
-    <div class="header">
-      <div>
-        <div class="title">
-          <span class="dot" id="liveDot"></span>
-          Lighter DEX Live Command Center
-          <span class="badge" id="tierBadge">STANDARD • 0% FEE</span>
-        </div>
-        <div class="sub" id="acctSub">Account #770015 • 0x07d8...7B94 • Connecting...</div>
+    <div class="topbar">
+      <div class="brand">
+        <span class="dot" id="liveDot"></span>
+        <span>Lighter Live</span>
+        <span class="badge" id="tierBadge">STANDARD • 0% FEE</span>
+        <span class="desktop-only mono" id="acctSub" style="font-size:0.75rem;color:var(--muted);font-weight:400;margin-left:0.4rem;">#770015</span>
       </div>
       <div class="controls">
-        <span class="lbl">Seed $</span>
-        <input id="seedInput" class="seed-input" type="number" step="0.01" value="15.00" />
-        <button class="btn" onclick="saveSeed()">Update Seed</button>
-        <button class="btn" onclick="resetHistory()">Reset Chart</button>
+        <span class="lbl">Seed</span>
+        <input id="seedInput" class="seed-input mono" type="number" step="0.01" value="15.00" />
+        <button class="btn" onclick="saveSeed()">Save</button>
+        <button class="btn" onclick="resetHistory()">Reset</button>
       </div>
     </div>
 
-    <div class="grid-4">
-      <div class="card">
-        <div class="lbl">Live Equity (USDC)</div>
-        <div class="val mono" id="eqVal">$--.--</div>
-        <div class="mini mono" id="realSub">Realized PnL: $0.0000 • Unrealized: $0.0000</div>
-        <div class="mini mono" id="availSub">Available: $-- | Collateral: $--</div>
-      </div>
-      <div class="card">
-        <div class="lbl">Net Profit vs Seed</div>
-        <div class="val mono" id="pnlVal">$0.0000</div>
-        <div class="mini mono" id="pnlPct">0.00% ROI</div>
-      </div>
-      <div class="card">
-        <div class="lbl">Hourly Run Rate</div>
-        <div class="val mono" id="hrRate">$0.0000/hr</div>
-        <div class="mini mono" id="dayRate">Daily Est: $0.00/day</div>
-      </div>
-      <div class="card">
-        <div class="lbl">Orders &amp; Activity</div>
-        <div class="val mono" id="ordVal">0</div>
-        <div class="mini mono" id="ordSub">Pending: 0 • Positions: 0</div>
-      </div>
-    </div>
-
-    <div class="strip">
-      <div class="tf-box"><div class="lbl">5m Change</div><div class="tf-val mono" id="tf5m">$0.0000</div></div>
-      <div class="tf-box"><div class="lbl">15m Change</div><div class="tf-val mono" id="tf15m">$0.0000</div></div>
-      <div class="tf-box"><div class="lbl">1h Change</div><div class="tf-val mono" id="tf1h">$0.0000</div></div>
-      <div class="tf-box"><div class="lbl">4h Change</div><div class="tf-val mono" id="tf4h">$0.0000</div></div>
-      <div class="tf-box"><div class="lbl">24h Change</div><div class="tf-val mono" id="tf24h">$0.0000</div></div>
-    </div>
-
-    <div class="grid-2">
-      <div class="card">
-        <div style="display:flex;justify-content:space-between;align-items:center;">
-          <div class="lbl">Live Equity Curve</div>
-          <div class="mini mono" id="chartRange" style="margin:0;">--</div>
+    <!-- Tier 1: Hero Equity & Profit -->
+    <div class="hero">
+      <div>
+        <div class="hero-lbl">Total Equity (USDC)</div>
+        <div class="hero-eq mono" id="eqVal">$--.--</div>
+        <div class="hero-sub mono" id="realSub">
+          <span>Realized: $0.0000</span>
+          <span>Losses: -$0.0000</span>
+          <span>Open: $0.0000</span>
         </div>
-        <svg id="eqSvg" viewBox="0 0 600 200" preserveAspectRatio="none">
-          <polyline id="eqLine" fill="none" stroke="#10b981" stroke-width="2.5" points="0,100 600,100" />
+      </div>
+      <div class="hero-right">
+        <div class="hero-lbl">Net vs Seed</div>
+        <div class="hero-pnl mono" id="pnlVal">$0.0000</div>
+        <div class="hero-roi mono" id="pnlPct">0.00% ROI</div>
+      </div>
+    </div>
+
+    <!-- Tier 2: Secondary Metrics -->
+    <div class="sec-grid">
+      <div class="sec-card">
+        <div class="lbl">Run Rate</div>
+        <div class="sec-val mono" id="hrRate">$0.0000/hr</div>
+        <div class="sec-sub mono" id="dayRate">$0.00/day</div>
+      </div>
+      <div class="sec-card">
+        <div class="lbl">Live Activity</div>
+        <div class="sec-val mono" id="ordVal">0 Orders</div>
+        <div class="sec-sub mono" id="ordSub">0 Open Positions</div>
+      </div>
+      <div class="sec-card span-2">
+        <div class="lbl">Recent Windows</div>
+        <div class="tf-row mono">
+          <span>5m <b id="tf5m">$0.000</b></span>
+          <span>15m <b id="tf15m">$0.000</b></span>
+          <span>1h <b id="tf1h">$0.000</b></span>
+          <span class="desktop-only">24h <b id="tf24h">$0.000</b></span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Tier 3: Equity Curve & Open Positions -->
+    <div class="main-grid">
+      <div class="card">
+        <div class="card-hd">
+          <div class="lbl">Equity Curve</div>
+          <div class="sec-sub mono desktop-only" id="chartRange" style="margin:0;">--</div>
+        </div>
+        <svg id="eqSvg" viewBox="0 0 600 185" preserveAspectRatio="none">
+          <polyline id="eqLine" fill="none" stroke="#10b981" stroke-width="2.5" points="0,92 600,92" />
         </svg>
       </div>
       <div class="card">
-        <div class="lbl">Open Positions &amp; Live Orders</div>
+        <div class="card-hd">
+          <div class="lbl">Positions &amp; Orders</div>
+        </div>
         <div class="tbl-wrap">
-        <table>
-          <thead><tr><th>Market</th><th>Side</th><th>Size</th><th>Entry</th><th>Open Ords</th><th>Unrealized PnL</th></tr></thead>
-          <tbody id="posBody"><tr><td colspan="6" style="color:var(--muted);">No open positions or orders</td></tr></tbody>
-        </table>
+          <table>
+            <thead><tr><th>Mkt</th><th>Side</th><th>Size</th><th>Entry</th><th>Ords</th><th>uPnL</th></tr></thead>
+            <tbody id="posBody"><tr><td colspan="6" style="color:var(--muted);">No open positions or orders</td></tr></tbody>
+          </table>
         </div>
       </div>
     </div>
@@ -185,8 +217,7 @@
       render();
     }
     function fmtSigned(v, dec = 4) {
-      const s = v >= 0 ? "+" : "-";
-      return `${s}$${Math.abs(v).toFixed(dec)}`;
+      return `${v >= 0 ? "+" : "-"}$${Math.abs(v).toFixed(dec)}`;
     }
     function colorCls(v) { return v >= 0 ? "pos" : "neg"; }
 
@@ -204,7 +235,6 @@
       if (!lastData) return;
       const eq = parseFloat(lastData.total_asset_value ?? lastData.collateral ?? 0);
       const col = parseFloat(lastData.collateral ?? 0);
-      const avail = parseFloat(lastData.available_balance ?? 0);
       const nowTs = Date.now();
 
       const realPnl = col - seedUsd;
@@ -215,62 +245,62 @@
       }
       lossStats.lastCol = col;
       localStorage.setItem(LOSS_KEY, JSON.stringify(lossStats));
+
       document.getElementById("eqVal").textContent = `$${eq.toFixed(4)}`;
-      document.getElementById("realSub").innerHTML = `Realized: <span class="${colorCls(realPnl)}">${fmtSigned(realPnl, 4)}</span> • Losses: <span class="neg">-$${Math.abs(lossStats.lossSum).toFixed(4)} (${lossStats.lossCnt})</span> • Unreal: <span class="${colorCls(unrealPnl)}">${fmtSigned(unrealPnl, 4)}</span>`;
-      document.getElementById("availSub").textContent = `Available: $${avail.toFixed(2)} | Collateral: $${col.toFixed(2)}`;
+      document.getElementById("realSub").innerHTML =
+        `<span>Realized <b class="${colorCls(realPnl)}">${fmtSigned(realPnl, 4)}</b></span>` +
+        `<span>Losses <b class="neg">-$${Math.abs(lossStats.lossSum).toFixed(4)} (${lossStats.lossCnt})</b></span>` +
+        `<span>Open <b class="${colorCls(unrealPnl)}">${fmtSigned(unrealPnl, 4)}</b></span>`;
 
       const pnl = eq - seedUsd;
       const pnlEl = document.getElementById("pnlVal");
       pnlEl.textContent = fmtSigned(pnl, 4);
-      pnlEl.className = "val mono " + colorCls(pnl);
-      document.getElementById("pnlPct").textContent = `${seedUsd > 0 ? ((pnl / seedUsd) * 100).toFixed(2) : "0.00"}% ROI (Seed $${seedUsd.toFixed(2)})`;
+      pnlEl.className = "hero-pnl mono " + colorCls(pnl);
+      document.getElementById("pnlPct").textContent = `${seedUsd > 0 ? ((pnl / seedUsd) * 100).toFixed(2) : "0.00"}% ROI`;
 
       const d5m = windowDelta(5 * 60e3, nowTs, eq);
       const d15m = windowDelta(15 * 60e3, nowTs, eq);
       const d1h = windowDelta(60 * 60e3, nowTs, eq);
-      const d4h = windowDelta(4 * 3600e3, nowTs, eq);
       const d24h = windowDelta(24 * 3600e3, nowTs, eq);
 
       const elapsedHrs = eqHist.length > 1 ? Math.max((nowTs - eqHist[0].t) / 3600e3, 1 / 60) : 1 / 60;
       const hrRate = eqHist.length > 1 ? (elapsedHrs >= 1.0 ? d1h : (eq - eqHist[0].v) / elapsedHrs) : 0;
       const hrEl = document.getElementById("hrRate");
       hrEl.textContent = `${fmtSigned(hrRate, 4)}/hr`;
-      hrEl.className = "val mono " + colorCls(hrRate);
-      document.getElementById("dayRate").textContent = `Daily Est: ${fmtSigned(hrRate * 24, 2)}/day`;
+      hrEl.className = "sec-val mono " + colorCls(hrRate);
+      document.getElementById("dayRate").textContent = `${fmtSigned(hrRate * 24, 2)}/day`;
 
-      for (const [id, val] of [["tf5m", d5m], ["tf15m", d15m], ["tf1h", d1h], ["tf4h", d4h], ["tf24h", d24h]]) {
+      for (const [id, val] of [["tf5m", d5m], ["tf15m", d15m], ["tf1h", d1h], ["tf24h", d24h]]) {
         const el = document.getElementById(id);
-        el.textContent = fmtSigned(val, 4);
-        el.className = "tf-val mono " + colorCls(val);
+        el.textContent = fmtSigned(val, 3);
+        el.className = colorCls(val);
       }
 
       const allMkts = (lastData.positions || []).filter(p => Math.abs(parseFloat(p.position || 0)) > 0 || (p.open_order_count || 0) > 0);
       const positions = (lastData.positions || []).filter(p => Math.abs(parseFloat(p.position || 0)) > 0);
       const openOrds = (lastData.positions || []).reduce((s, p) => s + (p.open_order_count || 0), 0);
-      document.getElementById("ordVal").textContent = openOrds;
-      document.getElementById("ordSub").textContent = `Open Orders: ${openOrds} • Open Positions: ${positions.length}`;
+      document.getElementById("ordVal").textContent = `${openOrds} Orders`;
+      document.getElementById("ordSub").textContent = `${positions.length} Open Positions`;
 
-      const tier = lastData.account_type === 0 ? "STANDARD • 0% FEE" : (lastData.account_type === 1 ? "PREMIUM" : "TIER " + lastData.account_type);
+      const tier = lastData.account_type === 0 ? "STANDARD • 0% FEE" : "PREMIUM";
       document.getElementById("tierBadge").textContent = tier;
-      document.getElementById("acctSub").textContent = `Account #${ACCT_INDEX} • ${lastData.l1_address.slice(0,6)}...${lastData.l1_address.slice(-4)} • Updated ${new Date().toLocaleTimeString()}`;
+      document.getElementById("acctSub").textContent = `#${ACCT_INDEX} • ${new Date().toLocaleTimeString()}`;
 
-      // Chart
       if (eqHist.length >= 2) {
         const vals = eqHist.map(x => x.v);
         const minV = Math.min(...vals), maxV = Math.max(...vals);
         const span = Math.max(maxV - minV, 0.001);
         const pts = eqHist.map((x, idx) => {
           const px = (idx / (eqHist.length - 1)) * 600;
-          const py = 185 - ((x.v - minV) / span) * 170;
+          const py = 172 - ((x.v - minV) / span) * 158;
           return `${px.toFixed(1)},${py.toFixed(1)}`;
         }).join(" ");
         const line = document.getElementById("eqLine");
         line.setAttribute("points", pts);
         line.setAttribute("stroke", pnl >= 0 ? "#10b981" : "#ef4444");
-        document.getElementById("chartRange").textContent = `$${minV.toFixed(4)} – $${maxV.toFixed(4)} (${eqHist.length} pts)`;
+        document.getElementById("chartRange").textContent = `$${minV.toFixed(4)} – $${maxV.toFixed(4)}`;
       }
 
-      // Positions & Open Orders
       const tbody = document.getElementById("posBody");
       if (!allMkts.length) {
         tbody.innerHTML = '<tr><td colspan="6" style="color:var(--muted);">No open positions or orders</td></tr>';
@@ -280,10 +310,10 @@
           const sz = (p.sign !== undefined && p.sign < 0 && rawSz > 0) ? -rawSz : rawSz;
           const upnl = parseFloat(p.unrealized_pnl || 0);
           return `<tr>
-            <td class="mono">${p.symbol || ("MKT-" + p.market_id)}</td>
-            <td class="${sz === 0 ? "" : (sz > 0 ? "pos" : "neg")}">${sz === 0 ? "QUOTING" : (sz > 0 ? "LONG" : "SHORT")}</td>
+            <td class="mono"><b>${p.symbol || ("MKT-" + p.market_id)}</b></td>
+            <td class="${sz === 0 ? "" : (sz > 0 ? "pos" : "neg")}">${sz === 0 ? "QUOTE" : (sz > 0 ? "LONG" : "SHORT")}</td>
             <td class="mono">${Math.abs(sz)}</td>
-            <td class="mono">$${parseFloat(p.avg_entry_price || 0).toFixed(4)}</td>
+            <td class="mono">$${parseFloat(p.avg_entry_price || 0).toFixed(2)}</td>
             <td class="mono">${p.open_order_count || 0}</td>
             <td class="mono ${colorCls(upnl)}">${fmtSigned(upnl, 4)}</td>
           </tr>`;
