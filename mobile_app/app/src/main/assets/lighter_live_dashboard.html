@@ -378,11 +378,11 @@
         const elapsedMs = nowTs - POS_TIMERS[sym].ts;
         const entry = parseFloat(p.avg_entry_price || 0);
         const usd = absSz * entry;
-        // v51 Evergreen decay: 0-18s +3.5bps, 18-30s +1.4bps, 30-45s 0.0bps breakeven, 45s+ -1.2bps scratch
-        const stepBps = elapsedMs >= 45000 ? -1.2 : (elapsedMs >= 30000 ? 0.0 : (elapsedMs >= 18000 ? 1.4 : 3.5));
+        // v52 Evergreen decay: 0-25s +3.5bps, 25-45s +1.5bps, 45-60s 0.0bps breakeven, 60s+ -1.2bps scratch
+        const stepBps = elapsedMs >= 60000 ? -1.2 : (elapsedMs >= 45000 ? 0.0 : (elapsedMs >= 25000 ? 1.5 : 3.5));
         const tgt = (absSz > 0 && entry > 0) ? (sz > 0 ? entry * (1 + stepBps / 10000) : entry * (1 - stepBps / 10000)) : null;
         const cdTxt = absSz > 0
-          ? (elapsedMs < 18000 ? `⏳${fmtAgo(18000 - elapsedMs)}` : (elapsedMs < 30000 ? `⏳${fmtAgo(30000 - elapsedMs)}` : (elapsedMs < 45000 ? `⏳${fmtAgo(45000 - elapsedMs)}` : "SCRATCH")))
+          ? (elapsedMs < 25000 ? `⏳${fmtAgo(25000 - elapsedMs)}` : (elapsedMs < 45000 ? `⏳${fmtAgo(45000 - elapsedMs)}` : (elapsedMs < 60000 ? `⏳${fmtAgo(60000 - elapsedMs)}` : "SCRATCH")))
           : `⏳${fmtAgo(Math.max(0, 35000 - (elapsedMs % 35000)))}`;
         const szTxt = absSz > 0 ? `${fmtQty(absSz, sym)}<span class="usd-sub">($${usd.toFixed(1)})</span>` : "0";
         html += `<tr>

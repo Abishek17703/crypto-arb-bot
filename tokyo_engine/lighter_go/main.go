@@ -32,7 +32,7 @@ const (
 	PrivKey      = "56491130b44362b137b0a3b46dc63d647865876f11ff1613c857f946ec8612f6e4f216d065f4695a"
 	ClipUSD      = 55.00
 	EdgeBps      = 6.0  // Symmetric 6.0 bps entry around basis-adjusted fairLt
-	CancelBps    = 1.5  // 1.5 bps anti-trend cancel shield (avoids 1-tick thrashing)
+	CancelBps    = 2.0  // 2.0 bps modify threshold (preserves queue-front priority, avoids churn)
 	ObiLimit     = 0.35 // Block sustained toxic-flow side when 3s-smoothed |OBI| > 0.35
 	StopEqUSD    = 95.00
 )
@@ -185,10 +185,23 @@ func enqueueTx(fn func()) {
 	}
 }
 
+var quotaCoolUntil atomic.Int64
+
+func globalDirCapUSD() float64 {
+	eq := float64(eqNow.Load()) / 1e6
+	if eq < 50.0 {
+		eq = 100.0
+	}
+	return math.Min(560.0, eq*0.93)
+}
+
 func takeWriteSlotTier(tier int) bool {
+	now := time.Now()
+	if tier == 0 && now.UnixMilli() < quotaCoolUntil.Load() {
+		return false
+	}
 	rateMu.Lock()
 	defer rateMu.Unlock()
-	now := time.Now()
 	cut := now.Add(-60 * time.Second)
 	idx := 0
 	for idx < len(writeHist) && writeHist[idx].Before(cut) {
@@ -197,11 +210,11 @@ func takeWriteSlotTier(tier int) bool {
 	if idx > 0 {
 		writeHist = writeHist[idx:]
 	}
-	limit := 33 // Tier 0: entries & quote modifies
+	limit := 90 // Tier 0: entries & quote modifies (unlocked WS Volume Quota; L2CancelOrder is 100% free!)
 	if tier == 1 {
-		limit = 37 // Tier 1: TP closes & cancels
+		limit = 110 // Tier 1: TP closes & modifies
 	} else if tier >= 2 {
-		limit = 40 // Tier 2: Emergency SL & Crash Bailouts (never starved!)
+		limit = 130 // Tier 2: Emergency SL & Crash Bailouts
 	}
 	if len(writeHist) >= limit {
 		return false
@@ -217,37 +230,51 @@ func takeWriteSlot(isPriority bool) bool {
 	return takeWriteSlotTier(0)
 }
 
-func otherDirExposureUSD(selfSym string, checkLong bool) float64 {
-	mySt := mktStates[selfSym]
-	myPnl := int64(0)
-	if mySt != nil {
-		myPnl = mySt.rollPnlMicro.Load()
+func anyOtherOpenPos(selfSym string) bool {
+	for sym, st := range mktStates {
+		if sym == selfSym {
+			continue
+		}
+		if math.Abs(float64(st.netMicroUSD.Load()))/1e6 >= 5.0 {
+			return true
+		}
 	}
+	return false
+}
+
+func otherSameDirPendingUSD(selfSym string, checkLong bool) float64 {
 	var sum int64
 	for sym, st := range mktStates {
 		if sym == selfSym {
 			continue
 		}
-		n := st.netMicroUSD.Load()
-		otherPnl := st.rollPnlMicro.Load()
-		isOtherStronger := otherPnl > myPnl || (otherPnl == myPnl && sym < selfSym)
 		if checkLong {
-			if n > 0 {
-				sum += n
-			}
-			if isOtherStronger {
-				sum += st.pendBidMicroUSD.Load()
-			}
+			sum += st.pendBidMicroUSD.Load()
 		} else {
-			if n < 0 {
-				sum += -n
-			}
-			if isOtherStronger {
-				sum += st.pendAskMicroUSD.Load()
-			}
+			sum += st.pendAskMicroUSD.Load()
 		}
 	}
 	return float64(sum) / 1e6
+}
+
+func cancelAllOtherEntryQuotes(filledSym string) {
+	for sym, st := range mktStates {
+		if sym == filledSym {
+			continue
+		}
+		if st.pendBidMicroUSD.Load() > 0 || st.pendAskMicroUSD.Load() > 0 {
+			go func(s string) {
+				oSt := mktStates[s]
+				oSt.mu.Lock()
+				for _, sd := range []string{"BID", "ASK"} {
+					if ao := oSt.activeOrds[sd]; ao != nil && !ao.IsClose {
+						cancelSide(s, sd) // L2CancelOrder is 100% quota-free & 0.7ms fast!
+					}
+				}
+				oSt.mu.Unlock()
+			}(sym)
+		}
+	}
 }
 
 func preemptWeakerQuote(leaderSym, side string) {
@@ -256,6 +283,15 @@ func preemptWeakerQuote(leaderSym, side string) {
 		return
 	}
 	myPnl := mySt.rollPnlMicro.Load()
+	checkLong := side == "BID"
+	// Only preempt weaker same-side quote if combined pending would exceed globalDirCapUSD()!
+	totPend := float64(mySt.pendBidMicroUSD.Load())/1e6 + otherSameDirPendingUSD(leaderSym, true)
+	if !checkLong {
+		totPend = float64(mySt.pendAskMicroUSD.Load())/1e6 + otherSameDirPendingUSD(leaderSym, false)
+	}
+	if totPend <= globalDirCapUSD()*1.02 {
+		return
+	}
 	for sym, st := range mktStates {
 		if sym == leaderSym {
 			continue
@@ -273,8 +309,8 @@ func preemptWeakerQuote(leaderSym, side string) {
 			go func(s string) {
 				oSt := mktStates[s]
 				oSt.mu.Lock()
-				if ao := oSt.activeOrds[side]; ao != nil && !ao.IsClose && takeWriteSlot(true) {
-					cancelSide(s, side)
+				if ao := oSt.activeOrds[side]; ao != nil && !ao.IsClose {
+					cancelSide(s, side) // Quota-free L2CancelOrder!
 				}
 				oSt.mu.Unlock()
 			}(sym)
@@ -471,11 +507,22 @@ func placeSide(sym, side string, pxF, midF, customSz float64, isClose, isIOC boo
 		if clip <= 0 {
 			clip = m.ClipUSD
 		}
-		if st.range60sBps > 9.5 {
-			clip = math.Max(12.0, clip*(9.5/st.range60sBps)) // Avellaneda-Stoikov inverse volatility sizing!
+		if st.range60sBps > 12.0 {
+			clip = math.Max(12.0, clip*(12.0/st.range60sBps)) // Avellaneda-Stoikov inverse vol sizing only in >12bps storms!
 		}
 		if !isClose && isIOC {
 			clip = math.Max(12.0, clip*0.65) // Shield #5: 0.65x cap on Taker Snipes
+		}
+		if !isClose {
+			// Enforce strict single-trade global directional cap across Quote-Two same-side orders!
+			otherPend := otherSameDirPendingUSD(sym, side == "BID")
+			rem := globalDirCapUSD() - otherPend
+			if rem < 11.5 {
+				return
+			}
+			if clip > rem {
+				clip = rem
+			}
 		}
 		baseF = math.Max(m.MinB, clip/pxF)
 	}
@@ -576,20 +623,20 @@ func recomputeBBO(st *MarketState) {
 func closeStepBps(st *MarketState) float64 {
 	if !st.posOpenTS.IsZero() {
 		secs := time.Since(st.posOpenTS).Seconds()
+		if secs >= 60.0 {
+			return -1.2 // Clean Maker scratch at 60s before zombie tail
+		}
 		if secs >= 45.0 {
-			return -1.2 // Shield #1: exit before >45s zombie tail!
+			return 0.0 // Breakeven at 45s
 		}
-		if secs >= 30.0 {
-			return 0.0 // Exact breakeven at 30s
-		}
-		if secs >= 18.0 {
-			return 1.4 // Fast green step-down at 18s
+		if secs >= 25.0 {
+			return 1.5 // Full +$0.014 step-down win window (25-45s)!
 		}
 	}
-	if st.range60sBps > 0 && st.range60sBps < 3.5 {
-		return 3.0 // Low-volume quiet-hour snap target
+	if st.range60sBps > 0 && st.range60sBps < 3.0 {
+		return 3.0 // Ultra-quiet dead-hour snap target
 	}
-	return 3.5
+	return 3.5 // Full +$0.031 target (0-25s)!
 }
 
 func updateShadowPaper(st *MarketState, now time.Time, lb, la, fairLt, effEdge float64, bidOk, askOk bool) {
@@ -616,17 +663,17 @@ func updateShadowPaper(st *MarketState, now time.Time, lb, la, fairLt, effEdge f
 	}
 	age := now.Sub(st.shOpenTS).Seconds()
 	tgt := 3.5
-	if age >= 30.0 {
+	if age >= 45.0 {
 		tgt = 0.0
-	} else if age >= 18.0 {
-		tgt = 1.4
+	} else if age >= 25.0 {
+		tgt = 1.5
 	}
 	if st.shDir == 1 {
 		pnlBps := (lb - st.shEntry) / st.shEntry * 10000.0
 		if la >= st.shEntry*(1.0+tgt/10000.0) {
 			st.shadowBps += tgt
 			st.shDir = 0
-		} else if pnlBps <= -8.5 || age >= 45.0 {
+		} else if pnlBps <= -8.5 || age >= 60.0 {
 			st.shadowBps += pnlBps
 			st.shDir = 0
 		}
@@ -635,7 +682,7 @@ func updateShadowPaper(st *MarketState, now time.Time, lb, la, fairLt, effEdge f
 		if lb <= st.shEntry*(1.0-tgt/10000.0) {
 			st.shadowBps += tgt
 			st.shDir = 0
-		} else if pnlBps <= -8.5 || age >= 45.0 {
+		} else if pnlBps <= -8.5 || age >= 60.0 {
 			st.shadowBps += pnlBps
 			st.shDir = 0
 		}
@@ -711,21 +758,19 @@ func manageCoin(sym string) {
 	st.range60sBps = (maxHi - minLo) / mid * 10000.0
 	volSafe := st.range60sBps <= 18.0 // Shield #3: pause new entries during >18bps 1m flash cascades!
 
-	// All-Weather Avellaneda-Stoikov Edge + Clock-Boundary Cushion (:58-:02 & :29-:32)
+	// All-Weather Edge: keep sweet-spot 3.8bps up to 12.0bps normal flow, widen only in 12-18bps storms!
 	baseEdge := st.dynEdgeBps
 	if baseEdge <= 0 {
 		baseEdge = m.EdgeBps
 	}
 	edge := baseEdge
-	if st.range60sBps < 4.5 {
-		edge = math.Min(baseEdge, 3.8) // Low-volume regime: tight 3.8bps Maker fills
-	} else if st.range60sBps <= 9.5 {
-		edge = 3.8 + (st.range60sBps-4.5)*0.36 // Medium-volume regime: 3.8 -> 5.6bps
+	if st.range60sBps <= 12.0 {
+		edge = math.Min(baseEdge, 3.8)
 	} else {
-		edge = 5.6 + (st.range60sBps-9.5)*0.22 // High-volume regime: 5.6 -> 7.5bps
+		edge = 3.8 + (st.range60sBps-12.0)*0.45 // Storm regime (12 -> 18bps): 3.8 -> 6.5bps
 	}
-	snipeThresh := 3.8
-	if st.range60sBps > 8.0 {
+	snipeThresh := 3.6
+	if st.range60sBps > 12.0 {
 		snipeThresh = 4.5
 	}
 	minHr := now.Minute()
@@ -734,28 +779,30 @@ func manageCoin(sym string) {
 		snipeThresh += 1.0
 	}
 
-	netCap := 15.0
-	otherLong := otherDirExposureUSD(sym, true)
-	otherShort := otherDirExposureUSD(sym, false)
-	coinActive := m.AllowEntry && st.dynClipUSD >= 0
-	inCool := now.Before(st.stopCoolUntil) || now.Sub(st.lastFillTS) < 4*time.Second
+	holdOneLocked := anyOtherOpenPos(sym) // Strict Hold-One: block/cancel all other coins when 1 trade is open!
+	dirCap := globalDirCapUSD()
+	otherPendBid := otherSameDirPendingUSD(sym, true)
+	otherPendAsk := otherSameDirPendingUSD(sym, false)
+	coinActive := m.AllowEntry && st.dynClipUSD >= 0 && !holdOneLocked
+	inCool := now.Before(st.stopCoolUntil) || now.Sub(st.lastFillTS) < 3*time.Second
 	bidAllowed := volSafe && trendBps >= -2.2 && trendBps <= 5.0 && impBps >= -2.5 && impBps <= 3.5
 	askAllowed := volSafe && trendBps <= 2.2 && trendBps >= -5.0 && impBps <= 2.5 && impBps >= -3.5
 
 	// Update 24/7 Zero-Risk Virtual Paper Engine on ALL 4 coins before coinActive filter!
 	updateShadowPaper(st, now, lb, la, fairLt, edge, bidAllowed && vel3sBps > -2.0 && obi >= -ObiLimit, askAllowed && vel3sBps < 2.0 && obi <= ObiLimit)
 
-	bidSafe := coinActive && !inCool && now.After(st.dropCoolUntil) && vel3sBps > -2.0 && bidAllowed && obi >= -ObiLimit && otherLong < netCap
-	askSafe := coinActive && !inCool && now.After(st.pumpCoolUntil) && vel3sBps < 2.0 && askAllowed && obi <= ObiLimit && otherShort < netCap
-	keepBid := coinActive && volSafe && !inCool && now.After(st.dropCoolUntil) && trendBps >= -3.5 && trendBps <= 5.5 && vel3sBps > -3.5 && obi >= -0.58 && st.rawObi > -0.78 && otherLong < netCap
-	keepAsk := coinActive && volSafe && !inCool && now.After(st.pumpCoolUntil) && trendBps <= 3.5 && trendBps >= -5.5 && vel3sBps < 3.5 && obi <= 0.58 && st.rawObi < 0.78 && otherShort < netCap
+	// Two-Sided Neutral Quoting + Quote-Two inside single globalDirCapUSD()!
+	bidSafe := coinActive && !inCool && now.After(st.dropCoolUntil) && vel3sBps > -2.0 && bidAllowed && obi >= -ObiLimit && (dirCap-otherPendBid) >= 12.0
+	askSafe := coinActive && !inCool && now.After(st.pumpCoolUntil) && vel3sBps < 2.0 && askAllowed && obi <= ObiLimit && (dirCap-otherPendAsk) >= 12.0
+	keepBid := coinActive && volSafe && !inCool && now.After(st.dropCoolUntil) && trendBps >= -3.5 && trendBps <= 5.5 && vel3sBps > -3.5 && obi >= -0.58 && st.rawObi > -0.78
+	keepAsk := coinActive && volSafe && !inCool && now.After(st.pumpCoolUntil) && trendBps <= 3.5 && trendBps >= -5.5 && vel3sBps < 3.5 && obi <= 0.58 && st.rawObi < 0.78
 
-	staleSnipeBuy := coinActive && volSafe && !inCool && now.After(st.dropCoolUntil) && math.Abs(posUSD) < 1.0 && otherLong < netCap && (fairLt-la)/la*10000.0 >= snipeThresh && trendBps >= -2.2 && trendBps <= 5.0 && vel3sBps > -0.8 && obi >= 0.22
-	staleSnipeSell := coinActive && volSafe && !inCool && now.After(st.pumpCoolUntil) && math.Abs(posUSD) < 1.0 && otherShort < netCap && (lb-fairLt)/lb*10000.0 >= snipeThresh && trendBps <= 2.2 && trendBps >= -5.0 && vel3sBps < 0.8 && obi <= -0.22
+	staleSnipeBuy := coinActive && volSafe && !inCool && now.After(st.dropCoolUntil) && math.Abs(posUSD) < 1.0 && (dirCap-otherPendBid) >= 12.0 && (fairLt-la)/la*10000.0 >= snipeThresh && trendBps >= -2.2 && trendBps <= 5.0 && vel3sBps > -0.8 && obi >= 0.20
+	staleSnipeSell := coinActive && volSafe && !inCool && now.After(st.pumpCoolUntil) && math.Abs(posUSD) < 1.0 && (dirCap-otherPendAsk) >= 12.0 && (lb-fairLt)/lb*10000.0 >= snipeThresh && trendBps <= 2.2 && trendBps >= -5.0 && vel3sBps < 0.8 && obi <= -0.20
 	btcTrendBuy := staleSnipeBuy
 	btcTrendSell := staleSnipeSell
 
-	// 1. Manage resting orders: ModifyOrder (1 write) or 0ms Tier-2 Anti-Pickoff Cancel
+	// 1. Manage resting orders: ModifyOrder (1 write) or Quota-Free 0ms L2CancelOrder!
 	pickoffBuf := math.Max(1.4, edge*0.38)
 	for _, side := range []string{"BID", "ASK"} {
 		ao := st.activeOrds[side]
@@ -780,10 +827,8 @@ func manageCoin(sym string) {
 			aboutToGetPickedOff := (side == "BID" && fairLt <= ao.Px*(1.0+pickoffBuf/10000.0)) || (side == "ASK" && fairLt >= ao.Px*(1.0-pickoffBuf/10000.0))
 			safeNow := !aboutToGetPickedOff && ((side == "BID" && (keepBid || btcTrendBuy)) || (side == "ASK" && (keepAsk || btcTrendSell)))
 			if !safeNow {
-				if (aboutToGetPickedOff && takeWriteSlotTier(2)) || (!aboutToGetPickedOff && takeWriteSlot(true)) {
-					cancelSide(sym, side)
-				}
-			} else if (moveBps >= CancelBps || ageS >= 35.0 || tooClose) && now.Sub(st.lastOrdTS[side]) >= 250*time.Millisecond && takeWriteSlot(false) {
+				cancelSide(sym, side) // L2CancelOrder is 100% quota-free & unthrottled!
+			} else if (moveBps >= CancelBps || ageS >= 35.0 || tooClose) && now.Sub(st.lastOrdTS[side]) >= 450*time.Millisecond && takeWriteSlot(false) {
 				newPx := roundTo(math.Min(lb, fairLt*(1.0-edge/10000.0)), m.PxDec)
 				if side == "ASK" {
 					newPx = roundTo(math.Max(la, fairLt*(1.0+edge/10000.0)), m.PxDec)
@@ -810,12 +855,12 @@ func manageCoin(sym string) {
 	// 2. Closing orders: Shield #1 (<45s Alpha Half-Life Exit) + 9.5bps Room-to-Breathe (6.5bps after 35s)
 	if pos <= -m.MinB && ae > 0 {
 		slBps := 9.5
-		if holdS >= 35.0 {
+		if holdS >= 45.0 {
 			slBps = 6.5
 		}
 		slHitShort := fairLt >= ae*(1.0+slBps/10000.0)
 		defBailShort := vel3sBps >= 8.0 && fairLt >= ae*(1.0+6.0/10000.0)
-		timeScratchShort := holdS >= 60.0 && la <= ae*(1.0+5.0/10000.0)
+		timeScratchShort := holdS >= 75.0 && la <= ae*(1.0+5.0/10000.0)
 		if posUSD > -10.10 {
 			if (fairLt <= ae*(1.0-stepBps/10000.0) || slHitShort || defBailShort || timeScratchShort) && st.activeOrds["BID"] == nil && now.Sub(st.lastOrdTS["BID"]) >= 3*time.Second && takeWriteSlot(true) {
 				st.lastOrdTS["BID"] = now
@@ -878,12 +923,12 @@ func manageCoin(sym string) {
 
 	if pos >= m.MinB && ae > 0 {
 		slBps := 9.5
-		if holdS >= 35.0 {
+		if holdS >= 45.0 {
 			slBps = 6.5
 		}
 		slHitLong := fairLt <= ae*(1.0-slBps/10000.0)
 		defBailLong := vel3sBps <= -8.0 && fairLt <= ae*(1.0-6.0/10000.0)
-		timeScratchLong := holdS >= 60.0 && lb >= ae*(1.0-5.0/10000.0)
+		timeScratchLong := holdS >= 75.0 && lb >= ae*(1.0-5.0/10000.0)
 		if posUSD < 10.10 {
 			if (fairLt >= ae*(1.0+stepBps/10000.0) || slHitLong || defBailLong || timeScratchLong) && st.activeOrds["ASK"] == nil && now.Sub(st.lastOrdTS["ASK"]) >= 3*time.Second && takeWriteSlot(true) {
 				st.lastOrdTS["ASK"] = now
@@ -951,7 +996,7 @@ func manageCoin(sym string) {
 	}
 	logMu.Unlock()
 	if shouldLog {
-		fmt.Printf("[%s] GO-TOKYO v51 Eq=$%.4f | %s Pos=%.5f | Net=$%.2f | Rng60s=%.1fbps | Sh=%.1f | OBI=%.2f\n",
+		fmt.Printf("[%s] GO-TOKYO v52 Eq=$%.4f | %s Pos=%.5f | Net=$%.2f | Rng60s=%.1fbps | Sh=%.1f | OBI=%.2f\n",
 			now.Format("15:04:05"), float64(eqNow.Load())/1e6, sym, pos, netUSD, st.range60sBps, st.shadowBps, obi)
 	}
 }
@@ -1020,7 +1065,12 @@ func rebalanceFromTrades(tb []byte) {
 	btcWarm := 1.2 * math.Exp(-uptimeMin/8.0) // Fades smoothly over 8m as paper scores warm up
 	bestSym := ""
 	bestScore := -999.0
+	secondSym := ""
+	secondScore := -999.0
 	evScores := map[string]float64{}
+	spreadMap := map[string]float64{}
+	shMap := map[string]float64{}
+	rngMap := map[string]float64{}
 	for _, s := range evergreenSyms {
 		st := mktStates[s]
 		st.mu.Lock()
@@ -1028,6 +1078,7 @@ func rebalanceFromTrades(tb []byte) {
 		sh := st.shadowBps
 		rng := st.range60sBps
 		st.mu.Unlock()
+		spreadMap[s], shMap[s], rngMap[s] = sp, sh, rng
 		wr := 0.75
 		if closes[s] > 0.05 {
 			wr = wins[s] / closes[s]
@@ -1040,27 +1091,43 @@ func rebalanceFromTrades(tb []byte) {
 			sc -= sp * 1.6
 		}
 		evScores[s] = sc
-		// Evergreen qualification: live spread <= 1.6bps (or warming up on BTC) and not in active cascade
 		spreadOk := (sp > 0 && sp <= 1.6) || (sp == 0 && s == "BTC")
-		if spreadOk && rng <= 18.0 && sc > bestScore {
-			bestScore = sc
-			bestSym = s
+		if spreadOk && rng <= 18.0 {
+			if sc > bestScore {
+				secondScore = bestScore
+				secondSym = bestSym
+				bestScore = sc
+				bestSym = s
+			} else if sc > secondScore {
+				secondScore = sc
+				secondSym = s
+			}
 		}
 	}
-	baseClip := math.Min(550.0, curEq*0.92) // Smooth auto-compounding up to $550 clip on $500+ equity
+	// Quote-Two / Hold-One: Coin #2 qualifies ONLY with <=1.0bps spread, >= +5.0 paper score, <=12bps range, and not in probation!
+	twoActive := !inProbation && secondSym != "" && spreadMap[secondSym] > 0 && spreadMap[secondSym] <= 1.0 && shMap[secondSym] >= 5.0 && rngMap[secondSym] <= 12.0 && pnl[secondSym] >= -0.01
+	baseClip := math.Min(550.0, curEq*0.92)
 	if inProbation {
 		baseClip = 20.0 // Shield #2: $20 probation size until next green win!
 	}
 	for _, sym := range evergreenSyms {
 		st := mktStates[sym]
 		clip := -1.0
+		eCool := 1500 * time.Millisecond
 		if sym == bestSym && bestScore > -4.0 {
-			clip = baseClip
+			if twoActive {
+				clip = baseClip * 0.58 // Fits Coin #1 (58%) + Coin #2 (34%) = 92% strictly inside single globalDirCapUSD()!
+			} else {
+				clip = baseClip
+			}
+		} else if twoActive && sym == secondSym {
+			clip = math.Max(12.0, baseClip*0.34)
+			eCool = 2500 * time.Millisecond
 		}
 		st.mu.Lock()
 		st.dynClipUSD = clip
 		st.dynEdgeBps = 3.8
-		st.entryCool = 2 * time.Second
+		st.entryCool = eCool
 		st.rollPnl = pnl[sym]
 		st.mu.Unlock()
 		st.rollPnlMicro.Store(int64(evScores[sym] * 1e6))
@@ -1251,6 +1318,9 @@ func runTxWS() {
 			sMsg := string(msg)
 			if strings.Contains(sMsg, `"error"`) || (strings.Contains(sMsg, `"code":`) && !strings.Contains(sMsg, `"code":200`)) {
 				fmt.Printf("[WS_RESP] %s\n", sMsg)
+				if strings.Contains(sMsg, "429") || strings.Contains(strings.ToLower(sMsg), "quota") || strings.Contains(strings.ToLower(sMsg), "rate") {
+					quotaCoolUntil.Store(time.Now().Add(8 * time.Second).UnixMilli())
+				}
 				if strings.Contains(sMsg, "21501") || strings.Contains(sMsg, "invalid tx") {
 					useWsSend = false
 				}
@@ -1373,6 +1443,7 @@ func runLtWS() {
 							}
 							if math.Abs(sz) > 1e-6 && math.Abs(prev) < 1e-6 {
 								st.posOpenTS = time.Now()
+								cancelAllOtherEntryQuotes(sym) // Hold-One: 0.7ms quota-free cancel of all other coins' resting quotes!
 							} else if math.Abs(sz) < 1e-6 {
 								st.posOpenTS = time.Time{}
 								st.trendMode = false
