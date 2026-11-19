@@ -42,14 +42,17 @@ type Market struct {
 	PxDec      int
 	MinB       float64
 	AllowEntry bool
+	ClipUSD    float64
 }
 
 var markets = map[string]Market{
-	"ETH": {Sym: "ETH", ID: 0, SzDec: 4, PxDec: 2, MinB: 0.0020, AllowEntry: true},
-	"BTC": {Sym: "BTC", ID: 1, SzDec: 5, PxDec: 1, MinB: 0.00007, AllowEntry: true},
-	"SOL": {Sym: "SOL", ID: 2, SzDec: 3, PxDec: 3, MinB: 0.055, AllowEntry: false},
+	"ETH":  {Sym: "ETH", ID: 0, SzDec: 4, PxDec: 2, MinB: 0.0020, AllowEntry: true, ClipUSD: 50.0},
+	"BTC":  {Sym: "BTC", ID: 1, SzDec: 5, PxDec: 1, MinB: 0.00007, AllowEntry: true, ClipUSD: 50.0},
+	"SOL":  {Sym: "SOL", ID: 2, SzDec: 3, PxDec: 3, MinB: 0.055, AllowEntry: true, ClipUSD: 12.0},
+	"HYPE": {Sym: "HYPE", ID: 24, SzDec: 2, PxDec: 4, MinB: 0.07, AllowEntry: true, ClipUSD: 12.0},
+	"ZEC":  {Sym: "ZEC", ID: 90, SzDec: 3, PxDec: 3, MinB: 0.004, AllowEntry: true, ClipUSD: 12.0},
 }
-var idToSym = map[int64]string{0: "ETH", 1: "BTC", 2: "SOL"}
+var idToSym = map[int64]string{0: "ETH", 1: "BTC", 2: "SOL", 24: "HYPE", 90: "ZEC"}
 
 type ActiveOrder struct {
 	COI     int64
@@ -93,7 +96,10 @@ func newMarketState() *MarketState {
 }
 
 var (
-	mktStates = map[string]*MarketState{"ETH": newMarketState(), "BTC": newMarketState(), "SOL": newMarketState()}
+	mktStates = map[string]*MarketState{
+		"ETH": newMarketState(), "BTC": newMarketState(), "SOL": newMarketState(),
+		"HYPE": newMarketState(), "ZEC": newMarketState(),
+	}
 	rateMu    sync.Mutex
 	writeHist []time.Time
 	eqNow     atomic.Int64
@@ -287,7 +293,7 @@ func placeSide(sym, side string, pxF, midF, customSz float64, isClose, isIOC boo
 	m := markets[sym]
 	baseF := customSz
 	if baseF <= 0 {
-		baseF = math.Max(m.MinB, ClipUSD/pxF)
+		baseF = math.Max(m.MinB, m.ClipUSD/pxF)
 	}
 	baseInt := int64(math.Round(baseF * math.Pow10(m.SzDec)))
 	if !isClose {
@@ -631,6 +637,9 @@ func syncAccountLoop() {
 				for _, p := range a.Positions {
 					if sym, ok := idToSym[p.MarketID]; ok {
 						st := mktStates[sym]
+					if st == nil {
+						continue
+					}
 						sz, _ := strconv.ParseFloat(p.Position, 64)
 						if p.Sign < 0 && sz > 0 {
 							sz = -sz
@@ -793,6 +802,9 @@ func runLtWS() {
 						midID, _ := strconv.ParseInt(midStr, 10, 64)
 						if sym, ok := idToSym[midID]; ok {
 							st := mktStates[sym]
+					if st == nil {
+						continue
+					}
 							sz, _ := strconv.ParseFloat(p.Position, 64)
 							if p.Sign < 0 && sz > 0 {
 								sz = -sz
@@ -830,6 +842,9 @@ func runLtWS() {
 				midID, _ := strconv.ParseInt(idStr, 10, 64)
 				if sym, ok := idToSym[midID]; ok {
 					st := mktStates[sym]
+					if st == nil {
+						continue
+					}
 					st.mu.Lock()
 					needRecompute := strings.Contains(m.Type, "subscribed")
 					if needRecompute {
@@ -904,7 +919,7 @@ func runLtWS() {
 }
 
 func runBnWS() {
-	url := "wss://fstream.binance.com/stream?streams=ethusdt@bookTicker/btcusdt@bookTicker/solusdt@bookTicker"
+	url := "wss://fstream.binance.com/stream?streams=ethusdt@bookTicker/btcusdt@bookTicker/solusdt@bookTicker/hypeusdt@bookTicker/zecusdt@bookTicker"
 	for {
 		conn, _, err := websocket.DefaultDialer.Dial(url, nil)
 		if err != nil {
@@ -940,6 +955,9 @@ func runBnWS() {
 					obiVal := (bq - aq) / (bq + aq)
 					now := time.Now()
 					st := mktStates[sym]
+					if st == nil {
+						continue
+					}
 					st.mu.Lock()
 					st.bnMid = mVal
 					st.bnMicro = microVal
