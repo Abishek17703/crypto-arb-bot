@@ -951,8 +951,8 @@ func manageCoin(sym string) {
 	}
 	logMu.Unlock()
 	if shouldLog {
-		fmt.Printf("[%s] GO-TOKYO v51 Eq=$%.4f | %s Pos=%.5f | Rng60s=%.1fbps | Sh=%.1f | OBI=%.2f\n",
-			now.Format("15:04:05"), float64(eqNow.Load())/1e6, sym, pos, st.range60sBps, st.shadowBps, obi)
+		fmt.Printf("[%s] GO-TOKYO v51 Eq=$%.4f | %s Pos=%.5f | Net=$%.2f | Rng60s=%.1fbps | Sh=%.1f | OBI=%.2f\n",
+			now.Format("15:04:05"), float64(eqNow.Load())/1e6, sym, pos, netUSD, st.range60sBps, st.shadowBps, obi)
 	}
 }
 
