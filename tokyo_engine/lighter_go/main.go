@@ -72,6 +72,8 @@ type MarketState struct {
 	emaFast     float64
 	emaSlow     float64
 	lastEmaTS   time.Time
+	basisBps    float64
+	lastBasisTS time.Time
 	bookBids    map[string]float64
 	bookAsks    map[string]float64
 	ltBid       float64
@@ -423,15 +425,29 @@ func manageCoin(sym string) {
 		trendBps = (ef - es) / es * 10000.0
 		impBps = (mid - ef) / ef * 10000.0
 	}
+	ltMid := 0.5 * (lb + la)
+	instBasis := (ltMid - mid) / mid * 10000.0
+	if st.lastBasisTS.IsZero() {
+		st.basisBps = instBasis
+		st.lastBasisTS = now
+	} else {
+		bdt := math.Min(5.0, math.Max(0.001, now.Sub(st.lastBasisTS).Seconds()))
+		st.lastBasisTS = now
+		st.basisBps += (1.0 - math.Exp(-bdt/60.0)) * (instBasis - st.basisBps)
+	}
+	fairLt := micro * (1.0 + st.basisBps/10000.0)
+
 	// High-quality entry filters: Calm-market band (|trendBps|<=1.0, |impBps|<=1.0) + OBI (0.25) + correlated net cap ($30)
 	inCool := now.Before(st.stopCoolUntil) || now.Sub(st.lastFillTS) < 8*time.Second
 	calmMkt := math.Abs(trendBps) <= 1.0 && math.Abs(impBps) <= 1.0
 	bidSafe := m.AllowEntry && !inCool && calmMkt && obi >= -ObiLimit && netUSD < 30.0
 	askSafe := m.AllowEntry && !inCool && calmMkt && obi <= ObiLimit && netUSD > -30.0
 
-	// BTC Trend-Start breakout override (18 bps impulse + OBI confirm -> immediate 0%-fee IOC entry)
-	btcTrendBuy := sym == "BTC" && !inCool && math.Abs(posUSD) < 5.0 && impBps >= 18.0 && trendBps > 0 && obi >= 0.25
-	btcTrendSell := sym == "BTC" && !inCool && math.Abs(posUSD) < 5.0 && impBps <= -18.0 && trendBps < 0 && obi <= -0.25
+	// BTC Trend-Start breakout OR 0%-fee Stale-Quote IOC Snipe (>= 5 bps lag vs fairLt + OBI confirm)
+	staleSnipeBuy := m.AllowEntry && !inCool && math.Abs(posUSD) < 1.0 && netUSD < 30.0 && (fairLt-la)/la*10000.0 >= 5.0 && obi >= 0.25
+	staleSnipeSell := m.AllowEntry && !inCool && math.Abs(posUSD) < 1.0 && netUSD > -30.0 && (lb-fairLt)/lb*10000.0 >= 5.0 && obi <= -0.25
+	btcTrendBuy := (sym == "BTC" && !inCool && math.Abs(posUSD) < 5.0 && impBps >= 18.0 && trendBps > 0 && obi >= 0.25) || staleSnipeBuy
+	btcTrendSell := (sym == "BTC" && !inCool && math.Abs(posUSD) < 5.0 && impBps <= -18.0 && trendBps < 0 && obi <= -0.25) || staleSnipeSell
 
 	// 1. Manage resting orders: ModifyOrder (1 write) or Cancel on toxic flow
 	for _, side := range []string{"BID", "ASK"} {
@@ -455,9 +471,9 @@ func manageCoin(sym string) {
 					cancelSide(sym, side)
 				}
 			} else if (moveBps >= CancelBps || ageS >= 35.0 || tooClose) && now.Sub(st.lastOrdTS[side]) >= 400*time.Millisecond && takeWriteSlot(false) {
-				newPx := roundTo(math.Min(lb, micro*(1.0-EdgeBps/10000.0)), m.PxDec)
+				newPx := roundTo(math.Min(lb, fairLt*(1.0-EdgeBps/10000.0)), m.PxDec)
 				if side == "ASK" {
-					newPx = roundTo(math.Max(la, micro*(1.0+EdgeBps/10000.0)), m.PxDec)
+					newPx = roundTo(math.Max(la, fairLt*(1.0+EdgeBps/10000.0)), m.PxDec)
 				}
 				if side == "BID" && newPx >= la {
 					newPx = roundTo(la-tick, m.PxDec)
@@ -521,7 +537,7 @@ func manageCoin(sym string) {
 			}
 		} else {
 			st.trendMode = false
-			wantBid := roundTo(math.Min(lb, micro*(1.0-EdgeBps/10000.0)), m.PxDec)
+			wantBid := roundTo(math.Min(lb, fairLt*(1.0-EdgeBps/10000.0)), m.PxDec)
 			if wantBid >= la {
 				wantBid = roundTo(la-tick, m.PxDec)
 			}
@@ -580,7 +596,7 @@ func manageCoin(sym string) {
 			}
 		} else {
 			st.trendMode = false
-			wantAsk := roundTo(math.Max(la, micro*(1.0+EdgeBps/10000.0)), m.PxDec)
+			wantAsk := roundTo(math.Max(la, fairLt*(1.0+EdgeBps/10000.0)), m.PxDec)
 			if wantAsk <= lb {
 				wantAsk = roundTo(lb+tick, m.PxDec)
 			}
