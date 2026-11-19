@@ -235,24 +235,44 @@
 
     let lastData = null;
     let lastTrades = [];
-    function pairClosedTrades(trades) {
+    function pairClosedTrades(trades, positions) {
       const sorted = [...trades].sort((a, b) => (a.timestamp - b.timestamp) || (a.trade_id - b.trade_id));
+      const realPos = {};
+      for (const p of (positions || [])) {
+        const sym = p.symbol || ("MKT-" + p.market_id);
+        const r = parseFloat(p.position || 0);
+        realPos[sym] = (p.sign !== undefined && p.sign < 0 && r > 0) ? -r : r;
+      }
+      const net = {};
+      for (const t of sorted) {
+        const sym = t.market_symbol || ("MKT-" + t.market_id);
+        const sz = parseFloat(t.size || 0);
+        net[sym] = (net[sym] || 0) + (t.bid_account_id === ACCT_INDEX ? sz : -sz);
+      }
       const pos = {}, cost = {}, closed = [];
+      for (const sym of Object.keys(net)) {
+        const s0 = (realPos[sym] || 0) - net[sym];
+        pos[sym] = Math.abs(s0) < 1e-8 ? 0 : s0;
+        cost[sym] = Math.abs(s0) < 1e-8 ? 0 : null;
+      }
       for (const t of sorted) {
         const sym = t.market_symbol || ("MKT-" + t.market_id);
         const sz = parseFloat(t.size || 0), px = parseFloat(t.price || 0);
         const dq = (t.bid_account_id === ACCT_INDEX) ? sz : -sz;
-        const p0 = pos[sym] || 0, c0 = cost[sym] || 0;
-        if (p0 === 0 || (p0 > 0 && dq > 0) || (p0 < 0 && dq < 0)) {
-          pos[sym] = p0 + dq; cost[sym] = c0 + dq * px;
+        const p0 = pos[sym] || 0, c0 = cost[sym];
+        if (Math.abs(p0) < 1e-8 || (p0 > 0 && dq > 0) || (p0 < 0 && dq < 0)) {
+          pos[sym] = p0 + dq;
+          cost[sym] = c0 === null ? null : c0 + dq * px;
         } else {
           const cq = Math.min(Math.abs(p0), Math.abs(dq));
-          const avgIn = Math.abs(c0 / p0);
-          const pnl = p0 > 0 ? cq * (px - avgIn) : cq * (avgIn - px);
-          closed.push({ sym, side: p0 > 0 ? "LONG" : "SHORT", sz: cq, entry: avgIn, exit: px, pnl, ts: t.timestamp });
+          if (cq > 1e-8) {
+            const avgIn = c0 === null ? null : Math.abs(c0 / p0);
+            const pnl = avgIn === null ? null : (p0 > 0 ? cq * (px - avgIn) : cq * (avgIn - px));
+            closed.push({ sym, side: p0 > 0 ? "LONG" : "SHORT", sz: cq, entry: avgIn, exit: px, pnl, ts: t.timestamp });
+          }
           const rem = p0 + dq;
-          if (Math.abs(rem) < 1e-9) { pos[sym] = 0; cost[sym] = 0; }
-          else if ((p0 > 0 && rem > 0) || (p0 < 0 && rem < 0)) { pos[sym] = rem; cost[sym] = rem * avgIn; }
+          if (Math.abs(rem) < 1e-8) { pos[sym] = 0; cost[sym] = 0; }
+          else if ((p0 > 0 && rem > 0) || (p0 < 0 && rem < 0)) { pos[sym] = rem; cost[sym] = c0 === null ? null : rem * Math.abs(c0 / p0); }
           else { pos[sym] = rem; cost[sym] = rem * px; }
         }
       }
@@ -336,7 +356,7 @@
         }
       }
 
-      const closedList = pairClosedTrades(lastTrades);
+      const closedList = pairClosedTrades(lastTrades, lastData.positions);
       const tbody = document.getElementById("posBody");
       const openRows = allMkts.map(p => {
         const rawSz = parseFloat(p.position || 0);
@@ -355,9 +375,9 @@
         <td class="mono"><b>${c.sym}</b></td>
         <td><span class="badge" style="font-size:0.62rem;padding:0.1rem 0.4rem;">CLOSED</span> <span class="${c.side === "LONG" ? "pos" : "neg"}" style="font-size:0.72rem;">${c.side}</span></td>
         <td class="mono">${c.sz.toFixed(4)}</td>
-        <td class="mono">$${c.entry.toFixed(2)}→$${c.exit.toFixed(2)}</td>
+        <td class="mono">${c.entry === null ? "prev" : "$" + c.entry.toFixed(2)}→$${c.exit.toFixed(2)}</td>
         <td class="mono" style="color:var(--muted);">—</td>
-        <td class="mono ${colorCls(c.pnl)}">${fmtSigned(c.pnl, 4)}</td>
+        <td class="mono ${c.pnl === null ? "" : colorCls(c.pnl)}">${c.pnl === null ? "—" : fmtSigned(c.pnl, 4)}</td>
       </tr>`);
       const rows = [...openRows, ...closedRows];
       tbody.innerHTML = rows.length ? rows.join("") : '<tr><td colspan="6" style="color:var(--muted);">No open positions or orders</td></tr>';
