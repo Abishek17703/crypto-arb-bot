@@ -401,7 +401,7 @@
         const stepBps = elapsedMs >= 1200000 ? 0.0 : (elapsedMs >= 600000 ? 2.0 : 4.0);
         const tgt = (sz !== 0 && entry > 0) ? (sz > 0 ? entry * (1 + stepBps / 10000) : entry * (1 - stepBps / 10000)) : null;
         const cdTxt = sz !== 0
-          ? (elapsedMs < 600000 ? `⏳${fmtAgo(600000 - elapsedMs)}→2b` : (elapsedMs < 1200000 ? `⏳${fmtAgo(1200000 - elapsedMs)}→0b` : "BE 0b"))
+          ? (elapsedMs < 600000 ? `⏳${fmtAgo(600000 - elapsedMs)}` : (elapsedMs < 1200000 ? `⏳${fmtAgo(1200000 - elapsedMs)}` : "BE"))
           : `⏳${fmtAgo(Math.max(0, 35000 - (elapsedMs % 35000)))}`;
         return `<tr>
           <td class="mono"><b>${sym}</b></td>
