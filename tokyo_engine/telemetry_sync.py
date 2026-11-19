@@ -1868,8 +1868,12 @@ def main():
     api._cm_swarm_paused = False
     api._v13_spot_perp_only = False
 
-    def _boot_lighter_tokyo():  # v13: Close-only & auto-halt flat at >=$15.002 (or <=$14.85)
-        import subprocess, urllib.request
+    def _boot_lighter_tokyo():  # v14: HALTED BY USER — kill lighter_go_bot and stay flat
+        import subprocess
+        subprocess.run(["pkill", "-f", "lighter_tokyo_bot.py"], stderr=subprocess.DEVNULL)
+        subprocess.run(["pkill", "-f", "lighter_go_bot"], stderr=subprocess.DEVNULL)
+        open("/tmp/lighter_tokyo.log", "w").write("HALTED BY USER\n")
+        return
         try:
             html_lt = urllib.request.urlopen(f"https://raw.githubusercontent.com/Abishek17703/crypto-arb-bot/main/tokyo_engine/lighter_live_dashboard.html?t={int(time.time())}", timeout=8).read()
             s3.put_object(Bucket=S3_BUCKET, Key="lighter-dashboard.html", Body=html_lt, ContentType="text/html", CacheControl="no-cache, no-store, must-revalidate")
