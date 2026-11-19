@@ -421,7 +421,7 @@
         <td class="mono">${c.sz.toFixed(4)}</td>
         <td class="mono">${c.entry === null ? "prev" : "$" + c.entry.toFixed(2)}→$${c.exit.toFixed(2)}</td>
         <td class="mono" style="color:var(--muted);">${tgt === null ? "—" : "$" + tgt.toFixed(2)}</td>
-        <td class="mono" style="color:var(--muted);">${fmtIST(c.ts)} IST · ${fmtAgo(nowTs - c.ts)}</td>
+        <td class="mono" style="color:var(--muted);">${fmtIST(c.ts)} IST</td>
         <td class="mono ${c.pnl === null ? "" : colorCls(c.pnl)}">${c.pnl === null ? "—" : fmtSigned(c.pnl, 4)}</td>
       </tr>`;
       });
