@@ -619,25 +619,33 @@ func manageCoin(sym string) {
 	otherLong := otherDirExposureUSD(sym, true)
 	otherShort := otherDirExposureUSD(sym, false)
 	coinActive := m.AllowEntry && st.dynClipUSD >= 0
-	inCool := now.Before(st.stopCoolUntil) || now.Sub(st.lastFillTS) < 6*time.Second
-	bidCalm := trendBps >= -3.5 && impBps >= -3.0 && vel3sBps > -2.5
-	askCalm := trendBps <= 3.5 && impBps <= 3.0 && vel3sBps < 2.5
-	bidSafe := coinActive && !inCool && now.After(st.dropCoolUntil) && bidCalm && obi >= -ObiLimit && otherLong < netCap
-	askSafe := coinActive && !inCool && now.After(st.pumpCoolUntil) && askCalm && obi <= ObiLimit && otherShort < netCap
+	inCool := now.Before(st.stopCoolUntil) || now.Sub(st.lastFillTS) < 3*time.Second
+	bidCalm := trendBps >= -4.0 && impBps >= -3.5 && vel3sBps > -2.8
+	askCalm := trendBps <= 4.0 && impBps <= 3.5 && vel3sBps < 2.8
+	bidSafe := coinActive && !inCool && now.After(st.dropCoolUntil) && bidCalm && obi >= -0.38 && otherLong < netCap
+	askSafe := coinActive && !inCool && now.After(st.pumpCoolUntil) && askCalm && obi <= 0.38 && otherShort < netCap
+	// Cancel hysteresis: keep resting quotes alive in queue priority unless flow turns genuinely toxic!
+	keepBid := coinActive && !inCool && now.After(st.dropCoolUntil) && vel3sBps > -4.2 && obi >= -0.65 && otherLong < netCap
+	keepAsk := coinActive && !inCool && now.After(st.pumpCoolUntil) && vel3sBps < 4.2 && obi <= 0.65 && otherShort < netCap
 
 	edge := st.dynEdgeBps
 	if edge <= 0 {
 		edge = m.EdgeBps
 	}
 
-	// Strict Limit-Capped Stale-Quote Snipe ONLY (4.8bps lead-lag + aligned velocity, zero +50bps sweeps!)
-	notBleeding := coinActive && st.rollPnlMicro.Load() >= 0
-	staleSnipeBuy := notBleeding && !inCool && now.After(st.dropCoolUntil) && math.Abs(posUSD) < 1.0 && otherLong < netCap && (fairLt-la)/la*10000.0 >= 4.8 && vel3sBps >= 0.3 && obi >= 0.22
-	staleSnipeSell := notBleeding && !inCool && now.After(st.pumpCoolUntil) && math.Abs(posUSD) < 1.0 && otherShort < netCap && (lb-fairLt)/lb*10000.0 >= 4.8 && vel3sBps <= -0.3 && obi <= -0.22
+	// Fast Limit-Capped Stale-Quote Snipe (3.8bps lead-lag on #1 leader, zero +50bps sweeps!)
+	otherSym := "ETH"
+	if sym == "ETH" {
+		otherSym = "BTC"
+	}
+	isLeader := st.rollPnlMicro.Load() >= mktStates[otherSym].rollPnlMicro.Load()
+	snipeAllowed := coinActive && (isLeader || st.rollPnlMicro.Load() >= 0) && st.rollPnl >= -0.12
+	staleSnipeBuy := snipeAllowed && !inCool && now.After(st.dropCoolUntil) && math.Abs(posUSD) < 1.0 && otherLong < netCap && (fairLt-la)/la*10000.0 >= 3.8 && vel3sBps >= 0.2 && obi >= 0.18
+	staleSnipeSell := snipeAllowed && !inCool && now.After(st.pumpCoolUntil) && math.Abs(posUSD) < 1.0 && otherShort < netCap && (lb-fairLt)/lb*10000.0 >= 3.8 && vel3sBps <= -0.2 && obi <= -0.18
 	btcTrendBuy := staleSnipeBuy
 	btcTrendSell := staleSnipeSell
 
-	// 1. Manage resting orders: ModifyOrder (1 write) or Cancel on toxic flow
+	// 1. Manage resting orders: ModifyOrder (1 write) or Cancel ONLY on toxic hysteresis breach
 	for _, side := range []string{"BID", "ASK"} {
 		ao := st.activeOrds[side]
 		if ao == nil {
@@ -658,7 +666,7 @@ func manageCoin(sym string) {
 		}
 		tooClose := (side == "BID" && ao.Px >= la) || (side == "ASK" && ao.Px <= lb)
 		if !ao.IsClose {
-			safeNow := (side == "BID" && (bidSafe || btcTrendBuy)) || (side == "ASK" && (askSafe || btcTrendSell))
+			safeNow := (side == "BID" && (keepBid || btcTrendBuy)) || (side == "ASK" && (keepAsk || btcTrendSell))
 			if !safeNow {
 				if takeWriteSlot(true) {
 					cancelSide(sym, side)
@@ -734,8 +742,8 @@ func manageCoin(sym string) {
 	} else if math.Abs(posUSD) < 1.0 && (bidSafe || btcTrendBuy) {
 		st.trendMode = false
 		if btcTrendBuy {
-			snipeBidPx := roundTo(math.Max(la, fairLt*(1.0-1.8/10000.0)), m.PxDec)
-			if st.activeOrds["BID"] == nil && now.Sub(st.lastOrdTS["BID"]) >= 2*time.Second && takeWriteSlot(false) {
+			snipeBidPx := roundTo(math.Max(la, fairLt*(1.0-1.5/10000.0)), m.PxDec)
+			if st.activeOrds["BID"] == nil && now.Sub(st.lastOrdTS["BID"]) >= 1500*time.Millisecond && takeWriteSlot(false) {
 				st.lastOrdTS["BID"] = now
 				placeSide(sym, "BID", snipeBidPx, mid, 0, false, true)
 			}
@@ -745,8 +753,8 @@ func manageCoin(sym string) {
 				wantBid = roundTo(la-tick, m.PxDec)
 			}
 			eCool := st.entryCool
-			if eCool < 4*time.Second {
-				eCool = 4 * time.Second
+			if eCool < 1500*time.Millisecond {
+				eCool = 1500 * time.Millisecond
 			}
 			if st.activeOrds["BID"] == nil && now.Sub(st.lastOrdTS["BID"]) >= eCool && takeWriteSlot(false) {
 				st.lastOrdTS["BID"] = now
@@ -801,8 +809,8 @@ func manageCoin(sym string) {
 	} else if math.Abs(posUSD) < 1.0 && (askSafe || btcTrendSell) {
 		st.trendMode = false
 		if btcTrendSell {
-			snipeAskPx := roundTo(math.Min(lb, fairLt*(1.0+1.8/10000.0)), m.PxDec)
-			if st.activeOrds["ASK"] == nil && now.Sub(st.lastOrdTS["ASK"]) >= 2*time.Second && takeWriteSlot(false) {
+			snipeAskPx := roundTo(math.Min(lb, fairLt*(1.0+1.5/10000.0)), m.PxDec)
+			if st.activeOrds["ASK"] == nil && now.Sub(st.lastOrdTS["ASK"]) >= 1500*time.Millisecond && takeWriteSlot(false) {
 				st.lastOrdTS["ASK"] = now
 				placeSide(sym, "ASK", snipeAskPx, mid, 0, false, true)
 			}
@@ -812,8 +820,8 @@ func manageCoin(sym string) {
 				wantAsk = roundTo(lb+tick, m.PxDec)
 			}
 			eCool := st.entryCool
-			if eCool < 4*time.Second {
-				eCool = 4 * time.Second
+			if eCool < 1500*time.Millisecond {
+				eCool = 1500 * time.Millisecond
 			}
 			if st.activeOrds["ASK"] == nil && now.Sub(st.lastOrdTS["ASK"]) >= eCool && takeWriteSlot(false) {
 				st.lastOrdTS["ASK"] = now
@@ -829,7 +837,7 @@ func manageCoin(sym string) {
 	}
 	logMu.Unlock()
 	if shouldLog {
-		fmt.Printf("[%s] GO-TOKYO v43 Eq=$%.4f | %s Pos=%.5f | Net=$%.2f | OBI=%.2f\n",
+		fmt.Printf("[%s] GO-TOKYO v44 Eq=$%.4f | %s Pos=%.5f | Net=$%.2f | OBI=%.2f\n",
 			now.Format("15:04:05"), float64(eqNow.Load())/1e6, sym, pos, netUSD, obi)
 	}
 }
@@ -853,6 +861,9 @@ func rebalanceFromTrades(tb []byte) {
 	wins := map[string]float64{"BTC": 0, "ETH": 0}
 	closes := map[string]float64{"BTC": 0, "ETH": 0}
 	for _, t := range resp.Trades {
+		if t.TS < 1795104600000 { // Ignore legacy pre-v41 wide-stop era blowups!
+			continue
+		}
 		s := t.Symbol
 		if s != "BTC" && s != "ETH" {
 			continue
@@ -871,7 +882,7 @@ func rebalanceFromTrades(tb []byte) {
 			continue
 		}
 		ageMin := math.Max(0.0, float64(nowMS-t.TS)/60000.0)
-		w := math.Exp(-ageMin / 30.0)
+		w := math.Exp(-ageMin / 15.0) // Fast 15m recency half-life so tight scratches heal rapidly
 		pnl[s] += realized * w
 		closes[s] += w
 		if realized > 0 {
@@ -882,36 +893,45 @@ func rebalanceFromTrades(tb []byte) {
 	if curEq < 50.0 {
 		curEq = 100.0
 	}
-	score := map[string]float64{}
+	score := map[string]float64{"BTC": 0.03, "ETH": 0.0} // BTC 85%-WR structural tie-breaker
 	for _, s := range []string{"BTC", "ETH"} {
 		wr := 0.75
 		if closes[s] > 0.05 {
 			wr = wins[s] / closes[s]
 		}
-		score[s] = pnl[s] + 0.08*(wr-0.75)
+		score[s] += pnl[s] + 0.08*(wr-0.75)
 	}
-	totBudget := curEq * 1.30 // Capped 1.30x pair budget (~$125 max leader clip -> max tight SL ~$0.07)
+	totBudget := curEq * 1.30
 	btcShare := 0.50 + 0.40*math.Tanh((score["BTC"]-score["ETH"])*4.0)
 	btcClip := math.Max(12.0, totBudget*btcShare)
 	ethClip := math.Max(12.0, totBudget-btcClip)
-	// Dynamic Zero-Clip Pause: if a coin's 30m-decayed PnL < -$0.10 (and the other coin is stronger), pause it until 30m decay heals!
-	if pnl["ETH"] < -0.10 && score["BTC"] > score["ETH"] {
+	if pnl["ETH"] < -0.06 && score["BTC"] > score["ETH"] {
 		ethClip = -1.0
 		btcClip = totBudget
-	} else if pnl["BTC"] < -0.10 && score["ETH"] > score["BTC"] {
+	} else if pnl["BTC"] < -0.06 && score["ETH"] > score["BTC"] {
 		btcClip = -1.0
 		ethClip = totBudget
 	}
 	for sym, clip := range map[string]float64{"BTC": btcClip, "ETH": ethClip} {
 		st := mktStates[sym]
-		dynEdge := 3.8
-		cool := 4 * time.Second
-		if pnl[sym] < 0 {
-			dynEdge = math.Min(10.5, 6.0+(-pnl[sym])*18.0)
-			coolSec := math.Min(45.0, 4.0+(-pnl[sym])*150.0)
-			cool = time.Duration(coolSec * float64(time.Second))
-		} else if score[sym] > 0.05 {
-			dynEdge = math.Max(3.4, 3.8-score[sym]*1.2)
+		other := "ETH"
+		if sym == "ETH" {
+			other = "BTC"
+		}
+		isLeader := score[sym] >= score[other]
+		dynEdge := 2.6 // Tight fast 2.6bps maker edge on #1 leader!
+		cool := 1800 * time.Millisecond
+		if !isLeader {
+			dynEdge = 5.5
+			cool = 6 * time.Second
+			if pnl[sym] < 0 {
+				dynEdge = math.Min(10.5, 6.0+(-pnl[sym])*18.0)
+				coolSec := math.Min(45.0, 6.0+(-pnl[sym])*150.0)
+				cool = time.Duration(coolSec * float64(time.Second))
+			}
+		} else if pnl[sym] < -0.06 {
+			dynEdge = 3.8
+			cool = 4 * time.Second
 		}
 		st.mu.Lock()
 		st.dynClipUSD = clip
