@@ -28,9 +28,9 @@ const (
 	KeyIdx       = uint8(4)
 	ChainID      = uint32(304)
 	PrivKey      = "56491130b44362b137b0a3b46dc63d647865876f11ff1613c857f946ec8612f6e4f216d065f4695a"
-	ClipUSD      = 50.00
-	EdgeBps      = 7.5 // High-selectivity 7.5 bps entry around microprice
-	CancelBps    = 1.0 // Instant 1.0 bps anti-trend cancel shield
+	ClipUSD      = 55.00
+	EdgeBps      = 10.5 // High-selectivity 10.5 bps entry around microprice
+	CancelBps    = 0.5  // Instant 0.5 bps anti-trend cancel shield
 	ObiLimit     = 0.25 // Block toxic-flow side when |OBI| > 0.25
 	StopEqUSD    = 95.00
 )
@@ -46,11 +46,11 @@ type Market struct {
 }
 
 var markets = map[string]Market{
-	"ETH":  {Sym: "ETH", ID: 0, SzDec: 4, PxDec: 2, MinB: 0.0020, AllowEntry: true, ClipUSD: 50.0},
-	"BTC":  {Sym: "BTC", ID: 1, SzDec: 5, PxDec: 1, MinB: 0.00007, AllowEntry: true, ClipUSD: 50.0},
-	"SOL":  {Sym: "SOL", ID: 2, SzDec: 3, PxDec: 3, MinB: 0.055, AllowEntry: true, ClipUSD: 12.0},
-	"HYPE": {Sym: "HYPE", ID: 24, SzDec: 2, PxDec: 4, MinB: 0.07, AllowEntry: true, ClipUSD: 12.0},
-	"ZEC":  {Sym: "ZEC", ID: 90, SzDec: 3, PxDec: 3, MinB: 0.004, AllowEntry: true, ClipUSD: 12.0},
+	"ETH":  {Sym: "ETH", ID: 0, SzDec: 4, PxDec: 2, MinB: 0.0020, AllowEntry: true, ClipUSD: 55.0},
+	"BTC":  {Sym: "BTC", ID: 1, SzDec: 5, PxDec: 1, MinB: 0.00007, AllowEntry: true, ClipUSD: 35.0},
+	"SOL":  {Sym: "SOL", ID: 2, SzDec: 3, PxDec: 3, MinB: 0.055, AllowEntry: false, ClipUSD: 12.0},
+	"HYPE": {Sym: "HYPE", ID: 24, SzDec: 2, PxDec: 4, MinB: 0.07, AllowEntry: false, ClipUSD: 12.0},
+	"ZEC":  {Sym: "ZEC", ID: 90, SzDec: 3, PxDec: 3, MinB: 0.004, AllowEntry: false, ClipUSD: 12.0},
 }
 var idToSym = map[int64]string{0: "ETH", 1: "BTC", 2: "SOL", 24: "HYPE", 90: "ZEC"}
 
@@ -79,6 +79,7 @@ type MarketState struct {
 	pos         float64
 	avgEntry    float64
 	posOpenTS     time.Time
+	lastFillTS    time.Time
 	stopCoolUntil time.Time
 	trendMode     bool
 	activeOrds  map[string]*ActiveOrder
@@ -380,10 +381,10 @@ func closeStepBps(st *MarketState) float64 {
 			return 0.0 // Breakeven unstick after 20m
 		}
 		if mins >= 10.0 {
-			return 2.0
+			return 2.5
 		}
 	}
-	return 5.0
+	return 6.0
 }
 
 func manageCoin(sym string) {
@@ -414,8 +415,8 @@ func manageCoin(sym string) {
 		trendBps = (ef - es) / es * 10000.0
 		impBps = (mid - ef) / ef * 10000.0
 	}
-	// High-quality entry filters: Strict Anti-trend shield (0.5bps) + OBI toxic-flow filter (0.25) + 60s post-SL cooldown
-	inCool := now.Before(st.stopCoolUntil)
+	// High-quality entry filters: Strict Anti-trend shield (0.5bps) + OBI toxic-flow filter (0.25) + 60s post-SL cooldown + 8s post-fill guard
+	inCool := now.Before(st.stopCoolUntil) || now.Sub(st.lastFillTS) < 8*time.Second
 	bidSafe := m.AllowEntry && !inCool && trendBps >= -0.5 && impBps >= -0.5 && obi >= -ObiLimit && netUSD < 60.0
 	askSafe := m.AllowEntry && !inCool && trendBps <= 0.5 && impBps <= 0.5 && obi <= ObiLimit && netUSD > -60.0
 
@@ -668,6 +669,9 @@ func syncAccountLoop() {
 							orphanLeak = true
 						}
 						if p.OpenOrderCount == 0 || math.Abs(sz-prevPos) > 1e-6 {
+							if math.Abs(sz-prevPos) > 1e-6 {
+								st.lastFillTS = time.Now()
+							}
 							for _, s := range []string{"BID", "ASK"} {
 								if ao := st.activeOrds[s]; ao != nil && time.Since(ao.TS) > 2*time.Second {
 									delete(st.activeOrds, s)
@@ -831,6 +835,7 @@ func runLtWS() {
 								st.trendMode = false
 							}
 							if math.Abs(sz-prev) > 1e-6 {
+								st.lastFillTS = time.Now()
 								delete(st.activeOrds, "BID")
 								delete(st.activeOrds, "ASK")
 								touched = append(touched, sym)

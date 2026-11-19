@@ -1868,7 +1868,7 @@ def main():
     api._cm_swarm_paused = False
     api._v13_spot_perp_only = False
 
-    def _boot_lighter_tokyo():  # v25: fix resting-TP blocking 20bps SL & 4s entry double-size guard
+    def _boot_lighter_tokyo():  # v26: Edge=10.5bps, Cancel=0.5bps, TP=6->2.5->0, ETH $55/BTC $35, 8s fill guard
         import subprocess, urllib.request
         try:
             html_lt = urllib.request.urlopen(f"https://raw.githubusercontent.com/Abishek17703/crypto-arb-bot/main/tokyo_engine/lighter_live_dashboard.html?t={int(time.time())}", timeout=8).read()
