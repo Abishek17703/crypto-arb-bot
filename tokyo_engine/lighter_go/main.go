@@ -28,10 +28,10 @@ const (
 	KeyIdx       = uint8(4)
 	ChainID      = uint32(304)
 	PrivKey      = "56491130b44362b137b0a3b46dc63d647865876f11ff1613c857f946ec8612f6e4f216d065f4695a"
-	ClipUSD      = 35.00
+	ClipUSD      = 50.00
 	EdgeBps      = 7.5 // High-selectivity 7.5 bps entry around microprice
 	CancelBps    = 1.0 // Instant 1.0 bps anti-trend cancel shield
-	ObiLimit     = 0.45 // Block toxic-flow side when |OBI| > 0.45
+	ObiLimit     = 0.25 // Block toxic-flow side when |OBI| > 0.25
 	StopEqUSD    = 95.00
 )
 
@@ -329,7 +329,7 @@ func closeStepBps(sym string) float64 {
 			return 0.5
 		}
 	}
-	return 2.0
+	return 3.0
 }
 
 func manageCoin(sym string) {
@@ -358,9 +358,9 @@ func manageCoin(sym string) {
 		trendBps = (ef - es) / es * 10000.0
 		impBps = (mid - ef) / ef * 10000.0
 	}
-	// High-quality entry filters: Anti-trend shield + OBI toxic-flow filter + net delta cap
-	bidSafe := m.AllowEntry && trendBps >= -1.5 && impBps >= -1.5 && obi >= -ObiLimit && totalNetUSD < 40.0
-	askSafe := m.AllowEntry && trendBps <= 1.5 && impBps <= 1.5 && obi <= ObiLimit && totalNetUSD > -40.0
+	// High-quality entry filters: Strict Anti-trend shield (0.5bps) + OBI toxic-flow filter (0.25) + net delta cap
+	bidSafe := m.AllowEntry && trendBps >= -0.5 && impBps >= -0.5 && obi >= -ObiLimit && totalNetUSD < 60.0
+	askSafe := m.AllowEntry && trendBps <= 0.5 && impBps <= 0.5 && obi <= ObiLimit && totalNetUSD > -60.0
 
 	// BTC Trend-Start breakout override (18 bps impulse + OBI confirm -> immediate 0%-fee IOC entry)
 	btcTrendBuy := sym == "BTC" && math.Abs(posUSD) < 5.0 && impBps >= 18.0 && trendBps > 0 && obi >= 0.25
@@ -409,7 +409,7 @@ func manageCoin(sym string) {
 
 	// 2. Closing orders (sub-$10.10 partials use 0%-fee IOC to avoid 21706 min_quote rejection)
 	if pos <= -m.MinB && ae > 0 {
-		slBps := 35.0
+		slBps := 25.0
 		if trendMode[sym] {
 			slBps = 18.0
 		}
@@ -457,7 +457,7 @@ func manageCoin(sym string) {
 	}
 
 	if pos >= m.MinB && ae > 0 {
-		slBps := 35.0
+		slBps := 25.0
 		if trendMode[sym] {
 			slBps = 18.0
 		}
