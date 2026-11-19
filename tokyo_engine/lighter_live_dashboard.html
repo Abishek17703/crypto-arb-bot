@@ -398,15 +398,18 @@
         const elapsedMs = nowTs - POS_TIMERS[sym].ts;
         const elapsed = fmtAgo(elapsedMs);
         const entry = parseFloat(p.avg_entry_price || 0);
-        const stepBps = elapsedMs >= 1200000 ? 0.0 : (elapsedMs >= 600000 ? 2.0 : 5.0);
+        const stepBps = elapsedMs >= 1200000 ? 0.0 : (elapsedMs >= 600000 ? 2.0 : 4.0);
         const tgt = (sz !== 0 && entry > 0) ? (sz > 0 ? entry * (1 + stepBps / 10000) : entry * (1 - stepBps / 10000)) : null;
+        const cdTxt = sz !== 0
+          ? (elapsedMs < 600000 ? `⏳${fmtAgo(600000 - elapsedMs)}→2b` : (elapsedMs < 1200000 ? `⏳${fmtAgo(1200000 - elapsedMs)}→0b` : "BE 0b"))
+          : `⏳${fmtAgo(Math.max(0, 35000 - (elapsedMs % 35000)))}`;
         return `<tr>
           <td class="mono"><b>${sym}</b></td>
           <td class="${sz === 0 ? "" : (sz > 0 ? "pos" : "neg")}">${sideLbl}</td>
           <td class="mono">${Math.abs(sz)}</td>
           <td class="mono">$${entry.toFixed(2)}</td>
           <td class="mono" style="color:var(--muted);">${tgt === null ? "—" : "$" + tgt.toFixed(2)}</td>
-          <td class="mono">${ords} <span style="color:var(--muted);">· ${elapsed}</span></td>
+          <td class="mono">${ords} <span style="color:var(--muted);">· ${cdTxt}</span></td>
           <td class="mono ${colorCls(upnl)}">${fmtSigned(upnl, 4)}</td>
         </tr>`;
       });
@@ -467,6 +470,7 @@
 
     poll();
     setInterval(poll, 2000);
+    setInterval(render, 1000);
   </script>
 </body>
 </html>
