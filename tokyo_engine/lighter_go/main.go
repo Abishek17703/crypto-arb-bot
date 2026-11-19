@@ -75,8 +75,9 @@ type MarketState struct {
 	ltAsk       float64
 	pos         float64
 	avgEntry    float64
-	posOpenTS   time.Time
-	trendMode   bool
+	posOpenTS     time.Time
+	stopCoolUntil time.Time
+	trendMode     bool
 	activeOrds  map[string]*ActiveOrder
 	lastOrdTS   map[string]time.Time
 	netMicroUSD atomic.Int64
@@ -369,14 +370,14 @@ func closeStepBps(st *MarketState) float64 {
 	}
 	if !st.posOpenTS.IsZero() {
 		mins := time.Since(st.posOpenTS).Minutes()
-		if mins >= 30.0 {
-			return 0.0 // Breakeven unstick after 30m
+		if mins >= 20.0 {
+			return 0.0 // Breakeven unstick after 20m
 		}
-		if mins >= 15.0 {
-			return 0.5
+		if mins >= 10.0 {
+			return 2.0
 		}
 	}
-	return 3.0
+	return 5.0
 }
 
 func manageCoin(sym string) {
@@ -407,13 +408,14 @@ func manageCoin(sym string) {
 		trendBps = (ef - es) / es * 10000.0
 		impBps = (mid - ef) / ef * 10000.0
 	}
-	// High-quality entry filters: Strict Anti-trend shield (0.5bps) + OBI toxic-flow filter (0.25) + net delta cap
-	bidSafe := m.AllowEntry && trendBps >= -0.5 && impBps >= -0.5 && obi >= -ObiLimit && netUSD < 60.0
-	askSafe := m.AllowEntry && trendBps <= 0.5 && impBps <= 0.5 && obi <= ObiLimit && netUSD > -60.0
+	// High-quality entry filters: Strict Anti-trend shield (0.5bps) + OBI toxic-flow filter (0.25) + 60s post-SL cooldown
+	inCool := now.Before(st.stopCoolUntil)
+	bidSafe := m.AllowEntry && !inCool && trendBps >= -0.5 && impBps >= -0.5 && obi >= -ObiLimit && netUSD < 60.0
+	askSafe := m.AllowEntry && !inCool && trendBps <= 0.5 && impBps <= 0.5 && obi <= ObiLimit && netUSD > -60.0
 
 	// BTC Trend-Start breakout override (18 bps impulse + OBI confirm -> immediate 0%-fee IOC entry)
-	btcTrendBuy := sym == "BTC" && math.Abs(posUSD) < 5.0 && impBps >= 18.0 && trendBps > 0 && obi >= 0.25
-	btcTrendSell := sym == "BTC" && math.Abs(posUSD) < 5.0 && impBps <= -18.0 && trendBps < 0 && obi <= -0.25
+	btcTrendBuy := sym == "BTC" && !inCool && math.Abs(posUSD) < 5.0 && impBps >= 18.0 && trendBps > 0 && obi >= 0.25
+	btcTrendSell := sym == "BTC" && !inCool && math.Abs(posUSD) < 5.0 && impBps <= -18.0 && trendBps < 0 && obi <= -0.25
 
 	// 1. Manage resting orders: ModifyOrder (1 write) or Cancel on toxic flow
 	for _, side := range []string{"BID", "ASK"} {
@@ -460,18 +462,22 @@ func manageCoin(sym string) {
 
 	// 2. Closing orders (sub-$10.10 partials use 0%-fee IOC to avoid 21706 min_quote rejection)
 	if pos <= -m.MinB && ae > 0 {
-		slBps := 25.0
+		slBps := 20.0
 		if st.trendMode {
 			slBps = 18.0
 		}
 		if posUSD > -10.10 {
 			if (mid <= ae*(1.0-stepBps/10000.0) || mid >= ae*(1.0+slBps/10000.0)) && st.activeOrds["BID"] == nil && now.Sub(st.lastOrdTS["BID"]) >= 5*time.Second && takeWriteSlot(true) {
 				st.lastOrdTS["BID"] = now
+				if mid >= ae*(1.0+slBps/10000.0) {
+					st.stopCoolUntil = now.Add(60 * time.Second)
+				}
 				placeSide(sym, "BID", roundTo(la*1.005, m.PxDec), mid, math.Abs(pos), true, true)
 			}
 		} else if mid >= ae*(1.0+slBps/10000.0) {
 			if st.activeOrds["BID"] == nil && now.Sub(st.lastOrdTS["BID"]) >= 500*time.Millisecond && takeWriteSlot(true) {
 				st.lastOrdTS["BID"] = now
+				st.stopCoolUntil = now.Add(60 * time.Second)
 				placeSide(sym, "BID", roundTo(la*1.005, m.PxDec), mid, math.Abs(pos), true, true)
 			}
 		} else {
@@ -508,18 +514,22 @@ func manageCoin(sym string) {
 	}
 
 	if pos >= m.MinB && ae > 0 {
-		slBps := 25.0
+		slBps := 20.0
 		if st.trendMode {
 			slBps = 18.0
 		}
 		if posUSD < 10.10 {
 			if (mid >= ae*(1.0+stepBps/10000.0) || mid <= ae*(1.0-slBps/10000.0)) && st.activeOrds["ASK"] == nil && now.Sub(st.lastOrdTS["ASK"]) >= 5*time.Second && takeWriteSlot(true) {
 				st.lastOrdTS["ASK"] = now
+				if mid <= ae*(1.0-slBps/10000.0) {
+					st.stopCoolUntil = now.Add(60 * time.Second)
+				}
 				placeSide(sym, "ASK", roundTo(lb*0.995, m.PxDec), mid, math.Abs(pos), true, true)
 			}
 		} else if mid <= ae*(1.0-slBps/10000.0) {
 			if st.activeOrds["ASK"] == nil && now.Sub(st.lastOrdTS["ASK"]) >= 500*time.Millisecond && takeWriteSlot(true) {
 				st.lastOrdTS["ASK"] = now
+				st.stopCoolUntil = now.Add(60 * time.Second)
 				placeSide(sym, "ASK", roundTo(lb*0.995, m.PxDec), mid, math.Abs(pos), true, true)
 			}
 		} else {

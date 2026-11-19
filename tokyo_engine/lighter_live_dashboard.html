@@ -293,7 +293,11 @@
           else { pos[sym] = rem; cost[sym] = rem * px; }
         }
       }
-      return closed.reverse().slice(0, 8);
+      return closed.reverse();
+    }
+    function fmtIST(ms) {
+      if (!ms) return "--";
+      return new Date(ms).toLocaleTimeString("en-IN", { timeZone: "Asia/Kolkata", hour12: false });
     }
     function render() {
       if (!lastData) return;
@@ -343,7 +347,7 @@
 
       const tier = lastData.account_type === 0 ? "STANDARD • 0% FEE" : "PREMIUM";
       document.getElementById("tierBadge").textContent = tier;
-      document.getElementById("acctSub").textContent = `#${ACCT_INDEX} • ${new Date().toLocaleTimeString()}`;
+      document.getElementById("acctSub").textContent = `#${ACCT_INDEX} • ${fmtIST(Date.now())} IST`;
 
       if (eqHist.length >= 2) {
         const sc = document.getElementById("chartScroll");
@@ -403,7 +407,7 @@
         <td><span class="badge" style="font-size:0.62rem;padding:0.1rem 0.4rem;">CLOSED</span> <span class="${c.side === "LONG" ? "pos" : "neg"}" style="font-size:0.72rem;">${c.side}</span></td>
         <td class="mono">${c.sz.toFixed(4)}</td>
         <td class="mono">${c.entry === null ? "prev" : "$" + c.entry.toFixed(2)}→$${c.exit.toFixed(2)}</td>
-        <td class="mono" style="color:var(--muted);">${fmtAgo(nowTs - c.ts)} ago</td>
+        <td class="mono" style="color:var(--muted);">${fmtIST(c.ts)} IST · ${fmtAgo(nowTs - c.ts)}</td>
         <td class="mono ${c.pnl === null ? "" : colorCls(c.pnl)}">${c.pnl === null ? "—" : fmtSigned(c.pnl, 4)}</td>
       </tr>`);
       const rows = [...openRows, ...closedRows];
