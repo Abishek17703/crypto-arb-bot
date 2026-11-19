@@ -125,37 +125,28 @@
       </div>
     </div>
 
-    <!-- Tier 1: Hero Equity & Profit -->
+    <!-- Tier 1: Hero Equity & Run Rate -->
     <div class="hero">
       <div>
         <div class="hero-lbl">Total Equity (USDC)</div>
         <div class="hero-eq mono" id="eqVal">$--.--</div>
         <div class="hero-sub mono" id="realSub">
+          <span>Net: $0.0000</span>
           <span>Realized: $0.0000</span>
           <span>Losses: -$0.0000</span>
           <span>Open: $0.0000</span>
         </div>
       </div>
       <div class="hero-right">
-        <div class="hero-lbl">Net vs Seed</div>
-        <div class="hero-pnl mono" id="pnlVal">$0.0000</div>
-        <div class="hero-roi mono" id="pnlPct">0.00% ROI</div>
+        <div class="hero-lbl">Run Rate</div>
+        <div class="hero-pnl mono" id="hrRate">$0.0000/hr</div>
+        <div class="hero-roi mono" id="dayRate">$0.00/day</div>
       </div>
     </div>
 
-    <!-- Tier 2: Secondary Metrics -->
-    <div class="sec-grid">
+    <!-- Tier 2: Recent Windows -->
+    <div class="sec-grid" style="grid-template-columns:1fr;">
       <div class="sec-card">
-        <div class="lbl">Run Rate</div>
-        <div class="sec-val mono" id="hrRate">$0.0000/hr</div>
-        <div class="sec-sub mono" id="dayRate">$0.00/day</div>
-      </div>
-      <div class="sec-card">
-        <div class="lbl">Live Activity</div>
-        <div class="sec-val mono" id="ordVal">0 Orders</div>
-        <div class="sec-sub mono" id="ordSub">0 Open Positions</div>
-      </div>
-      <div class="sec-card span-2">
         <div class="lbl">Recent Windows</div>
         <div class="tf-row mono">
           <span>5m <b id="tf5m">$0.000</b></span>
@@ -246,17 +237,14 @@
       lossStats.lastCol = col;
       localStorage.setItem(LOSS_KEY, JSON.stringify(lossStats));
 
+      const pnl = eq - seedUsd;
+      const roi = seedUsd > 0 ? ((pnl / seedUsd) * 100).toFixed(2) : "0.00";
       document.getElementById("eqVal").textContent = `$${eq.toFixed(4)}`;
       document.getElementById("realSub").innerHTML =
+        `<span>Net <b class="${colorCls(pnl)}">${fmtSigned(pnl, 4)} (${roi}%)</b></span>` +
         `<span>Realized <b class="${colorCls(realPnl)}">${fmtSigned(realPnl, 4)}</b></span>` +
         `<span>Losses <b class="neg">-$${Math.abs(lossStats.lossSum).toFixed(4)} (${lossStats.lossCnt})</b></span>` +
         `<span>Open <b class="${colorCls(unrealPnl)}">${fmtSigned(unrealPnl, 4)}</b></span>`;
-
-      const pnl = eq - seedUsd;
-      const pnlEl = document.getElementById("pnlVal");
-      pnlEl.textContent = fmtSigned(pnl, 4);
-      pnlEl.className = "hero-pnl mono " + colorCls(pnl);
-      document.getElementById("pnlPct").textContent = `${seedUsd > 0 ? ((pnl / seedUsd) * 100).toFixed(2) : "0.00"}% ROI`;
 
       const d5m = windowDelta(5 * 60e3, nowTs, eq);
       const d15m = windowDelta(15 * 60e3, nowTs, eq);
@@ -267,7 +255,7 @@
       const hrRate = eqHist.length > 1 ? (elapsedHrs >= 1.0 ? d1h : (eq - eqHist[0].v) / elapsedHrs) : 0;
       const hrEl = document.getElementById("hrRate");
       hrEl.textContent = `${fmtSigned(hrRate, 4)}/hr`;
-      hrEl.className = "sec-val mono " + colorCls(hrRate);
+      hrEl.className = "hero-pnl mono " + colorCls(hrRate);
       document.getElementById("dayRate").textContent = `${fmtSigned(hrRate * 24, 2)}/day`;
 
       for (const [id, val] of [["tf5m", d5m], ["tf15m", d15m], ["tf1h", d1h], ["tf24h", d24h]]) {
@@ -277,10 +265,6 @@
       }
 
       const allMkts = (lastData.positions || []).filter(p => Math.abs(parseFloat(p.position || 0)) > 0 || (p.open_order_count || 0) > 0);
-      const positions = (lastData.positions || []).filter(p => Math.abs(parseFloat(p.position || 0)) > 0);
-      const openOrds = (lastData.positions || []).reduce((s, p) => s + (p.open_order_count || 0), 0);
-      document.getElementById("ordVal").textContent = `${openOrds} Orders`;
-      document.getElementById("ordSub").textContent = `${positions.length} Open Positions`;
 
       const tier = lastData.account_type === 0 ? "STANDARD • 0% FEE" : "PREMIUM";
       document.getElementById("tierBadge").textContent = tier;
