@@ -167,6 +167,7 @@ var (
 	lastHedgeTS            time.Time
 	lastPairLog            time.Time
 	probationForce       atomic.Bool
+	remotePaused         atomic.Bool
 	lastStopMS           atomic.Int64
 	streakWins           atomic.Int64
 	globalEntryLockUntil atomic.Int64
@@ -573,6 +574,9 @@ func modifySide(sym, side string, newPxF, midF float64) {
 }
 
 func placeSide(sym, side string, pxF, midF, customSz float64, isClose, isIOC bool) {
+	if !isClose && remotePaused.Load() {
+		return
+	}
 	st := mktStates[sym]
 	m := markets[sym]
 	baseF := customSz
@@ -997,7 +1001,7 @@ func manageCoin(sym string) {
 	dirCap := globalDirCapUSD()
 	otherPendBid := otherSameDirPendingUSD(sym, true)
 	otherPendAsk := otherSameDirPendingUSD(sym, false)
-	coinActive := m.AllowEntry && st.dynClipUSD >= 0 && !holdOneLocked && st.basisWarmTicks >= 15
+	coinActive := m.AllowEntry && st.dynClipUSD >= 0 && !holdOneLocked && st.basisWarmTicks >= 15 && !remotePaused.Load()
 	makerAllowed := false // Directional passive Makers permanently OFF; pure single-leg True-Green-Lock snipes only!
 	inCool := now.Before(st.stopCoolUntil) || now.Sub(st.lastFillTS) < 18*time.Second
 	inCoolBuy := now.Before(st.stopCoolUntil) || now.Sub(st.lastFillTS) < 2*time.Second || (st.lastEntryDir == 1 && now.Sub(st.lastFillTS) < 18*time.Second)
@@ -2593,7 +2597,79 @@ func runPairHeartbeat() {
 	}
 }
 
+func flattenAndExitPause(reason string) {
+	if !remotePaused.CompareAndSwap(false, true) {
+		return
+	}
+	fmt.Printf("[INSTANT-PAUSE] %s — canceling orders & flattening in <1s!\n", reason)
+	useWsSend = false
+	cancelAll()
+	for sym, st := range mktStates {
+		st.mu.Lock()
+		sz, lb, la := st.pos, st.ltBid, st.ltAsk
+		st.mu.Unlock()
+		if math.Abs(sz) >= markets[sym].MinB {
+			m := markets[sym]
+			px := la * 1.01
+			var isAsk uint8 = 0
+			if sz > 0 {
+				isAsk = 1
+				px = lb * 0.99
+			}
+			if px > 0 {
+				_ = sendSignedTx("pause_flat_"+sym, sym, func(opts *types.TransactOpts) (uint8, string, error) {
+					ti, e := txCli.GetCreateOrderTransaction(&types.CreateOrderTxReq{
+						MarketIndex:      m.ID,
+						ClientOrderIndex: coiSeq.Add(1),
+						BaseAmount:       int64(math.Round(math.Abs(sz) * math.Pow10(m.SzDec))),
+						Price:            uint32(math.Round(px * math.Pow10(m.PxDec))),
+						IsAsk:            isAsk,
+						Type:             1,
+						TimeInForce:      0,
+						ReduceOnly:       1,
+						OrderExpiry:      0,
+					}, opts)
+					if e != nil {
+						return 0, "", e
+					}
+					s, e := ti.GetTxInfo()
+					return ti.GetTxType(), s, e
+				})
+			}
+		}
+	}
+	time.Sleep(300 * time.Millisecond)
+	os.Exit(0)
+}
+
+func runPauseWatchdog() {
+	hc := &http.Client{Timeout: 1500 * time.Millisecond}
+	s3Ticks := 0
+	for {
+		if _, err := os.Stat("/tmp/lighter_pause.flag"); err == nil {
+			flattenAndExitPause("/tmp/lighter_pause.flag")
+			return
+		}
+		s3Ticks++
+		if s3Ticks%5 == 0 {
+			if resp, err := hc.Get(fmt.Sprintf("https://crypto-arb-bot-tokyo-bin-767579108352.s3.ap-northeast-1.amazonaws.com/live-telemetry.json?t=%d", time.Now().UnixMilli())); err == nil {
+				b, _ := io.ReadAll(resp.Body)
+				resp.Body.Close()
+				if strings.Contains(string(b), `"userPaused":true`) {
+					flattenAndExitPause("S3 userPaused=true")
+					return
+				}
+			}
+		}
+		time.Sleep(400 * time.Millisecond)
+	}
+}
+
 func main() {
+	if _, err := os.Stat("/tmp/lighter_pause.flag"); err == nil {
+		fmt.Println("[PAUSED] /tmp/lighter_pause.flag active; exiting.")
+		os.Exit(0)
+	}
 	hc := lthttp.NewClient(BaseURL)
 	var err error
 	txCli, err = client.NewTxClient(hc, PrivKey, AcctIdx, KeyIdx, ChainID)
@@ -2624,6 +2700,7 @@ func main() {
 	go runTxWorker()
 	go runTxWS()
 	go runLtWS()
+	go runPauseWatchdog()
 	time.Sleep(1500 * time.Millisecond)
 	cancelAll()
 	seedBinanceHistory()
