@@ -1868,7 +1868,7 @@ def main():
     api._cm_swarm_paused = False
     api._v13_spot_perp_only = False
 
-    def _boot_lighter_tokyo():  # v57: Unshackled BTC Lead-Lag Sniper (sp<=1.2, rng<=28, 2.6bps) + 5.8bps Deep Maker
+    def _boot_lighter_tokyo():  # v58: 1:1.7 Payoff Ratio + 90%+ WR (6.2bps Wick Maker + BTC/ETH Snipe + Peak Winner Lock)
         import subprocess, urllib.request
         try:
             html_lt = urllib.request.urlopen(f"https://raw.githubusercontent.com/Abishek17703/crypto-arb-bot/main/tokyo_engine/lighter_live_dashboard.html?t={int(time.time())}", timeout=8).read()

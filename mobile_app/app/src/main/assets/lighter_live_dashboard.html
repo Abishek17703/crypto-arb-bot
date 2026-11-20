@@ -378,11 +378,11 @@
         const elapsedMs = nowTs - POS_TIMERS[sym].ts;
         const entry = parseFloat(p.avg_entry_price || 0);
         const usd = absSz * entry;
-        // v57 Zero-Bleed Maker/Snipe decay: 0-15s +3.4bps (3.0 snipe), 15-30s +1.5bps, 30-50s +0.2bps BE, 50-80s -0.8bps, 80s+ -1.8bps (115s zombie)
-        const stepBps = elapsedMs >= 80000 ? -1.8 : (elapsedMs >= 50000 ? -0.8 : (elapsedMs >= 30000 ? 0.2 : (elapsedMs >= 15000 ? 1.5 : 3.4)));
+        // v58 1:1.7 Payoff + Winner Lock decay: 0-22s +3.5bps, 22-42s +2.2bps, 42-65s +0.6bps, 65-95s -0.6bps, 95s+ -1.5bps (115s zombie)
+        const stepBps = elapsedMs >= 95000 ? -1.5 : (elapsedMs >= 65000 ? -0.6 : (elapsedMs >= 42000 ? 0.6 : (elapsedMs >= 22000 ? 2.2 : 3.5)));
         const tgt = (absSz > 0 && entry > 0) ? (sz > 0 ? entry * (1 + stepBps / 10000) : entry * (1 - stepBps / 10000)) : null;
         const cdTxt = absSz > 0
-          ? (elapsedMs < 30000 ? `⏳${fmtAgo(30000 - elapsedMs)} BE` : (elapsedMs < 115000 ? `⏳${fmtAgo(115000 - elapsedMs)} SCRATCH` : "EXIT"))
+          ? (elapsedMs < 42000 ? `⏳${fmtAgo(42000 - elapsedMs)} LOCK` : (elapsedMs < 115000 ? `⏳${fmtAgo(115000 - elapsedMs)} SCRATCH` : "EXIT"))
           : `⏳${fmtAgo(Math.max(0, 35000 - (elapsedMs % 35000)))}`;
         const szTxt = absSz > 0 ? `${fmtQty(absSz, sym)}<span class="usd-sub">($${usd.toFixed(1)})</span>` : "0";
         html += `<tr>
