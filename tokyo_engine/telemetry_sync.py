@@ -1868,32 +1868,15 @@ def main():
     api._cm_swarm_paused = False
     api._v13_spot_perp_only = False
 
-    def _boot_lighter_tokyo():  # v73: Equalized $880 Crypto Sniper (BTC/SOL/XRP/HYPE, ETH OFF, 6s Early-Cut + Opp-Flip)
-        import subprocess, urllib.request
-        try:
-            html_lt = urllib.request.urlopen(f"https://raw.githubusercontent.com/Abishek17703/crypto-arb-bot/main/tokyo_engine/lighter_live_dashboard.html?t={int(time.time())}", timeout=8).read()
-            s3.put_object(Bucket=S3_BUCKET, Key="lighter-dashboard.html", Body=html_lt, ContentType="text/html", CacheControl="no-cache, no-store, must-revalidate")
-        except Exception:
-            pass
+    def _boot_lighter_tokyo():  # PAUSED_BY_USER: kill lighter_go_bot and stay halted
+        import subprocess
         logf = open("/tmp/lighter_tokyo.log", "w")
         try:
-            html_lt = urllib.request.urlopen(f"https://raw.githubusercontent.com/Abishek17703/crypto-arb-bot/main/tokyo_engine/lighter_live_dashboard.html?t={int(time.time())}", timeout=8).read()
-            s3.put_object(Bucket=S3_BUCKET, Key="lighter-dashboard.html", Body=html_lt, ContentType="text/html", CacheControl="no-cache, no-store, must-revalidate")
-        except Exception:
-            pass
-        logf = open("/tmp/lighter_tokyo.log", "w")
-        try:
-            subprocess.run(["pkill", "-f", "lighter_tokyo_bot.py"], stderr=subprocess.DEVNULL)
-            subprocess.run(["pkill", "-f", "lighter_go_bot"], stderr=subprocess.DEVNULL)
-            bin_p = "/opt/crypto-arb-bot/lighter_go_bot"
-            url_b = "https://github.com/Abishek17703/crypto-arb-bot/releases/download/lighter-go-latest/lighter_go_bot"
-            r_dl = subprocess.run(f"curl -fsSL {url_b} -o {bin_p}.tmp && mv {bin_p}.tmp {bin_p} && chmod +x {bin_p}", shell=True, stdout=logf, stderr=logf)
-            logf.write(f"\ndl_rc={r_dl.returncode}\n"); logf.flush()
-            if r_dl.returncode == 0:
-                lt_env = dict(os.environ, GOGC="400")
-                subprocess.Popen(["sh", "-c", f"sudo -n nice -n -15 {bin_p} || {bin_p}"], stdout=logf, stderr=subprocess.STDOUT, env=lt_env)
+            subprocess.run(["pkill", "-9", "-f", "lighter_tokyo_bot.py"], stderr=subprocess.DEVNULL)
+            subprocess.run(["pkill", "-9", "-f", "lighter_go_bot"], stderr=subprocess.DEVNULL)
+            logf.write("[PAUSED] lighter_go_bot halted by user.\n"); logf.flush()
         except Exception as e_lt:
-            logf.write(f"\nboot_err={e_lt}\n"); logf.flush()
+            logf.write(f"\npause_err={e_lt}\n"); logf.flush()
     threading.Thread(target=_boot_lighter_tokyo, daemon=True).start()
 
     fapi = BinanceFuturesSession()
