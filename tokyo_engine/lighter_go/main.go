@@ -871,7 +871,11 @@ func manageCoin(sym string) {
 		}
 		st.emaSpreadBps += (1.0 - math.Exp(-bdt/45.0)) * (spBps - st.emaSpreadBps)
 	}
-	fairLt := micro * (1.0 + st.basisBps/10000.0)
+	refFair := micro
+	if sym == "NVDA" || sym == "HYPE" {
+		refFair = mid
+	}
+	fairLt := refFair * (1.0 + st.basisBps/10000.0)
 	fairEq := fairLt
 	if eeq > 0 {
 		fairEq = eeq * (1.0 + st.basisBps/10000.0)
@@ -921,6 +925,7 @@ func manageCoin(sym string) {
 	snipeThresh := 2.9
 	minEdgeGuarantee := 1.9
 	momLo, momHi := -6.0, 9.0
+	macLo, macHi := -42.0, 85.0
 	trLo, trHi := -2.0, 5.5
 	impMax := 3.6
 	velLo, velHi := 0.15, 4.8
@@ -928,31 +933,36 @@ func manageCoin(sym string) {
 	if sym == "BTC" && st.range60sBps > 18.0 {
 		snipeThresh = 3.4
 	} else if sym == "NVDA" {
-		volSafeSnipe = st.range60sBps >= 3.5 && st.range60sBps <= 32.0
+		volSafeSnipe = st.range60sBps >= 3.0 && st.range60sBps <= 35.0
 		snipeMaxSp = 1.60
 		snipeThresh = 4.2
 		minEdgeGuarantee = 2.2
 		momLo, momHi = -10.0, 12.0
-		trLo, trHi = -4.5, 8.0
-		impMax = 6.5
+		macLo, macHi = -110.0, 110.0
+		trLo, trHi = -12.0, 15.0
+		impMax = 12.0
 		velLo, velHi = 0.25, 6.0
-		obiMin = 0.18
+		obiMin = -1.0
 	} else if sym == "HYPE" {
-		volSafeSnipe = st.range60sBps >= 7.5 && st.range60sBps <= 38.0
+		volSafeSnipe = st.range60sBps >= 6.0 && st.range60sBps <= 42.0
 		snipeMaxSp = 1.55
 		snipeThresh = 5.0
 		minEdgeGuarantee = 2.6
 		momLo, momHi = -12.0, 14.0
-		trLo, trHi = -5.5, 9.5
-		impMax = 7.5
+		macLo, macHi = -110.0, 110.0
+		trLo, trHi = -14.0, 18.0
+		impMax = 14.0
 		velLo, velHi = 0.35, 7.5
-		obiMin = 0.20
+		obiMin = -1.0
 	}
 	minHr := now.Minute()
-	clockPause := minHr == 59 || minHr == 0 || minHr == 30
-	if minHr >= 58 || minHr <= 2 || (minHr >= 29 && minHr <= 32) {
-		edge += 1.4
-		snipeThresh += 0.8
+	clockPause := minHr == 0
+	if sym == "BTC" {
+		clockPause = minHr == 59 || minHr == 0 || minHr == 30
+		if minHr >= 58 || minHr <= 2 || (minHr >= 29 && minHr <= 32) {
+			edge += 1.4
+			snipeThresh += 0.8
+		}
 	}
 
 	holdOneLocked := anyOtherOpenPos(sym) || now.UnixMilli() < globalEntryLockUntil.Load()
@@ -974,8 +984,8 @@ func manageCoin(sym string) {
 	keepAsk := makerAllowed && volSafe && !clockPause && !inCool && now.After(st.pumpCoolUntil) && macroTrendBps <= 55.0 && macroTrendBps >= -105.0 && mom5mBps <= 14.5 && mom5mBps >= -25.0 && vel3sBps < 4.2 && obi <= 0.55
 
 	snipeSym := sym == "BTC" || sym == "NVDA" || sym == "HYPE"
-	staleSnipeBuy := snipeSym && coinActive && volSafeSnipe && !clockPause && !inCool && spBps <= snipeMaxSp && (la*st.ltAskSz) >= 16.0 && now.After(st.dropCoolUntil) && math.Abs(posUSD) < 1.0 && (dirCap-otherPendBid) >= 12.0 && (fairLt-la)/la*10000.0 >= snipeThresh && macroTrendBps >= -42.0 && macroTrendBps <= 85.0 && mom5mBps >= momLo && mom5mBps <= momHi && trendBps >= trLo && trendBps <= trHi && impBps <= impMax && vel3sBps >= velLo && vel3sBps <= velHi && fObi >= obiMin
-	staleSnipeSell := snipeSym && coinActive && volSafeSnipe && !clockPause && !inCool && spBps <= snipeMaxSp && (lb*st.ltBidSz) >= 16.0 && now.After(st.pumpCoolUntil) && math.Abs(posUSD) < 1.0 && (dirCap-otherPendAsk) >= 12.0 && (lb-fairLt)/lb*10000.0 >= snipeThresh && macroTrendBps <= 42.0 && macroTrendBps >= -85.0 && mom5mBps <= -momLo && mom5mBps >= -momHi && trendBps <= -trLo && trendBps >= -trHi && impBps >= -impMax && vel3sBps <= -velLo && vel3sBps >= -velHi && fObi <= -obiMin
+	staleSnipeBuy := snipeSym && coinActive && volSafeSnipe && !clockPause && !inCool && spBps <= snipeMaxSp && (la*st.ltAskSz) >= 16.0 && now.After(st.dropCoolUntil) && math.Abs(posUSD) < 1.0 && (dirCap-otherPendBid) >= 12.0 && (fairLt-la)/la*10000.0 >= snipeThresh && macroTrendBps >= macLo && macroTrendBps <= macHi && mom5mBps >= momLo && mom5mBps <= momHi && trendBps >= trLo && trendBps <= trHi && impBps <= impMax && vel3sBps >= velLo && vel3sBps <= velHi && fObi >= obiMin
+	staleSnipeSell := snipeSym && coinActive && volSafeSnipe && !clockPause && !inCool && spBps <= snipeMaxSp && (lb*st.ltBidSz) >= 16.0 && now.After(st.pumpCoolUntil) && math.Abs(posUSD) < 1.0 && (dirCap-otherPendAsk) >= 12.0 && (lb-fairLt)/lb*10000.0 >= snipeThresh && macroTrendBps <= -macLo && macroTrendBps >= -macHi && mom5mBps <= -momLo && mom5mBps >= -momHi && trendBps <= -trLo && trendBps >= -trHi && impBps >= -impMax && vel3sBps <= -velLo && vel3sBps >= -velHi && fObi <= -obiMin
 	btcTrendBuy := staleSnipeBuy
 	btcTrendSell := staleSnipeSell
 
@@ -1099,7 +1109,7 @@ func manageCoin(sym string) {
 	} else if math.Abs(posUSD) < 1.0 && (bidSafe || btcTrendBuy) && now.Sub(st.lastCancelTS["BID"]) >= 2500*time.Millisecond {
 		st.trendMode = false
 		if btcTrendBuy {
-			snipeBidPx := roundTo(math.Min(la+tick*3, fairLt*(1.0-minEdgeGuarantee/10000.0)), m.PxDec)
+			snipeBidPx := roundTo(math.Min(math.Max(la+tick*3, la*(1.0+0.65/10000.0)), fairLt*(1.0-minEdgeGuarantee/10000.0)), m.PxDec)
 			if snipeBidPx >= la && cancelDistantForSnipe(sym, "BID") {
 				if st.activeOrds["ASK"] != nil && !cancelDistantForSnipe(sym, "ASK") {
 					cancelSide(sym, "ASK")
@@ -1187,7 +1197,7 @@ func manageCoin(sym string) {
 	} else if math.Abs(posUSD) < 1.0 && (askSafe || btcTrendSell) && now.Sub(st.lastCancelTS["ASK"]) >= 2500*time.Millisecond {
 		st.trendMode = false
 		if btcTrendSell {
-			snipeAskPx := roundTo(math.Max(lb-tick*3, fairLt*(1.0+minEdgeGuarantee/10000.0)), m.PxDec)
+			snipeAskPx := roundTo(math.Max(math.Min(lb-tick*3, lb*(1.0-0.65/10000.0)), fairLt*(1.0+minEdgeGuarantee/10000.0)), m.PxDec)
 			if snipeAskPx <= lb && cancelDistantForSnipe(sym, "ASK") {
 				if st.activeOrds["BID"] != nil && !cancelDistantForSnipe(sym, "BID") {
 					cancelSide(sym, "BID")
@@ -1220,7 +1230,7 @@ func manageCoin(sym string) {
 	}
 	logMu.Unlock()
 	if shouldLog {
-		fmt.Printf("[%s] GO-TOKYO v68 Eq=$%.4f | %s Pos=%.5f | Net=$%.2f | Rng60s=%.1fbps | Sp=%.2fbps | Strk=%d | Prob=%v | OBI=%.2f\n",
+		fmt.Printf("[%s] GO-TOKYO v69 Eq=$%.4f | %s Pos=%.5f | Net=$%.2f | Rng60s=%.1fbps | Sp=%.2fbps | Strk=%d | Prob=%v | OBI=%.2f\n",
 			now.Format("15:04:05"), float64(eqNow.Load())/1e6, sym, pos, netUSD, st.range60sBps, spBps, streakWins.Load(), probationForce.Load(), obi)
 	}
 }
@@ -2589,7 +2599,7 @@ func main() {
 	time.Sleep(1500 * time.Millisecond)
 	cancelAll()
 	seedBinanceHistory()
-	fmt.Printf("GO-TOKYO v68 LIVE | Minimal-Budget ($12-$15) Trio True-Green-Lock Sniper: BTC + NVDA + HYPE (39/min cap) | Stop=$%.2f\n", StopEqUSD)
+	fmt.Printf("GO-TOKYO v69 LIVE | Minimal-Budget ($12-$15) Aligned Trio True-Green-Lock Sniper: BTC + NVDA + HYPE (39/min cap) | Stop=$%.2f\n", StopEqUSD)
 	go syncAccountLoop()
 	runBnWS()
 }
