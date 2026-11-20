@@ -1857,11 +1857,19 @@ def main():
             os.remove("/tmp/pause_495_latch.json")
     except Exception:
         pass
+    api._user_paused = True
     try:
-        s3.put_object(Bucket=S3_BUCKET, Key="pause-control.json", Body=json.dumps({"paused": False, "ts": int(time.time() * 1000)}).encode("utf-8"), ContentType="application/json")
+        _init_p = json.loads(s3.get_object(Bucket=S3_BUCKET, Key="pause-control.json")["Body"].read().decode())
+        api._user_paused = bool(_init_p.get("paused", True))
+    except Exception:
+        api._user_paused = True
+    try:
+        if api._user_paused:
+            open("/tmp/lighter_pause.flag", "w").write("1")
+        elif os.path.exists("/tmp/lighter_pause.flag"):
+            os.remove("/tmp/lighter_pause.flag")
     except Exception:
         pass
-    api._user_paused = False
     api._stop_new_buys = True
     api._test_stop_ts = 0.0
     api._stablecoin_only_5m = True
@@ -1872,6 +1880,7 @@ def main():
         import subprocess
         logf = open("/tmp/lighter_tokyo.log", "w")
         try:
+            open("/tmp/lighter_pause.flag", "w").write("1")
             subprocess.run(["pkill", "-9", "-f", "lighter_tokyo_bot.py"], stderr=subprocess.DEVNULL)
             subprocess.run(["pkill", "-9", "-f", "lighter_go_bot"], stderr=subprocess.DEVNULL)
             logf.write("[PAUSED] lighter_go_bot halted by user.\n"); logf.flush()
@@ -2484,18 +2493,30 @@ def main():
                 active_tranches = []
                 cached_open_orders = []
 
-            # Check remote S3 dashboard pause control (pause-control.json) every 2.0s so dashboard red PAUSE button stops trading immediately!
-            if loop_ts - getattr(api, "_last_s3_pause_chk", 0.0) >= 2.0:
+            # Check remote S3 dashboard pause control (pause-control.json) every 1.0s so dashboard PAUSE & instant_pause.py halt trading in <3s!
+            if loop_ts - getattr(api, "_last_s3_pause_chk", 0.0) >= 1.0:
                 api._last_s3_pause_chk = loop_ts
                 try:
                     _p_obj = json.loads(s3.get_object(Bucket=S3_BUCKET, Key="pause-control.json")["Body"].read().decode())
                     _want_p = bool(_p_obj.get("paused", False))
+                    if _want_p and not os.path.exists("/tmp/lighter_pause.flag"):
+                        open("/tmp/lighter_pause.flag", "w").write("1")
                     if _want_p != bool(getattr(api, "_user_paused", False)):
                         api._user_paused = _want_p
                         if _want_p:
+                            open("/tmp/lighter_pause.flag", "w").write("1")
+                            def _kill_lt_fast():
+                                import subprocess
+                                time.sleep(1.2)
+                                subprocess.run(["pkill", "-9", "-f", "lighter_go_bot"], stderr=subprocess.DEVNULL)
+                                with open("/tmp/lighter_tokyo.log", "a") as _lf:
+                                    _lf.write("\n[INSTANT-PAUSE] lighter_go_bot halted in <2.5s!\n")
+                            threading.Thread(target=_kill_lt_fast, daemon=True).start()
                             halt_all_orders_and_repay(api)
                             active_tranches = []
                             cached_open_orders = []
+                        elif os.path.exists("/tmp/lighter_pause.flag"):
+                            os.remove("/tmp/lighter_pause.flag")
                 except Exception:
                     pass
 
