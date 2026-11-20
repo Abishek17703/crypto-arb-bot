@@ -55,8 +55,8 @@ var markets = map[string]Market{
 	"SOL":   {Sym: "SOL", ID: 2, SzDec: 3, PxDec: 3, MinB: 0.055, AllowEntry: false, ClipUSD: 88.0, EdgeBps: 5.4},
 	"HYPE":  {Sym: "HYPE", ID: 24, SzDec: 2, PxDec: 4, MinB: 0.07, AllowEntry: false, ClipUSD: 88.0, EdgeBps: 5.8},
 	"ZEC":   {Sym: "ZEC", ID: 90, SzDec: 3, PxDec: 3, MinB: 0.004, AllowEntry: false, ClipUSD: 12.0, EdgeBps: 10.0},
-	"QQQ":   {Sym: "QQQ", ID: 129, SzDec: 4, PxDec: 2, MinB: 0.0170, AllowEntry: true, ClipUSD: 255.0, EdgeBps: 1.75},
-	"US100": {Sym: "US100", ID: 181, SzDec: 6, PxDec: 0, MinB: 0.00042, AllowEntry: true, ClipUSD: 255.0, EdgeBps: 0.0},
+	"QQQ":   {Sym: "QQQ", ID: 129, SzDec: 4, PxDec: 2, MinB: 0.0170, AllowEntry: false, ClipUSD: 255.0, EdgeBps: 1.75},
+	"US100": {Sym: "US100", ID: 181, SzDec: 6, PxDec: 0, MinB: 0.00042, AllowEntry: false, ClipUSD: 255.0, EdgeBps: 0.0},
 }
 var evergreenSyms = []string{"BTC", "ETH"}
 var bootTS = time.Now()
@@ -1157,8 +1157,8 @@ func manageCoin(sym string) {
 		lastLog = now
 	}
 	logMu.Unlock()
-	if shouldLog && !pairMarketActive.Load() {
-		fmt.Printf("[%s] GO-TOKYO v66 Eq=$%.4f | %s Pos=%.5f | Net=$%.2f | Rng60s=%.1fbps | Mac=%.1fbps | Strk=%d | Prob=%v | OBI=%.2f\n",
+	if shouldLog {
+		fmt.Printf("[%s] GO-TOKYO v67 Eq=$%.4f | %s Pos=%.5f | Net=$%.2f | Rng60s=%.1fbps | Mac=%.1fbps | Strk=%d | Prob=%v | OBI=%.2f\n",
 			now.Format("15:04:05"), float64(eqNow.Load())/1e6, sym, pos, netUSD, st.range60sBps, macroTrendBps, streakWins.Load(), probationForce.Load(), obi)
 	}
 }
@@ -2458,7 +2458,11 @@ func managePairArb() {
 		return
 	}
 
-	// STEP C: Simultaneous 0.7ms 75%-Depth-Capped Dual-IOC Entry (95.6% WR / +$0.78/hr active winner!)
+	// STEP C disabled: Dual-leg IOC gets 1-legged when stale leg cancels in 50ms flight; single-leg BTC Sniper expires for $0.00 cost if pulled!
+	if !markets["QQQ"].AllowEntry {
+		pairMarketActive.Store(false)
+		return
+	}
 	if math.Abs(qPos) >= 0.0075 || math.Abs(uPos) >= 0.00020 {
 		return
 	}
@@ -2529,9 +2533,7 @@ func main() {
 	time.Sleep(1500 * time.Millisecond)
 	cancelAll()
 	seedBinanceHistory()
-	seedPairHistory()
-	fmt.Printf("GO-TOKYO v66 LIVE | Dual-Engine: 75%% Depth-Capped QQQ/US100 Arb + 24/7 BTC True-Green-Lock Sniper (86.1%% WR) | Stop=$%.2f\n", StopEqUSD)
+	fmt.Printf("GO-TOKYO v67 LIVE | Pure BTC True-Green-Lock Lead-Lag Sniper (86.1%% WR, $0 miss cost, 39/min cap) | Stop=$%.2f\n", StopEqUSD)
 	go syncAccountLoop()
-	go runPairHeartbeat()
 	runBnWS()
 }
