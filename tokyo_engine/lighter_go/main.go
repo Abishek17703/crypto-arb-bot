@@ -50,14 +50,14 @@ type Market struct {
 }
 
 var markets = map[string]Market{
-	"ETH":   {Sym: "ETH", ID: 0, SzDec: 4, PxDec: 2, MinB: 0.0020, AllowEntry: false, ClipUSD: 480.0, EdgeBps: 5.4},
-	"BTC":   {Sym: "BTC", ID: 1, SzDec: 5, PxDec: 1, MinB: 0.00007, AllowEntry: true, ClipUSD: 950.0, EdgeBps: 5.0},
+	"ETH":   {Sym: "ETH", ID: 0, SzDec: 4, PxDec: 2, MinB: 0.0020, AllowEntry: true, ClipUSD: 680.0, EdgeBps: 5.0},
+	"BTC":   {Sym: "BTC", ID: 1, SzDec: 5, PxDec: 1, MinB: 0.00007, AllowEntry: true, ClipUSD: 680.0, EdgeBps: 5.0},
 	"SOL":   {Sym: "SOL", ID: 2, SzDec: 3, PxDec: 3, MinB: 0.055, AllowEntry: false, ClipUSD: 480.0, EdgeBps: 5.4},
 	"XRP":   {Sym: "XRP", ID: 7, SzDec: 0, PxDec: 6, MinB: 4.0, AllowEntry: false, ClipUSD: 480.0, EdgeBps: 5.4},
 	"HYPE":  {Sym: "HYPE", ID: 24, SzDec: 2, PxDec: 4, MinB: 0.07, AllowEntry: false, ClipUSD: 480.0, EdgeBps: 5.8},
 	"BNB":   {Sym: "BNB", ID: 25, SzDec: 2, PxDec: 4, MinB: 0.01, AllowEntry: false, ClipUSD: 480.0, EdgeBps: 5.4},
 	"ZEC":   {Sym: "ZEC", ID: 90, SzDec: 3, PxDec: 3, MinB: 0.004, AllowEntry: false, ClipUSD: 480.0, EdgeBps: 5.4},
-	"XAU":   {Sym: "XAU", ID: 92, SzDec: 4, PxDec: 2, MinB: 0.0015, AllowEntry: true, ClipUSD: 900.0, EdgeBps: 5.0},
+	"XAU":   {Sym: "XAU", ID: 92, SzDec: 4, PxDec: 2, MinB: 0.0015, AllowEntry: false, ClipUSD: -1.0, EdgeBps: 5.0},
 	"NVDA":  {Sym: "NVDA", ID: 110, SzDec: 3, PxDec: 3, MinB: 0.025, AllowEntry: false, ClipUSD: 12.0, EdgeBps: 5.0},
 	"QQQ":   {Sym: "QQQ", ID: 129, SzDec: 4, PxDec: 2, MinB: 0.0170, AllowEntry: false, ClipUSD: 255.0, EdgeBps: 1.75},
 	"US100": {Sym: "US100", ID: 181, SzDec: 6, PxDec: 0, MinB: 0.00042, AllowEntry: false, ClipUSD: 255.0, EdgeBps: 0.0},
@@ -102,10 +102,14 @@ type MarketState struct {
 	emaSpreadBps   float64
 	rangeBuckets  [6]RangeBucket
 	range60sBps   float64
-	minSlot       [64]int64
-	minPx         [64]float64
-	minHi         [64]float64
-	minLo         [64]float64
+	minSlot       [128]int64
+	minPx         [128]float64
+	minHi         [128]float64
+	minLo         [128]float64
+	minCl         [128]float64
+	minVol        [128]float64
+	lastClosedMin int64
+	lastSigMin    int64
 	ltBidDepthUSD float64
 	ltAskDepthUSD float64
 	shDir         int
@@ -159,9 +163,9 @@ func newMarketState(initClip float64) *MarketState {
 
 var (
 	mktStates = map[string]*MarketState{
-		"BTC": newMarketState(950.0), "ETH": newMarketState(-1.0),
+		"BTC": newMarketState(320.0), "ETH": newMarketState(320.0),
 		"SOL": newMarketState(-1.0), "XRP": newMarketState(-1.0), "HYPE": newMarketState(-1.0),
-		"BNB": newMarketState(-1.0), "ZEC": newMarketState(-1.0), "XAU": newMarketState(900.0), "NVDA": newMarketState(-1.0), "QQQ": newMarketState(255.0), "US100": newMarketState(255.0),
+		"BNB": newMarketState(-1.0), "ZEC": newMarketState(-1.0), "XAU": newMarketState(-1.0), "NVDA": newMarketState(-1.0), "QQQ": newMarketState(255.0), "US100": newMarketState(255.0),
 	}
 	pairMu                 sync.Mutex
 	pairMarketActive       atomic.Bool
@@ -237,6 +241,20 @@ func globalDirCapUSD() float64 {
 		eq = 100.0
 	}
 	return math.Min(1500.0, eq*12.2)
+}
+
+func houseMoneyClipUSD() float64 {
+	eq := float64(eqNow.Load()) / 1e6
+	if eq < 50.0 {
+		return 320.0 // Safe conservative clip before first account sync
+	}
+	if eq >= 97.00 {
+		return 900.0
+	}
+	if eq >= 95.50 {
+		return 680.0
+	}
+	return 320.0 // Protects StopEqUSD = $94.00 (1 stop = ~-$0.39)
 }
 
 func takeWriteSlotTier(tier int) bool {
@@ -597,7 +615,9 @@ func placeSide(sym, side string, pxF, midF, customSz float64, isClose, isIOC boo
 		if eq < 50.0 {
 			eq = 100.0
 		}
-		_ = eq
+		if !isClose && (sym == "BTC" || sym == "ETH") {
+			clip = houseMoneyClipUSD()
+		}
 		if !isClose && isIOC {
 			twoSidedUSD := math.Min(st.ltBidDepthUSD, st.ltAskDepthUSD)
 			if 0.35*twoSidedUSD < 100.0 {
@@ -756,79 +776,127 @@ func closeStepBps(sym string, st *MarketState) float64 {
 }
 
 func stepRatchetFloor(peakFavBps, lockFloor float64) float64 {
-	if peakFavBps >= 16.0 {
-		return peakFavBps * 0.80
+	if peakFavBps >= 22.0 {
+		return math.Max(8.0, peakFavBps-8.0)
 	}
-	if peakFavBps >= 11.0 {
-		return 8.20
-	}
-	if peakFavBps >= 7.5 {
-		return 5.00
-	}
-	if peakFavBps >= 4.5 {
-		return 2.40
-	}
-	if peakFavBps >= 2.2 {
-		return 0.80
+	if peakFavBps >= 14.0 {
+		return 8.0
 	}
 	return lockFloor
 }
 
 func retMinBps(st *MarketState, curMin, minsAgo int64, mid, fallbackBps float64) float64 {
 	target := curMin - minsAgo
-	idx := int(((target % 64) + 64) % 64)
-	if st.minSlot[idx] == target && st.minPx[idx] > 0 {
-		return (mid - st.minPx[idx]) / st.minPx[idx] * 10000.0
+	idx := int(((target % 128) + 128) % 128)
+	if st.minSlot[idx] == target {
+		ref := st.minCl[idx]
+		if ref <= 0 {
+			ref = st.minPx[idx]
+		}
+		if ref > 0 {
+			return (mid - ref) / ref * 10000.0
+		}
 	}
 	return fallbackBps
 }
 
-func wavePullbackSignal(st *MarketState, curMin int64, mid, eu, ef, vel3sBps, fallbackMacro float64) (bool, bool) {
-	if mid <= 0 {
-		return false, false
+func closedTrend60mBps(sym string) (float64, bool) {
+	st := mktStates[sym]
+	if st == nil {
+		return 0.0, false
 	}
-	r1 := retMinBps(st, curMin, 1, mid, 0.0)
-	curIdx := int(((curMin % 64) + 64) % 64)
-	if st.minSlot[curIdx] == curMin && st.minPx[curIdx] > 0 {
-		curBarBps := (mid - st.minPx[curIdx]) / st.minPx[curIdx] * 10000.0
-		if math.Abs(curBarBps) > math.Abs(r1) {
-			r1 = curBarBps
+	st.mu.Lock()
+	cm := st.lastClosedMin
+	var clNow, cl60 float64
+	ok := false
+	if cm > 60 {
+		idxNow := int(((cm % 128) + 128) % 128)
+		idx60 := int((((cm - 60) % 128) + 128) % 128)
+		if st.minSlot[idxNow] == cm && st.minSlot[idx60] == cm-60 && st.minCl[idxNow] > 0 && st.minCl[idx60] > 0 {
+			clNow = st.minCl[idxNow]
+			cl60 = st.minCl[idx60]
+			ok = true
 		}
 	}
-	r15 := retMinBps(st, curMin, 15, mid, fallbackMacro)
-	r45 := retMinBps(st, curMin, 45, mid, fallbackMacro)
-	hi4, lo4 := mid, mid
-	for m := curMin - 4; m <= curMin; m++ {
-		idx := int(((m % 64) + 64) % 64)
+	st.mu.Unlock()
+	if !ok {
+		return 0.0, false
+	}
+	return (clNow - cl60) / cl60 * 10000.0, true
+}
+
+func v79BreakoutSignal(st *MarketState, now time.Time, mid, selfTr60, otherTr60 float64, trOk bool) (bool, bool, int64) {
+	if !trOk || mid <= 0 || st.lastClosedMin <= 0 || st.lastSigMin >= st.lastClosedMin {
+		return false, false, 0
+	}
+	cm := st.lastClosedMin
+	secSinceClose := now.Unix() - (cm+1)*60
+	if secSinceClose < -2 || secSinceClose > 12 {
+		return false, false, 0
+	}
+	mi := int(((cm % 128) + 128) % 128)
+	if st.minSlot[mi] != cm {
+		return false, false, 0
+	}
+	o0, c, v := st.minPx[mi], st.minCl[mi], st.minVol[mi]
+	if o0 <= 0 || c <= 0 {
+		return false, false, 0
+	}
+	hi18, lo18 := 0.0, 0.0
+	cnt18 := 0
+	for m := cm - 18; m <= cm-1; m++ {
+		idx := int(((m % 128) + 128) % 128)
 		if st.minSlot[idx] == m && st.minHi[idx] > 0 && st.minLo[idx] > 0 {
-			if st.minHi[idx] > hi4 {
-				hi4 = st.minHi[idx]
+			if cnt18 == 0 || st.minHi[idx] > hi18 {
+				hi18 = st.minHi[idx]
 			}
-			if st.minLo[idx] < lo4 {
-				lo4 = st.minLo[idx]
+			if cnt18 == 0 || st.minLo[idx] < lo18 {
+				lo18 = st.minLo[idx]
 			}
+			cnt18++
 		}
 	}
-	hi10, lo10 := 0.0, 0.0
-	cnt10 := 0
-	for m := curMin - 10; m <= curMin-3; m++ {
-		idx := int(((m % 64) + 64) % 64)
+	if cnt18 < 15 {
+		return false, false, 0
+	}
+	hi60, lo60 := 0.0, 0.0
+	cnt60 := 0
+	for m := cm - 60; m <= cm; m++ {
+		idx := int(((m % 128) + 128) % 128)
 		if st.minSlot[idx] == m && st.minHi[idx] > 0 && st.minLo[idx] > 0 {
-			if cnt10 == 0 || st.minHi[idx] > hi10 {
-				hi10 = st.minHi[idx]
+			if cnt60 == 0 || st.minHi[idx] > hi60 {
+				hi60 = st.minHi[idx]
 			}
-			if cnt10 == 0 || st.minLo[idx] < lo10 {
-				lo10 = st.minLo[idx]
+			if cnt60 == 0 || st.minLo[idx] < lo60 {
+				lo60 = st.minLo[idx]
 			}
-			cnt10++
+			cnt60++
 		}
 	}
-	if cnt10 < 3 {
-		return false, false
+	if cnt60 < 45 || (hi60-lo60)/c*10000.0 < 40.0 {
+		return false, false, 0
 	}
-	waveSell := r15 >= -110.0 && r15 <= -10.0 && r45 <= -12.0 && (hi4-lo10)/mid*10000.0 >= 3.5 && (hi4-lo10)/mid*10000.0 <= 28.0 && (hi4-mid)/mid*10000.0 >= 1.5 && r1 <= -1.0 && vel3sBps <= 0.0 && (eu == 0 || ef == 0 || eu <= ef)
-	waveBuy := r15 >= 10.0 && r15 <= 110.0 && r45 >= 12.0 && (hi10-lo4)/mid*10000.0 >= 3.5 && (hi10-lo4)/mid*10000.0 <= 28.0 && (mid-lo4)/mid*10000.0 >= 1.5 && r1 >= 1.0 && vel3sBps >= 0.0 && (eu == 0 || ef == 0 || eu >= ef)
-	return waveBuy, waveSell
+	sumV := 0.0
+	cntV := 0
+	for m := cm - 20; m <= cm-1; m++ {
+		idx := int(((m % 128) + 128) % 128)
+		if st.minSlot[idx] == m && st.minVol[idx] > 0 {
+			sumV += st.minVol[idx]
+			cntV++
+		}
+	}
+	if cntV < 15 {
+		return false, false, 0
+	}
+	avgV := sumV / float64(cntV)
+	if avgV <= 0 || v < avgV*1.80 {
+		return false, false, 0
+	}
+	body := (c - o0) / o0 * 10000.0
+	drift := (mid - c) / c * 10000.0
+	buy := c > hi18 && selfTr60 >= 18.0 && otherTr60 >= 5.0 && body >= 2.0 && drift >= -3.0 && drift <= 10.0
+	sell := c < lo18 && selfTr60 <= -18.0 && otherTr60 <= -5.0 && body <= -2.0 && drift <= 3.0 && drift >= -10.0
+	return buy, sell, cm
 }
 
 func updateShadowPaper(st *MarketState, now time.Time, lb, la, fairLt, effEdge float64, bidOk, askOk bool) {
@@ -882,6 +950,8 @@ func updateShadowPaper(st *MarketState, now time.Time, lb, la, fairLt, effEdge f
 }
 
 func manageCoin(sym string) {
+	btcTr60, btcTrOk := closedTrend60mBps("BTC")
+	ethTr60, ethTrOk := closedTrend60mBps("ETH")
 	st := mktStates[sym]
 	st.mu.Lock()
 	defer st.mu.Unlock()
@@ -1091,7 +1161,7 @@ func manageCoin(sym string) {
 	otherPendAsk := otherSameDirPendingUSD(sym, false)
 	coinActive := m.AllowEntry && st.dynClipUSD >= 0 && !holdOneLocked && st.basisWarmTicks >= 15 && !remotePaused.Load()
 	makerAllowed := false // Directional passive Makers permanently OFF; pure single-leg True-Green-Lock snipes only!
-	inCool := now.Before(st.stopCoolUntil) || now.Sub(st.lastFillTS) < 65*time.Second
+	inCool := now.Before(st.stopCoolUntil) || now.Sub(st.lastFillTS) < 110*time.Second
 	inCoolBuy := now.Before(st.stopCoolUntil) || now.Sub(st.lastFillTS) < 2*time.Second || (st.lastEntryDir == 1 && now.Sub(st.lastFillTS) < 18*time.Second)
 	inCoolSell := now.Before(st.stopCoolUntil) || now.Sub(st.lastFillTS) < 2*time.Second || (st.lastEntryDir == -1 && now.Sub(st.lastFillTS) < 18*time.Second)
 
@@ -1126,11 +1196,17 @@ func manageCoin(sym string) {
 	_ = ret3mBps
 	_ = ret5mBps
 	_ = ret15mBps
-	waveSym := sym == "BTC" || sym == "XAU"
-	waveBuy, waveSell := wavePullbackSignal(st, curMin, mid, eu, ef, vel3sBps, macroTrendBps)
-	twoSidedOk := math.Min(st.ltBidDepthUSD, st.ltAskDepthUSD) >= 1200.0
-	btcTrendBuy := waveSym && coinActive && !inCool && spBps <= 1.15 && twoSidedOk && math.Abs(posUSD) < 1.0 && (dirCap-otherPendBid) >= 100.0 && waveBuy
-	btcTrendSell := waveSym && coinActive && !inCool && spBps <= 1.15 && twoSidedOk && math.Abs(posUSD) < 1.0 && (dirCap-otherPendAsk) >= 100.0 && waveSell
+	waveSym := sym == "BTC" || sym == "ETH"
+	selfTr60, otherTr60, trOk := btcTr60, ethTr60, waveSym && btcTrOk && ethTrOk
+	if sym == "ETH" {
+		selfTr60, otherTr60 = ethTr60, btcTr60
+	}
+	waveBuy, waveSell, sigMin := v79BreakoutSignal(st, now, mid, selfTr60, otherTr60, trOk)
+	twoSidedOk := math.Min(st.ltBidDepthUSD, st.ltAskDepthUSD) >= 2500.0
+	buyFairOk := fairLt <= 0 || (la-fairLt)/fairLt*10000.0 <= 2.0
+	sellFairOk := fairLt <= 0 || (fairLt-lb)/fairLt*10000.0 <= 2.0
+	btcTrendBuy := waveSym && coinActive && !inCool && spBps <= 1.65 && twoSidedOk && buyFairOk && math.Abs(posUSD) < 1.0 && (dirCap-otherPendBid) >= 100.0 && waveBuy
+	btcTrendSell := waveSym && coinActive && !inCool && spBps <= 1.65 && twoSidedOk && sellFairOk && math.Abs(posUSD) < 1.0 && (dirCap-otherPendAsk) >= 100.0 && waveSell
 
 	// 1. Manage resting orders: ModifyOrder (1 write) or Quota-Free 0ms L2CancelOrder!
 	pickoffBuf := 1.25
@@ -1182,24 +1258,23 @@ func manageCoin(sym string) {
 		holdS = now.Sub(st.posOpenTS).Seconds()
 	}
 
-	slInit, lockPeak, lockFloor := 3.10, 2.20, 0.80
+	slInit, lockPeak, lockFloor := 12.0, 14.0, 8.0
 
-	// 2. Closing orders: Unlimited Step-Ratchet Runner + 45s Early Cut + Bounded 3.1bps Stop
+	// 2. Closing orders: v79 Structural -12bps Stop, 12m Stalled Cut (-5bps), 50m Max Hold, +14/+22bps Runner
 	if pos <= -m.MinB && ae > 0 {
 		curTkShort := (ae - la) / ae * 10000.0
-		remLagShort := (lb - fairLt) / ae * 10000.0
 		if curTkShort > st.peakFavBps {
 			st.peakFavBps = curTkShort
 		}
 		trailFloor := stepRatchetFloor(st.peakFavBps, lockFloor)
 		greenShortPx := roundTo(math.Min(ae-tick, ae*(1.0-math.Max(0.25, trailFloor-0.15)/10000.0)), m.PxDec)
 		greenLockShort := st.peakFavBps >= lockPeak && ((curTkShort <= trailFloor && spBps <= 2.5) || curTkShort <= trailFloor-0.8)
-		earlyCutShort := st.peakFavBps < 0.80 && holdS >= 45.0 && curTkShort <= -1.80 && spBps <= 1.8 && remLagShort < 50.0
-		hardSlShort := (curTkShort <= -slInit && spBps <= 2.5) || curTkShort <= -(slInit+0.6)
+		earlyCutShort := st.peakFavBps < 5.0 && holdS >= 720.0 && curTkShort <= -5.0 && spBps <= 2.2
+		hardSlShort := (curTkShort <= -slInit && spBps <= 2.5) || curTkShort <= -(slInit+1.2)
 		slHitShort := hardSlShort || earlyCutShort || greenLockShort
-		defBailShort := vel3sBps >= 7.0 && obi >= 0.50 && curTkShort <= -1.8
-		timeScratchShort := (holdS >= 180.0 && st.peakFavBps < lockPeak) || holdS >= 1200.0
-		closeShortPx := roundTo(la*1.0003, m.PxDec)
+		defBailShort := false
+		timeScratchShort := holdS >= 3000.0
+		closeShortPx := roundTo(la*1.00018, m.PxDec)
 		if greenLockShort {
 			closeShortPx = roundTo(la*1.00005+tick, m.PxDec)
 		}
@@ -1210,9 +1285,9 @@ func manageCoin(sym string) {
 					probationForce.Store(true)
 					streakWins.Store(0)
 					lastStopMS.Store(now.UnixMilli())
-					st.stopCoolUntil = now.Add(45 * time.Second)
+					st.stopCoolUntil = now.Add(360 * time.Second)
 				} else if earlyCutShort && !greenLockShort {
-					st.stopCoolUntil = now.Add(20 * time.Second)
+					st.stopCoolUntil = now.Add(240 * time.Second)
 				}
 				placeSide(sym, "BID", closeShortPx, mid, math.Abs(pos), true, true)
 			}
@@ -1226,9 +1301,9 @@ func manageCoin(sym string) {
 					probationForce.Store(true)
 					streakWins.Store(0)
 					lastStopMS.Store(now.UnixMilli())
-					st.stopCoolUntil = now.Add(45 * time.Second)
+					st.stopCoolUntil = now.Add(360 * time.Second)
 				} else if earlyCutShort && !greenLockShort {
-					st.stopCoolUntil = now.Add(20 * time.Second)
+					st.stopCoolUntil = now.Add(240 * time.Second)
 				}
 				placeSide(sym, "BID", closeShortPx, mid, math.Abs(pos), true, true)
 			}
@@ -1255,6 +1330,7 @@ func manageCoin(sym string) {
 				}
 				if st.activeOrds["BID"] == nil && st.activeOrds["ASK"] == nil && now.Sub(st.lastOrdTS["BID"]) >= 1800*time.Millisecond && takeWriteSlot(false) {
 					st.lastOrdTS["BID"] = now
+					st.lastSigMin = sigMin
 					placeSide(sym, "BID", snipeBidPx, mid, 0, false, true)
 				}
 			}
@@ -1276,19 +1352,18 @@ func manageCoin(sym string) {
 
 	if pos >= m.MinB && ae > 0 {
 		curTkLong := (lb - ae) / ae * 10000.0
-		remLagLong := (fairLt - la) / ae * 10000.0
 		if curTkLong > st.peakFavBps {
 			st.peakFavBps = curTkLong
 		}
 		trailFloorL := stepRatchetFloor(st.peakFavBps, lockFloor)
 		greenLongPx := roundTo(math.Max(ae+tick, ae*(1.0+math.Max(0.25, trailFloorL-0.15)/10000.0)), m.PxDec)
 		greenLockLong := st.peakFavBps >= lockPeak && ((curTkLong <= trailFloorL && spBps <= 2.5) || curTkLong <= trailFloorL-0.8)
-		earlyCutLong := st.peakFavBps < 0.80 && holdS >= 45.0 && curTkLong <= -1.80 && spBps <= 1.8 && remLagLong < 50.0
-		hardSlLong := (curTkLong <= -slInit && spBps <= 2.5) || curTkLong <= -(slInit+0.6)
+		earlyCutLong := st.peakFavBps < 5.0 && holdS >= 720.0 && curTkLong <= -5.0 && spBps <= 2.2
+		hardSlLong := (curTkLong <= -slInit && spBps <= 2.5) || curTkLong <= -(slInit+1.2)
 		slHitLong := hardSlLong || earlyCutLong || greenLockLong
-		defBailLong := vel3sBps <= -7.0 && obi <= -0.50 && curTkLong <= -1.8
-		timeScratchLong := (holdS >= 180.0 && st.peakFavBps < lockPeak) || holdS >= 1200.0
-		closeLongPx := roundTo(lb*0.9997, m.PxDec)
+		defBailLong := false
+		timeScratchLong := holdS >= 3000.0
+		closeLongPx := roundTo(lb*0.99982, m.PxDec)
 		if greenLockLong {
 			closeLongPx = roundTo(lb*0.99995-tick, m.PxDec)
 		}
@@ -1299,9 +1374,9 @@ func manageCoin(sym string) {
 					probationForce.Store(true)
 					streakWins.Store(0)
 					lastStopMS.Store(now.UnixMilli())
-					st.stopCoolUntil = now.Add(45 * time.Second)
+					st.stopCoolUntil = now.Add(360 * time.Second)
 				} else if earlyCutLong && !greenLockLong {
-					st.stopCoolUntil = now.Add(20 * time.Second)
+					st.stopCoolUntil = now.Add(240 * time.Second)
 				}
 				placeSide(sym, "ASK", closeLongPx, mid, math.Abs(pos), true, true)
 			}
@@ -1315,9 +1390,9 @@ func manageCoin(sym string) {
 					probationForce.Store(true)
 					streakWins.Store(0)
 					lastStopMS.Store(now.UnixMilli())
-					st.stopCoolUntil = now.Add(45 * time.Second)
+					st.stopCoolUntil = now.Add(360 * time.Second)
 				} else if earlyCutLong && !greenLockLong {
-					st.stopCoolUntil = now.Add(20 * time.Second)
+					st.stopCoolUntil = now.Add(240 * time.Second)
 				}
 				placeSide(sym, "ASK", closeLongPx, mid, math.Abs(pos), true, true)
 			}
@@ -1344,6 +1419,7 @@ func manageCoin(sym string) {
 				}
 				if st.activeOrds["ASK"] == nil && st.activeOrds["BID"] == nil && now.Sub(st.lastOrdTS["ASK"]) >= 1800*time.Millisecond && takeWriteSlot(false) {
 					st.lastOrdTS["ASK"] = now
+					st.lastSigMin = sigMin
 					placeSide(sym, "ASK", snipeAskPx, mid, 0, false, true)
 				}
 			}
@@ -1370,7 +1446,7 @@ func manageCoin(sym string) {
 	}
 	logMu.Unlock()
 	if shouldLog {
-		fmt.Printf("[%s] GO-TOKYO v74 Eq=$%.4f | %s Pos=%.5f | Net=$%.2f | Rng60s=%.1fbps | Sp=%.2fbps | Strk=%d | Prob=%v | OBI=%.2f\n",
+		fmt.Printf("[%s] GO-TOKYO v79 LIVE | BTC+ETH 1m Vol-Breakout ($320->$680->$900) | Eq=$%.4f | %s Pos=%.5f | Net=$%.2f | Rng60s=%.1fbps | Sp=%.2fbps | Strk=%d | Prob=%v | OBI=%.2f\n",
 			now.Format("15:04:05"), float64(eqNow.Load())/1e6, sym, pos, netUSD, st.range60sBps, spBps, streakWins.Load(), probationForce.Load(), obi)
 	}
 }
@@ -1489,10 +1565,8 @@ func rebalanceFromTrades(tb []byte) {
 	for _, sym := range []string{"BTC", "XAU", "ETH", "SOL", "XRP", "HYPE", "BNB", "ZEC", "NVDA"} {
 		st := mktStates[sym]
 		clip := -1.0
-		if sym == "BTC" {
-			clip = math.Min(950.0, curEq*10.0)
-		} else if sym == "XAU" {
-			clip = math.Min(900.0, curEq*9.4)
+		if sym == "BTC" || sym == "ETH" {
+			clip = houseMoneyClipUSD()
 		}
 		st.mu.Lock()
 		st.dynClipUSD = clip
@@ -1979,7 +2053,7 @@ func runLtWS() {
 }
 
 func runBnWS() {
-	url := "wss://fstream.binance.com/stream?streams=btcusdt@bookTicker/xauusdt@bookTicker/ethusdt@bookTicker"
+	url := "wss://fstream.binance.com/stream?streams=btcusdt@bookTicker/ethusdt@bookTicker/btcusdt@kline_1m/ethusdt@kline_1m"
 	for {
 		conn, _, err := websocket.DefaultDialer.Dial(url, nil)
 		if err != nil {
@@ -1993,102 +2067,128 @@ func runBnWS() {
 				break
 			}
 			var env struct {
-				Data struct {
+				Stream string `json:"stream"`
+				Data   struct {
 					S  string `json:"s"`
 					B  string `json:"b"`
 					BQ string `json:"B"`
 					A  string `json:"a"`
 					AQ string `json:"A"`
+					K  struct {
+						T int64  `json:"t"`
+						O string `json:"o"`
+						H string `json:"h"`
+						L string `json:"l"`
+						C string `json:"c"`
+						V string `json:"v"`
+						X bool   `json:"x"`
+					} `json:"k"`
 				} `json:"data"`
 			}
-			if json.Unmarshal(msg, &env) == nil && env.Data.S != "" {
-				sym := strings.TrimSuffix(env.Data.S, "USDT")
-				b, _ := strconv.ParseFloat(env.Data.B, 64)
-				bq, _ := strconv.ParseFloat(env.Data.BQ, 64)
-				a, _ := strconv.ParseFloat(env.Data.A, 64)
-				aq, _ := strconv.ParseFloat(env.Data.AQ, 64)
-				if b > 0 && a > 0 && bq > 0 && aq > 0 {
-					mVal := 0.5 * (b + a)
-					microVal := (b*aq + a*bq) / (bq + aq)
-					obiVal := (bq - aq) / (bq + aq)
-					now := time.Now()
-					st := mktStates[sym]
-					if st == nil {
-						continue
-					}
+			if json.Unmarshal(msg, &env) != nil || env.Data.S == "" {
+				continue
+			}
+			sym := strings.TrimSuffix(env.Data.S, "USDT")
+			st := mktStates[sym]
+			if st == nil {
+				continue
+			}
+			if strings.HasSuffix(env.Stream, "@kline_1m") {
+				op, _ := strconv.ParseFloat(env.Data.K.O, 64)
+				hi, _ := strconv.ParseFloat(env.Data.K.H, 64)
+				lo, _ := strconv.ParseFloat(env.Data.K.L, 64)
+				cl, _ := strconv.ParseFloat(env.Data.K.C, 64)
+				vol, _ := strconv.ParseFloat(env.Data.K.V, 64)
+				mSlot := env.Data.K.T / 60000
+				if mSlot > 0 && op > 0 && cl > 0 {
+					mIdx := int(((mSlot % 128) + 128) % 128)
 					st.mu.Lock()
-					st.bnMid = mVal
-					st.bnMicro = microVal
-					st.rawObi = obiVal
-					st.netMicroUSD.Store(int64(st.pos * mVal * 1e6))
-					// Update 60s realized volatility bucket (6 x 10s sliding slots)
-					slot := now.Unix() / 10
-					idx := int(slot % 6)
-					if st.rangeBuckets[idx].slot != slot {
-						st.rangeBuckets[idx] = RangeBucket{slot: slot, hi: mVal, lo: mVal}
-					} else {
-						if mVal > st.rangeBuckets[idx].hi {
-							st.rangeBuckets[idx].hi = mVal
+					st.minSlot[mIdx] = mSlot
+					st.minPx[mIdx] = op
+					st.minHi[mIdx] = hi
+					st.minLo[mIdx] = lo
+					st.minCl[mIdx] = cl
+					st.minVol[mIdx] = vol
+					closedNow := false
+					if env.Data.K.X {
+						if mSlot > st.lastClosedMin {
+							st.lastClosedMin = mSlot
 						}
-						if mVal < st.rangeBuckets[idx].lo {
-							st.rangeBuckets[idx].lo = mVal
-						}
+						closedNow = st.bnMid > 0 && (st.dynClipUSD >= 0 || math.Abs(st.pos) > 1e-6)
 					}
-					mSlot := now.Unix() / 60
-					mIdx := int(mSlot % 64)
-					if st.minSlot[mIdx] != mSlot {
-						st.minSlot[mIdx] = mSlot
-						st.minPx[mIdx] = mVal
-						st.minHi[mIdx] = mVal
-						st.minLo[mIdx] = mVal
-					} else {
-						if mVal > st.minHi[mIdx] {
-							st.minHi[mIdx] = mVal
-						}
-						if mVal < st.minLo[mIdx] || st.minLo[mIdx] == 0 {
-							st.minLo[mIdx] = mVal
-						}
-					}
-					if st.emaFast == 0 {
-						st.emaUltra = mVal
-						st.emaFast = mVal
-						st.emaEq = mVal
-						st.emaSlow = mVal
-						st.ema5m = mVal
-						st.emaMacro = mVal
-						st.fastObi = obiVal
-						st.bnObi = obiVal
-						st.lastEmaTS = now
-					} else {
-						dt := math.Min(5.0, math.Max(0.001, now.Sub(st.lastEmaTS).Seconds()))
-						st.lastEmaTS = now
-						st.emaUltra += (1.0 - math.Exp(-dt/3.0)) * (mVal - st.emaUltra)
-						st.emaFast += (1.0 - math.Exp(-dt/20.0)) * (mVal - st.emaFast)
-						if st.emaEq == 0 {
-							st.emaEq = mVal
-						} else {
-							st.emaEq += (1.0 - math.Exp(-dt/90.0)) * (mVal - st.emaEq)
-						}
-						st.emaSlow += (1.0 - math.Exp(-dt/180.0)) * (mVal - st.emaSlow)
-						if st.ema5m == 0 {
-							st.ema5m = mVal
-						} else {
-							st.ema5m += (1.0 - math.Exp(-dt/300.0)) * (mVal - st.ema5m)
-						}
-						if st.emaMacro == 0 {
-							st.emaMacro = mVal
-						} else {
-							st.emaMacro += (1.0 - math.Exp(-dt/900.0)) * (mVal - st.emaMacro)
-						}
-						st.fastObi += (1.0 - math.Exp(-dt/2.0)) * (obiVal - st.fastObi)
-						st.bnObi += (1.0 - math.Exp(-dt/8.0)) * (obiVal - st.bnObi) // Stable 8s OBI prevents 1ms queue churn!
-					}
-					// CPU saver: run 0ms full tick on active Champion/open pos, 100ms throttled tick on Shadow coins
-					shouldRun := st.dynClipUSD >= 0 || math.Abs(st.pos) > 1e-6 || now.Sub(st.lastShadowTS) >= 100*time.Millisecond
 					st.mu.Unlock()
-					if shouldRun {
+					if closedNow {
 						manageCoin(sym)
 					}
+				}
+				continue
+			}
+			b, _ := strconv.ParseFloat(env.Data.B, 64)
+			bq, _ := strconv.ParseFloat(env.Data.BQ, 64)
+			a, _ := strconv.ParseFloat(env.Data.A, 64)
+			aq, _ := strconv.ParseFloat(env.Data.AQ, 64)
+			if b > 0 && a > 0 && bq > 0 && aq > 0 {
+				mVal := 0.5 * (b + a)
+				microVal := (b*aq + a*bq) / (bq + aq)
+				obiVal := (bq - aq) / (bq + aq)
+				now := time.Now()
+				st.mu.Lock()
+				st.bnMid = mVal
+				st.bnMicro = microVal
+				st.rawObi = obiVal
+				st.netMicroUSD.Store(int64(st.pos * mVal * 1e6))
+				// Update 60s realized volatility bucket (6 x 10s sliding slots)
+				slot := now.Unix() / 10
+				idx := int(slot % 6)
+				if st.rangeBuckets[idx].slot != slot {
+					st.rangeBuckets[idx] = RangeBucket{slot: slot, hi: mVal, lo: mVal}
+				} else {
+					if mVal > st.rangeBuckets[idx].hi {
+						st.rangeBuckets[idx].hi = mVal
+					}
+					if mVal < st.rangeBuckets[idx].lo {
+						st.rangeBuckets[idx].lo = mVal
+					}
+				}
+				if st.emaFast == 0 {
+					st.emaUltra = mVal
+					st.emaFast = mVal
+					st.emaEq = mVal
+					st.emaSlow = mVal
+					st.ema5m = mVal
+					st.emaMacro = mVal
+					st.fastObi = obiVal
+					st.bnObi = obiVal
+					st.lastEmaTS = now
+				} else {
+					dt := math.Min(5.0, math.Max(0.001, now.Sub(st.lastEmaTS).Seconds()))
+					st.lastEmaTS = now
+					st.emaUltra += (1.0 - math.Exp(-dt/3.0)) * (mVal - st.emaUltra)
+					st.emaFast += (1.0 - math.Exp(-dt/20.0)) * (mVal - st.emaFast)
+					if st.emaEq == 0 {
+						st.emaEq = mVal
+					} else {
+						st.emaEq += (1.0 - math.Exp(-dt/90.0)) * (mVal - st.emaEq)
+					}
+					st.emaSlow += (1.0 - math.Exp(-dt/180.0)) * (mVal - st.emaSlow)
+					if st.ema5m == 0 {
+						st.ema5m = mVal
+					} else {
+						st.ema5m += (1.0 - math.Exp(-dt/300.0)) * (mVal - st.ema5m)
+					}
+					if st.emaMacro == 0 {
+						st.emaMacro = mVal
+					} else {
+						st.emaMacro += (1.0 - math.Exp(-dt/900.0)) * (mVal - st.emaMacro)
+					}
+					st.fastObi += (1.0 - math.Exp(-dt/2.0)) * (obiVal - st.fastObi)
+					st.bnObi += (1.0 - math.Exp(-dt/8.0)) * (obiVal - st.bnObi) // Stable 8s OBI prevents 1ms queue churn!
+				}
+				// CPU saver: run 0ms full tick on active Champion/open pos, 100ms throttled tick on Shadow coins
+				shouldRun := st.dynClipUSD >= 0 || math.Abs(st.pos) > 1e-6 || now.Sub(st.lastShadowTS) >= 100*time.Millisecond
+				st.mu.Unlock()
+				if shouldRun {
+					manageCoin(sym)
 				}
 			}
 		}
@@ -2102,12 +2202,12 @@ func seedBinanceHistory() {
 	now := time.Now()
 	slot := now.Unix() / 10
 	idx := int(slot % 6)
-	for _, sym := range []string{"BTC", "XAU", "ETH"} {
+	for _, sym := range []string{"BTC", "ETH"} {
 		st := mktStates[sym]
 		if st == nil {
 			continue
 		}
-		resp, err := hc.Get("https://fapi.binance.com/fapi/v1/klines?symbol=" + sym + "USDT&interval=1m&limit=60")
+		resp, err := hc.Get("https://fapi.binance.com/fapi/v1/klines?symbol=" + sym + "USDT&interval=1m&limit=90")
 		if err != nil {
 			continue
 		}
@@ -2122,29 +2222,33 @@ func seedBinanceHistory() {
 			px   float64
 			hi   float64
 			lo   float64
+			cl   float64
+			vol  float64
 		}
 		var seeds []minSeed
 		var ef, es, em, eu, eeq, e5m, lastC, lastHi, lastLo float64
 		for _, k := range kl {
-			if len(k) < 5 {
+			if len(k) < 6 {
 				continue
 			}
 			var openMS int64
-			var oStr, hStr, lStr, cStr string
+			var oStr, hStr, lStr, cStr, vStr string
 			_ = json.Unmarshal(k[0], &openMS)
 			_ = json.Unmarshal(k[1], &oStr)
 			_ = json.Unmarshal(k[2], &hStr)
 			_ = json.Unmarshal(k[3], &lStr)
 			_ = json.Unmarshal(k[4], &cStr)
+			_ = json.Unmarshal(k[5], &vStr)
 			op, _ := strconv.ParseFloat(oStr, 64)
 			hi, _ := strconv.ParseFloat(hStr, 64)
 			lo, _ := strconv.ParseFloat(lStr, 64)
 			c, _ := strconv.ParseFloat(cStr, 64)
+			vol, _ := strconv.ParseFloat(vStr, 64)
 			if c <= 0 {
 				continue
 			}
 			if openMS > 0 && op > 0 {
-				seeds = append(seeds, minSeed{slot: openMS / 60000, px: op, hi: hi, lo: lo})
+				seeds = append(seeds, minSeed{slot: openMS / 60000, px: op, hi: hi, lo: lo, cl: c, vol: vol})
 			}
 			lastC, lastHi, lastLo = c, hi, lo
 			if ef == 0 {
@@ -2161,19 +2265,26 @@ func seedBinanceHistory() {
 		if lastC > 0 {
 			st.mu.Lock()
 			for _, ms := range seeds {
-				mi := int(((ms.slot % 64) + 64) % 64)
+				mi := int(((ms.slot % 128) + 128) % 128)
 				st.minSlot[mi] = ms.slot
 				st.minPx[mi] = ms.px
 				st.minHi[mi] = ms.hi
 				st.minLo[mi] = ms.lo
+				st.minCl[mi] = ms.cl
+				st.minVol[mi] = ms.vol
+			}
+			if len(seeds) >= 2 {
+				st.lastClosedMin = seeds[len(seeds)-2].slot
+				st.lastSigMin = st.lastClosedMin
 			}
 			curM := now.Unix() / 60
-			curMIdx := int(((curM % 64) + 64) % 64)
+			curMIdx := int(((curM % 128) + 128) % 128)
 			if st.minSlot[curMIdx] != curM {
 				st.minSlot[curMIdx] = curM
 				st.minPx[curMIdx] = lastC
 				st.minHi[curMIdx] = lastHi
 				st.minLo[curMIdx] = lastLo
+				st.minCl[curMIdx] = lastC
 			}
 			st.emaUltra = eu
 			st.emaFast = ef
@@ -2844,9 +2955,9 @@ func main() {
 	nonceSeq.Store(n)
 	coiSeq.Store(time.Now().UnixMilli() % 10000000)
 	probationForce.Store(false)
-	mktStates["BTC"].dynClipUSD = 950.0
-	mktStates["XAU"].dynClipUSD = 900.0
-	mktStates["ETH"].dynClipUSD = -1.0
+	mktStates["BTC"].dynClipUSD = 320.0
+	mktStates["XAU"].dynClipUSD = -1.0
+	mktStates["ETH"].dynClipUSD = 320.0
 	mktStates["SOL"].dynClipUSD = -1.0
 	mktStates["XRP"].dynClipUSD = -1.0
 	mktStates["HYPE"].dynClipUSD = -1.0
@@ -2869,7 +2980,7 @@ func main() {
 	time.Sleep(1500 * time.Millisecond)
 	cancelAll()
 	seedBinanceHistory()
-	fmt.Printf("GO-TOKYO v78 LIVE | BTC+XAU Uncapped Wave + vel3s ($900-$950) | Stop=$%.2f\n", StopEqUSD)
+	fmt.Printf("GO-TOKYO v79 LIVE | BTC+ETH 1m Vol-Breakout ($320->$680->$900) | Stop=$%.2f\n", StopEqUSD)
 	go syncAccountLoop()
 	runBnWS()
 }
