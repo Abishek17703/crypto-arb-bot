@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -49,15 +50,17 @@ type Market struct {
 }
 
 var markets = map[string]Market{
-	"ETH":  {Sym: "ETH", ID: 0, SzDec: 4, PxDec: 2, MinB: 0.0020, AllowEntry: true, ClipUSD: 175.0, EdgeBps: 5.4},
-	"BTC":  {Sym: "BTC", ID: 1, SzDec: 5, PxDec: 1, MinB: 0.00007, AllowEntry: true, ClipUSD: 175.0, EdgeBps: 5.0},
-	"SOL":  {Sym: "SOL", ID: 2, SzDec: 3, PxDec: 3, MinB: 0.055, AllowEntry: false, ClipUSD: 88.0, EdgeBps: 5.4},
-	"HYPE": {Sym: "HYPE", ID: 24, SzDec: 2, PxDec: 4, MinB: 0.07, AllowEntry: false, ClipUSD: 88.0, EdgeBps: 5.8},
-	"ZEC":  {Sym: "ZEC", ID: 90, SzDec: 3, PxDec: 3, MinB: 0.004, AllowEntry: false, ClipUSD: 12.0, EdgeBps: 10.0},
+	"ETH":   {Sym: "ETH", ID: 0, SzDec: 4, PxDec: 2, MinB: 0.0020, AllowEntry: false, ClipUSD: 150.0, EdgeBps: 5.4},
+	"BTC":   {Sym: "BTC", ID: 1, SzDec: 5, PxDec: 1, MinB: 0.00007, AllowEntry: true, ClipUSD: 150.0, EdgeBps: 5.0},
+	"SOL":   {Sym: "SOL", ID: 2, SzDec: 3, PxDec: 3, MinB: 0.055, AllowEntry: false, ClipUSD: 88.0, EdgeBps: 5.4},
+	"HYPE":  {Sym: "HYPE", ID: 24, SzDec: 2, PxDec: 4, MinB: 0.07, AllowEntry: false, ClipUSD: 88.0, EdgeBps: 5.8},
+	"ZEC":   {Sym: "ZEC", ID: 90, SzDec: 3, PxDec: 3, MinB: 0.004, AllowEntry: false, ClipUSD: 12.0, EdgeBps: 10.0},
+	"QQQ":   {Sym: "QQQ", ID: 129, SzDec: 4, PxDec: 2, MinB: 0.0170, AllowEntry: true, ClipUSD: 255.0, EdgeBps: 1.75},
+	"US100": {Sym: "US100", ID: 181, SzDec: 6, PxDec: 0, MinB: 0.00042, AllowEntry: true, ClipUSD: 255.0, EdgeBps: 0.0},
 }
 var evergreenSyms = []string{"BTC", "ETH"}
 var bootTS = time.Now()
-var idToSym = map[int64]string{0: "ETH", 1: "BTC", 2: "SOL", 24: "HYPE", 90: "ZEC"}
+var idToSym = map[int64]string{0: "ETH", 1: "BTC", 2: "SOL", 24: "HYPE", 90: "ZEC", 129: "QQQ", 181: "US100"}
 
 type ActiveOrder struct {
 	COI     int64
@@ -105,6 +108,7 @@ type MarketState struct {
 	bookAsks    map[string]float64
 	ltBid       float64
 	ltAsk       float64
+	lastBookTS  time.Time
 	pos         float64
 	avgEntry    float64
 	posOpenTS     time.Time
@@ -141,9 +145,19 @@ func newMarketState(initClip float64) *MarketState {
 
 var (
 	mktStates = map[string]*MarketState{
-		"BTC": newMarketState(175.0), "ETH": newMarketState(-1.0),
+		"BTC": newMarketState(150.0), "ETH": newMarketState(-1.0),
 		"SOL": newMarketState(-1.0), "HYPE": newMarketState(-1.0), "ZEC": newMarketState(-1.0),
+		"QQQ": newMarketState(255.0), "US100": newMarketState(255.0),
 	}
+	pairMu                 sync.Mutex
+	pairMarketActive       atomic.Bool
+	pairMarketLastActiveTS time.Time
+	pairEmaRatio           float64
+	pairLastEmaTS          time.Time
+	pairWarmTicks          int
+	pairEntryTS            time.Time
+	lastHedgeTS            time.Time
+	lastPairLog            time.Time
 	probationForce       atomic.Bool
 	lastStopMS           atomic.Int64
 	streakWins           atomic.Int64
@@ -703,23 +717,14 @@ func recomputeBBO(st *MarketState) {
 func closeStepBps(st *MarketState) float64 {
 	if !st.posOpenTS.IsZero() {
 		secs := time.Since(st.posOpenTS).Seconds()
-		if secs >= 95.0 {
-			return -1.5
-		}
-		if secs >= 65.0 {
-			return -0.6
-		}
-		if secs >= 42.0 {
-			return 0.6
+		if secs >= 50.0 {
+			return 0.2
 		}
 		if secs >= 22.0 {
-			return 2.2 // Preserve solid +2.2bps win across 22-42s!
+			return 0.9
 		}
 	}
-	if st.entryWasSnipe {
-		return 3.3 // High-conversion +3.3bps (~+$0.042) Maker exit on Snipes!
-	}
-	return 3.6 // +3.6bps (~+$0.038) Maker exit on 6.2bps Deep Wick Makers!
+	return 1.65 // Verified 80%+ WR fast 0%-fee Maker exit on BTC weekend fallback snipes!
 }
 
 func updateShadowPaper(st *MarketState, now time.Time, lb, la, fairLt, effEdge float64, bidOk, askOk bool) {
@@ -894,8 +899,8 @@ func manageCoin(sym string) {
 	dirCap := globalDirCapUSD()
 	otherPendBid := otherSameDirPendingUSD(sym, true)
 	otherPendAsk := otherSameDirPendingUSD(sym, false)
-	coinActive := m.AllowEntry && st.dynClipUSD >= 0 && !holdOneLocked
-	makerAllowed := coinActive && st.makerActive
+	coinActive := m.AllowEntry && st.dynClipUSD >= 0 && !holdOneLocked && !pairMarketActive.Load()
+	makerAllowed := false // Directional crypto passive Makers permanently OFF; 24/5 runs Delta-Neutral QQQ/US100!
 	inCool := now.Before(st.stopCoolUntil) || now.Sub(st.lastFillTS) < 3*time.Second
 
 	bidAllowed := volSafe && !clockPause && macroTrendBps >= -48.0 && macroTrendBps <= 95.0 && mom5mBps >= -12.0 && mom5mBps <= 22.0 && trendBps >= -4.0 && trendBps <= 8.5
@@ -971,13 +976,7 @@ func manageCoin(sym string) {
 		if favBps > st.peakFavBps {
 			st.peakFavBps = favBps
 		}
-		slBps := 6.2
-		if st.entryWasSnipe {
-			slBps = 5.4
-		}
-		if st.peakFavBps >= 2.2 {
-			slBps = 1.2 // Peak Winner Lock: once +2.2bps green, never turn into a full stop!
-		}
+		slBps := 4.8
 		slHitShort := fairLt >= ae*(1.0+slBps/10000.0)
 		defBailShort := vel3sBps >= 8.5 && obi >= 0.55 && fairLt >= ae*(1.0+5.0/10000.0)
 		timeScratchShort := holdS >= 115.0 // Zombie-only IOC bail after 115s; 65-115s uses passive Maker scratch!
@@ -1057,13 +1056,7 @@ func manageCoin(sym string) {
 		if favBps > st.peakFavBps {
 			st.peakFavBps = favBps
 		}
-		slBps := 6.2
-		if st.entryWasSnipe {
-			slBps = 5.4
-		}
-		if st.peakFavBps >= 2.2 {
-			slBps = 1.2 // Peak Winner Lock: once +2.2bps green, never turn into a full stop!
-		}
+		slBps := 4.8
 		slHitLong := fairLt <= ae*(1.0-slBps/10000.0)
 		defBailLong := vel3sBps <= -8.5 && obi <= -0.55 && fairLt <= ae*(1.0-5.0/10000.0)
 		timeScratchLong := holdS >= 115.0 // Zombie-only IOC bail after 115s; 65-115s uses passive Maker scratch!
@@ -1144,8 +1137,8 @@ func manageCoin(sym string) {
 		lastLog = now
 	}
 	logMu.Unlock()
-	if shouldLog {
-		fmt.Printf("[%s] GO-TOKYO v62 Eq=$%.4f | %s Pos=%.5f | Net=$%.2f | Rng60s=%.1fbps | Mac=%.1fbps | Strk=%d | Prob=%v | OBI=%.2f\n",
+	if shouldLog && !pairMarketActive.Load() {
+		fmt.Printf("[%s] GO-TOKYO v63 Eq=$%.4f | %s Pos=%.5f | Net=$%.2f | Rng60s=%.1fbps | Mac=%.1fbps | Strk=%d | Prob=%v | OBI=%.2f\n",
 			now.Format("15:04:05"), float64(eqNow.Load())/1e6, sym, pos, netUSD, st.range60sBps, macroTrendBps, streakWins.Load(), probationForce.Load(), obi)
 	}
 }
@@ -1283,7 +1276,7 @@ func rebalanceFromTrades(tb []byte) {
 		}
 		st.mu.Lock()
 		st.dynClipUSD = clip
-		st.makerActive = isMakerSym
+		st.makerActive = false
 		st.dynEdgeBps = 4.6
 		st.entryCool = 2000 * time.Millisecond
 		st.rollPnl = pnl[sym]
@@ -1359,8 +1352,14 @@ func syncAccountLoop() {
 						st.pos = sz
 						ae, _ := strconv.ParseFloat(p.AvgEntryPrice, 64)
 						st.avgEntry = ae
-						if st.bnMid > 0 {
-							st.netMicroUSD.Store(int64(sz * st.bnMid * 1e6))
+						refPx := st.bnMid
+						if refPx <= 0 && st.ltBid > 0 && st.ltAsk > 0 {
+							refPx = 0.5 * (st.ltBid + st.ltAsk)
+						} else if refPx <= 0 {
+							refPx = ae
+						}
+						if refPx > 0 {
+							st.netMicroUSD.Store(int64(sz * refPx * 1e6))
 						}
 						if math.Abs(sz) > 1e-6 && math.Abs(prevPos) < 1e-6 {
 							st.posOpenTS = time.Now()
@@ -1371,7 +1370,7 @@ func syncAccountLoop() {
 							st.peakFavBps = 0
 							st.entryWasSnipe = false
 						}
-						if p.OpenOrderCount > 2 || (math.Abs(sz) >= markets[sym].MinB && p.OpenOrderCount > 1) {
+						if p.OpenOrderCount > 2 {
 							orphanLeak = true
 						}
 						if math.Abs(sz-prevPos) > 1e-6 {
@@ -1404,6 +1403,7 @@ func syncAccountLoop() {
 					}
 					cancelAll()
 				}
+				managePairArb()
 				if eq > 0 && eq <= StopEqUSD {
 					fmt.Printf("[STOP-LOSS] Equity $%.4f <= $%.2f, closing & halting!\n", eq, StopEqUSD)
 					useWsSend = false
@@ -1605,8 +1605,14 @@ func runLtWS() {
 							if ae, e := strconv.ParseFloat(p.AvgEntryPrice, 64); e == nil && ae > 0 {
 								st.avgEntry = ae
 							}
-							if st.bnMid > 0 {
-								st.netMicroUSD.Store(int64(sz * st.bnMid * 1e6))
+							refPx := st.bnMid
+							if refPx <= 0 && st.ltBid > 0 && st.ltAsk > 0 {
+								refPx = 0.5 * (st.ltBid + st.ltAsk)
+							} else if refPx <= 0 {
+								refPx = st.avgEntry
+							}
+							if refPx > 0 {
+								st.netMicroUSD.Store(int64(sz * refPx * 1e6))
 							}
 							if math.Abs(sz) > 1e-6 && math.Abs(prev) < 1e-6 {
 								st.posOpenTS = time.Now()
@@ -1646,7 +1652,11 @@ func runLtWS() {
 						}
 					}
 					for _, sym := range touched {
-						manageCoin(sym)
+						if sym == "QQQ" || sym == "US100" {
+							managePairArb()
+						} else {
+							manageCoin(sym)
+						}
 					}
 				}
 			} else if strings.HasPrefix(m.Channel, "order_book:") {
@@ -1719,10 +1729,17 @@ func runLtWS() {
 					if needRecompute {
 						recomputeBBO(st)
 					}
+					if st.ltBid > 0 && st.ltAsk > 0 {
+						st.lastBookTS = time.Now()
+					}
 					bboChanged := st.ltBid != prevB || st.ltAsk != prevA
 					shouldRun := bboChanged && st.bnMid > 0 && (st.dynClipUSD >= 0 || math.Abs(st.pos) > 1e-6 || time.Since(st.lastShadowTS) >= 100*time.Millisecond)
 					st.mu.Unlock()
-					if shouldRun {
+					if sym == "QQQ" || sym == "US100" {
+						if bboChanged {
+							managePairArb()
+						}
+					} else if shouldRun {
 						manageCoin(sym)
 					}
 				}
@@ -1907,6 +1924,490 @@ func seedBinanceHistory() {
 	}
 }
 
+func cancelPairSide(sym, side string) {
+	st := mktStates[sym]
+	if st == nil {
+		return
+	}
+	st.mu.Lock()
+	cancelSide(sym, side)
+	st.mu.Unlock()
+}
+
+func modifyPairSide(sym, side string, newPxF, midF float64) {
+	st := mktStates[sym]
+	if st == nil {
+		return
+	}
+	st.mu.Lock()
+	st.lastOrdTS[side] = time.Now()
+	modifySide(sym, side, newPxF, midF)
+	st.mu.Unlock()
+}
+
+func placePairOrder(sym, side string, pxF, midF, baseF float64, isClose, isIOC bool) {
+	st := mktStates[sym]
+	m, ok := markets[sym]
+	if st == nil || !ok || pxF <= 0 || baseF <= 0 {
+		return
+	}
+	if !isClose {
+		baseF = math.Max(m.MinB, baseF)
+	}
+	baseInt := int64(math.Round(baseF * math.Pow10(m.SzDec)))
+	if !isClose && !isIOC {
+		baseInt = int64(math.Ceil(baseF * math.Pow10(m.SzDec)))
+	}
+	if baseInt <= 0 {
+		return
+	}
+	pxInt := uint32(math.Round(pxF * math.Pow10(m.PxDec)))
+	coi := coiSeq.Add(1)
+	var isAsk, redOnly uint8
+	if side == "ASK" {
+		isAsk = 1
+	}
+	if isClose {
+		redOnly = 1
+	}
+	now := time.Now()
+	st.mu.Lock()
+	st.lastOrdTS[side] = now
+	st.activeOrds[side] = &ActiveOrder{COI: coi, Px: pxF, BaseInt: baseInt, RefMid: midF, IsClose: isClose, IsIOC: isIOC, TS: now}
+	if !isClose && !isIOC {
+		ordMicro := int64(baseF * pxF * 1e6)
+		if side == "BID" {
+			st.pendBidMicroUSD.Store(ordMicro)
+		} else {
+			st.pendAskMicroUSD.Store(ordMicro)
+		}
+	}
+	st.mu.Unlock()
+
+	enqueueTx(func() {
+		var ordType uint8 = 0
+		var tif uint8 = 2
+		if isClose {
+			tif = 1 // GoodTillTime on Maker closes: crosses immediately at 0% fee if already converged!
+		}
+		exp := time.Now().Add(28 * 24 * time.Hour).UnixMilli()
+		if isIOC {
+			ordType = 1 // MARKET
+			tif = 0     // IOC
+			exp = 0
+		}
+		dbg := fmt.Sprintf("PAIR_%s_%s px=%.2f sz=%.6f ro=%d ioc=%v", sym, side, pxF, baseF, redOnly, isIOC)
+		err := sendSignedTx(fmt.Sprintf("po_%d", coi), dbg, func(opts *types.TransactOpts) (uint8, string, error) {
+			ti, e := txCli.GetCreateOrderTransaction(&types.CreateOrderTxReq{
+				MarketIndex:      m.ID,
+				ClientOrderIndex: coi,
+				BaseAmount:       baseInt,
+				Price:            pxInt,
+				IsAsk:            isAsk,
+				Type:             ordType,
+				TimeInForce:      tif,
+				ReduceOnly:       redOnly,
+				OrderExpiry:      exp,
+			}, opts)
+			if e != nil {
+				return 0, "", e
+			}
+			s, e := ti.GetTxInfo()
+			return ti.GetTxType(), s, e
+		})
+		if err != nil {
+			st.mu.Lock()
+			delete(st.activeOrds, side)
+			if side == "BID" {
+				st.pendBidMicroUSD.Store(0)
+			} else {
+				st.pendAskMicroUSD.Store(0)
+			}
+			st.mu.Unlock()
+		}
+	})
+}
+
+func seedPairHistory() {
+	hc := &http.Client{Timeout: 5 * time.Second}
+	type trPt struct {
+		ts int64
+		px float64
+	}
+	fetchTr := func(mid int) []trPt {
+		req, err := http.NewRequest("GET", fmt.Sprintf("%s/api/v1/trades?market_id=%d&limit=100&sort_by=timestamp", BaseURL, mid), nil)
+		if err != nil {
+			return nil
+		}
+		req.Header.Set("User-Agent", "Mozilla/5.0")
+		resp, err := hc.Do(req)
+		if err != nil {
+			return nil
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		var d struct {
+			Trades []struct {
+				TS    int64  `json:"timestamp"`
+				Price string `json:"price"`
+			} `json:"trades"`
+		}
+		if json.Unmarshal(body, &d) != nil {
+			return nil
+		}
+		var out []trPt
+		for _, t := range d.Trades {
+			p, _ := strconv.ParseFloat(t.Price, 64)
+			if p > 0 && t.TS > 0 {
+				out = append(out, trPt{ts: t.TS, px: p})
+			}
+		}
+		sort.Slice(out, func(i, j int) bool { return out[i].ts < out[j].ts })
+		return out
+	}
+	uPts := fetchTr(181)
+	qPts := fetchTr(129)
+	if len(uPts) < 5 || len(qPts) < 5 {
+		return
+	}
+	var ratios []float64
+	ui := 0
+	for _, q := range qPts {
+		for ui+1 < len(uPts) && math.Abs(float64(uPts[ui+1].ts-q.ts)) <= math.Abs(float64(uPts[ui].ts-q.ts)) {
+			ui++
+		}
+		if math.Abs(float64(uPts[ui].ts-q.ts)) <= 8000 && uPts[ui].px > 0 {
+			ratios = append(ratios, q.px/uPts[ui].px)
+		}
+	}
+	if len(ratios) >= 5 {
+		sort.Float64s(ratios)
+		med := ratios[len(ratios)/2]
+		pairMu.Lock()
+		pairEmaRatio = med
+		pairLastEmaTS = time.Now()
+		pairWarmTicks = 12
+		pairMarketLastActiveTS = time.Now()
+		pairMarketActive.Store(true)
+		pairMu.Unlock()
+		fmt.Printf("[PAIR_SEED] QQQ/US100 seeded median ratio=%.7f from %d prints\n", med, len(ratios))
+	}
+}
+
+func managePairArb() {
+	pairMu.Lock()
+	defer pairMu.Unlock()
+
+	qSt := mktStates["QQQ"]
+	uSt := mktStates["US100"]
+	if qSt == nil || uSt == nil {
+		return
+	}
+	now := time.Now()
+
+	qSt.mu.Lock()
+	for _, sd := range []string{"BID", "ASK"} {
+		if ao := qSt.activeOrds[sd]; ao != nil && ao.IsIOC && now.Sub(ao.TS).Seconds() >= 2.0 {
+			delete(qSt.activeOrds, sd)
+		}
+	}
+	qb, qa, qPos, qAE, qBookTS, qLastFill := qSt.ltBid, qSt.ltAsk, qSt.pos, qSt.avgEntry, qSt.lastBookTS, qSt.lastFillTS
+	qBidOrd, qAskOrd := qSt.activeOrds["BID"], qSt.activeOrds["ASK"]
+	qLastOrdBid, qLastOrdAsk := qSt.lastOrdTS["BID"], qSt.lastOrdTS["ASK"]
+	qLastCanBid, qLastCanAsk := qSt.lastCancelTS["BID"], qSt.lastCancelTS["ASK"]
+	qSt.mu.Unlock()
+
+	uSt.mu.Lock()
+	for _, sd := range []string{"BID", "ASK"} {
+		if ao := uSt.activeOrds[sd]; ao != nil && ao.IsIOC && now.Sub(ao.TS).Seconds() >= 2.0 {
+			delete(uSt.activeOrds, sd)
+		}
+	}
+	ub, ua, uPos, uAE, uBookTS := uSt.ltBid, uSt.ltAsk, uSt.pos, uSt.avgEntry, uSt.lastBookTS
+	uSt.mu.Unlock()
+
+	validBooks := qb > 0 && qa > qb && ub > 0 && ua > ub
+	booksFresh := validBooks && !qBookTS.IsZero() && !uBookTS.IsZero() && now.Sub(qBookTS) < 15*time.Second && now.Sub(uBookTS) < 15*time.Second
+	qMid, uMid, qSpBps, uSpBps := 0.0, 0.0, 999.0, 999.0
+	if validBooks {
+		qMid = 0.5 * (qb + qa)
+		uMid = 0.5 * (ub + ua)
+		qSpBps = (qa - qb) / qMid * 10000.0
+		uSpBps = (ua - ub) / uMid * 10000.0
+		qSt.netMicroUSD.Store(int64(qPos * qMid * 1e6))
+		uSt.netMicroUSD.Store(int64(uPos * uMid * 1e6))
+	}
+	spreadsTight := booksFresh && uSpBps <= 1.90 && qSpBps <= 2.30
+	if spreadsTight {
+		pairMarketLastActiveTS = now
+		pairMarketActive.Store(true)
+		instR := qMid / uMid
+		if pairEmaRatio <= 0 {
+			pairEmaRatio = instR
+			pairLastEmaTS = now
+		} else if math.Abs(instR-pairEmaRatio)/pairEmaRatio*10000.0 < 25.0 {
+			dt := math.Min(5.0, math.Max(0.001, now.Sub(pairLastEmaTS).Seconds()))
+			pairLastEmaTS = now
+			tau := 600.0
+			if math.Abs(qPos) >= 0.015 || math.Abs(uPos) >= 0.0003 {
+				tau = 1800.0
+			}
+			pairEmaRatio += (1.0 - math.Exp(-dt/tau)) * (instR - pairEmaRatio)
+			pairWarmTicks++
+		}
+	} else if !pairMarketLastActiveTS.IsZero() && now.Sub(pairMarketLastActiveTS) > 45*time.Second && math.Abs(qPos) < 0.0075 && math.Abs(uPos) < 0.0002 {
+		pairMarketActive.Store(false)
+	}
+
+	if !validBooks {
+		return
+	}
+
+	qUSD := qPos * qMid
+	uUSD := uPos * uMid
+	netDeltaUSD := qUSD + uUSD
+	devBps := 0.0
+	if pairEmaRatio > 0 {
+		fairQ := uMid * pairEmaRatio
+		devBps = (qMid - fairQ) / fairQ * 10000.0
+	}
+
+	if now.Sub(lastPairLog) >= 25*time.Second {
+		lastPairLog = now
+		fmt.Printf("[%s] GO-TOKYO v63 Eq=$%.4f | QQQ=%.4f ($%.1f) US100=%.6f ($%.1f) | Net=$%.2f | Sp=%.2f/%.2fbps | Dev=%.2fbps | Warm=%d\n",
+			now.Format("15:04:05"), float64(eqNow.Load())/1e6, qPos, qUSD, uPos, uUSD, netDeltaUSD, qSpBps, uSpBps, devBps, pairWarmTicks)
+	}
+
+	// STEP A: 0ms Auto-Hedger & Residual Unwind (Highest Priority!)
+	if uSpBps <= 8.0 && qSpBps <= 8.0 {
+		// A1: QQQ flat, US100 still holding hedge -> close 100% of US100 ReduceOnly IOC immediately!
+		if math.Abs(qPos) < 0.0075 && math.Abs(uPos) >= 0.00020 {
+			if qBidOrd != nil && !qBidOrd.IsIOC {
+				cancelPairSide("QQQ", "BID")
+			}
+			if qAskOrd != nil && !qAskOrd.IsIOC {
+				cancelPairSide("QQQ", "ASK")
+			}
+			if now.Sub(lastHedgeTS) >= 850*time.Millisecond && takeWriteSlotTier(2) {
+				lastHedgeTS = now
+				pairEntryTS = time.Time{}
+				if uPos > 0 {
+					placePairOrder("US100", "ASK", math.Floor(ub*0.9985), uMid, math.Abs(uPos), true, true)
+				} else {
+					placePairOrder("US100", "BID", math.Ceil(ua*1.0015), uMid, math.Abs(uPos), true, true)
+				}
+			}
+			return
+		}
+		// A2: QQQ holds >= $11 position and netDeltaUSD >= $11.2 -> hedge US100 IOC immediately!
+		if math.Abs(qUSD) >= 11.0 && math.Abs(netDeltaUSD) >= 11.2 {
+			if qBidOrd != nil && !qBidOrd.IsClose && !qBidOrd.IsIOC {
+				cancelPairSide("QQQ", "BID")
+			}
+			if qAskOrd != nil && !qAskOrd.IsClose && !qAskOrd.IsIOC {
+				cancelPairSide("QQQ", "ASK")
+			}
+			if now.Sub(lastHedgeTS) >= 850*time.Millisecond && takeWriteSlotTier(2) {
+				lastHedgeTS = now
+				if pairEntryTS.IsZero() {
+					pairEntryTS = now
+				}
+				needUUSD := -netDeltaUSD
+				needUSz := roundTo(math.Abs(needUUSD)/uMid, 6)
+				if uPos > 0.00020 && needUUSD < 0 {
+					sz := math.Min(math.Abs(uPos), needUSz)
+					placePairOrder("US100", "ASK", math.Floor(ub*0.9985), uMid, sz, true, true)
+				} else if uPos < -0.00020 && needUUSD > 0 {
+					sz := math.Min(math.Abs(uPos), needUSz)
+					placePairOrder("US100", "BID", math.Ceil(ua*1.0015), uMid, sz, true, true)
+				} else if needUSz >= 0.00042 {
+					if needUUSD < 0 {
+						placePairOrder("US100", "ASK", math.Floor(ub*0.9988), uMid, needUSz, false, true)
+					} else {
+						placePairOrder("US100", "BID", math.Ceil(ua*1.0012), uMid, needUSz, false, true)
+					}
+				}
+			}
+			return
+		}
+		// A3: Tiny sub-$11 partial QQQ fill sitting > 1.8s without US100 hedge -> clean ReduceOnly IOC!
+		if math.Abs(qPos) >= 0.0075 && math.Abs(qUSD) < 11.0 && math.Abs(uPos) < 0.00020 {
+			if now.Sub(qLastFill) >= 1800*time.Millisecond && now.Sub(lastHedgeTS) >= 1200*time.Millisecond && takeWriteSlotTier(2) {
+				lastHedgeTS = now
+				if qBidOrd != nil && !qBidOrd.IsIOC {
+					cancelPairSide("QQQ", "BID")
+				}
+				if qAskOrd != nil && !qAskOrd.IsIOC {
+					cancelPairSide("QQQ", "ASK")
+				}
+				if qPos > 0 {
+					placePairOrder("QQQ", "ASK", roundTo(qb*0.9985, 2), qMid, math.Abs(qPos), true, true)
+				} else {
+					placePairOrder("QQQ", "BID", roundTo(qa*1.0015, 2), qMid, math.Abs(qPos), true, true)
+				}
+			}
+			return
+		}
+	}
+
+	// STEP B: Hedged Pair Convergence Exit (QQQ Maker $0.01 tick -> triggers A1 US100 close on fill!)
+	if math.Abs(qUSD) >= 11.0 && math.Abs(netDeltaUSD) < 11.2 {
+		if qBidOrd != nil && !qBidOrd.IsClose && !qBidOrd.IsIOC {
+			cancelPairSide("QQQ", "BID")
+		}
+		if qAskOrd != nil && !qAskOrd.IsClose && !qAskOrd.IsIOC {
+			cancelPairSide("QQQ", "ASK")
+		}
+		if qAE <= 0 {
+			qAE = qMid
+		}
+		if uAE <= 0 {
+			uAE = uMid
+		}
+		if pairEntryTS.IsZero() {
+			pairEntryTS = now
+		}
+		ageS := now.Sub(pairEntryTS).Seconds()
+		tpNetBps := 1.18
+		if ageS >= 300.0 {
+			tpNetBps = 0.18
+		} else if ageS >= 120.0 {
+			tpNetBps = 0.65
+		}
+
+		if qPos > 0 {
+			uLegBps := (uAE - ua) / uAE * 10000.0
+			mtmBps := (qb-qAE)/qAE*10000.0 + uLegBps
+			if mtmBps <= -16.0 {
+				if qAskOrd != nil && !qAskOrd.IsIOC {
+					cancelPairSide("QQQ", "ASK")
+				} else if qAskOrd == nil && now.Sub(qLastOrdAsk) >= 400*time.Millisecond && takeWriteSlotTier(2) {
+					placePairOrder("QQQ", "ASK", roundTo(qb*0.9985, 2), qMid, math.Abs(qPos), true, true)
+				}
+			} else {
+				needQBps := tpNetBps - uLegBps
+				wantAsk := math.Ceil(qAE*(1.0+needQBps/10000.0)*100.0) / 100.0
+				if wantAsk < qb {
+					wantAsk = qb
+				}
+				if qAskOrd != nil && qAskOrd.IsClose && !qAskOrd.IsIOC && math.Abs(qAskOrd.Px-wantAsk) >= 0.02 && now.Sub(qLastOrdAsk) >= 450*time.Millisecond && takeWriteSlot(true) {
+					modifyPairSide("QQQ", "ASK", wantAsk, qMid)
+				} else if qAskOrd == nil && now.Sub(qLastOrdAsk) >= 300*time.Millisecond && takeWriteSlot(true) {
+					placePairOrder("QQQ", "ASK", wantAsk, qMid, math.Abs(qPos), true, false)
+				}
+			}
+		} else {
+			uLegBps := (ub - uAE) / uAE * 10000.0
+			mtmBps := (qAE-qa)/qAE*10000.0 + uLegBps
+			if mtmBps <= -16.0 {
+				if qBidOrd != nil && !qBidOrd.IsIOC {
+					cancelPairSide("QQQ", "BID")
+				} else if qBidOrd == nil && now.Sub(qLastOrdBid) >= 400*time.Millisecond && takeWriteSlotTier(2) {
+					placePairOrder("QQQ", "BID", roundTo(qa*1.0015, 2), qMid, math.Abs(qPos), true, true)
+				}
+			} else {
+				needQBps := tpNetBps - uLegBps
+				wantBid := math.Floor(qAE*(1.0-needQBps/10000.0)*100.0) / 100.0
+				if wantBid > qa {
+					wantBid = qa
+				}
+				if qBidOrd != nil && qBidOrd.IsClose && !qBidOrd.IsIOC && math.Abs(qBidOrd.Px-wantBid) >= 0.02 && now.Sub(qLastOrdBid) >= 450*time.Millisecond && takeWriteSlot(true) {
+					modifyPairSide("QQQ", "BID", wantBid, qMid)
+				} else if qBidOrd == nil && now.Sub(qLastOrdBid) >= 300*time.Millisecond && takeWriteSlot(true) {
+					placePairOrder("QQQ", "BID", wantBid, qMid, math.Abs(qPos), true, false)
+				}
+			}
+		}
+		return
+	}
+
+	// STEP C: Passive QQQ Maker Entry (0% fee, $0.01 fine tick, 94-100% historical WR!)
+	if math.Abs(qPos) >= 0.0075 || math.Abs(uPos) >= 0.00020 {
+		return
+	}
+	legacyBusy := math.Abs(float64(mktStates["BTC"].netMicroUSD.Load()))/1e6 >= 5.0 || math.Abs(float64(mktStates["ETH"].netMicroUSD.Load()))/1e6 >= 5.0
+	if !spreadsTight || pairWarmTicks < 15 || pairEmaRatio <= 0 || legacyBusy {
+		if qBidOrd != nil && !qBidOrd.IsClose && !qBidOrd.IsIOC {
+			cancelPairSide("QQQ", "BID")
+		}
+		if qAskOrd != nil && !qAskOrd.IsClose && !qAskOrd.IsIOC {
+			cancelPairSide("QQQ", "ASK")
+		}
+		return
+	}
+
+	fairQ := uMid * pairEmaRatio
+	if math.Abs(qMid-fairQ)/fairQ*10000.0 > 10.0 {
+		if qBidOrd != nil && !qBidOrd.IsClose && !qBidOrd.IsIOC {
+			cancelPairSide("QQQ", "BID")
+		}
+		if qAskOrd != nil && !qAskOrd.IsClose && !qAskOrd.IsIOC {
+			cancelPairSide("QQQ", "ASK")
+		}
+		return
+	}
+
+	// Pull immediately via 0ms quota-free L2CancelOrder if US100 moved against resting QQQ quote so remaining edge < 0.95bps!
+	if qBidOrd != nil && !qBidOrd.IsClose && !qBidOrd.IsIOC && fairQ <= qBidOrd.Px*(1.0+0.95/10000.0) {
+		cancelPairSide("QQQ", "BID")
+		qBidOrd = nil
+		qLastCanBid = now
+	}
+	if qAskOrd != nil && !qAskOrd.IsClose && !qAskOrd.IsIOC && fairQ >= qAskOrd.Px*(1.0-0.95/10000.0) {
+		cancelPairSide("QQQ", "ASK")
+		qAskOrd = nil
+		qLastCanAsk = now
+	}
+
+	if now.Sub(qLastFill) < 2500*time.Millisecond {
+		return
+	}
+
+	entryEdgeBps := 1.75
+	preferBid := (fairQ - qb) >= (qa - fairQ)
+	curEq := float64(eqNow.Load()) / 1e6
+	if curEq < 50.0 {
+		curEq = 98.0
+	}
+	legUSD := math.Min(340.0, math.Max(140.0, curEq*2.60))
+
+	if preferBid {
+		if qAskOrd != nil && !qAskOrd.IsClose && !qAskOrd.IsIOC {
+			cancelPairSide("QQQ", "ASK")
+		}
+		wantBid := math.Floor(fairQ*(1.0-entryEdgeBps/10000.0)*100.0) / 100.0
+		if wantBid >= qa {
+			wantBid = roundTo(qa-0.01, 2)
+		}
+		if qBidOrd == nil && now.Sub(qLastCanBid) >= 2200*time.Millisecond && now.Sub(qLastOrdBid) >= 1800*time.Millisecond && takeWriteSlot(false) {
+			placePairOrder("QQQ", "BID", wantBid, qMid, legUSD/wantBid, false, false)
+		} else if qBidOrd != nil && !qBidOrd.IsClose && !qBidOrd.IsIOC && (math.Abs(qBidOrd.Px-wantBid) >= 0.02 || now.Sub(qBidOrd.TS).Seconds() >= 40.0) && now.Sub(qLastOrdBid) >= 700*time.Millisecond && takeWriteSlot(false) {
+			modifyPairSide("QQQ", "BID", wantBid, qMid)
+		}
+	} else {
+		if qBidOrd != nil && !qBidOrd.IsClose && !qBidOrd.IsIOC {
+			cancelPairSide("QQQ", "BID")
+		}
+		wantAsk := math.Ceil(fairQ*(1.0+entryEdgeBps/10000.0)*100.0) / 100.0
+		if wantAsk <= qb {
+			wantAsk = roundTo(qb+0.01, 2)
+		}
+		if qAskOrd == nil && now.Sub(qLastCanAsk) >= 2200*time.Millisecond && now.Sub(qLastOrdAsk) >= 1800*time.Millisecond && takeWriteSlot(false) {
+			placePairOrder("QQQ", "ASK", wantAsk, qMid, legUSD/wantAsk, false, false)
+		} else if qAskOrd != nil && !qAskOrd.IsClose && !qAskOrd.IsIOC && (math.Abs(qAskOrd.Px-wantAsk) >= 0.02 || now.Sub(qAskOrd.TS).Seconds() >= 40.0) && now.Sub(qLastOrdAsk) >= 700*time.Millisecond && takeWriteSlot(false) {
+			modifyPairSide("QQQ", "ASK", wantAsk, qMid)
+		}
+	}
+}
+
+func runPairHeartbeat() {
+	t := time.NewTicker(250 * time.Millisecond)
+	defer t.Stop()
+	for range t.C {
+		managePairArb()
+	}
+}
+
 func main() {
 	hc := lthttp.NewClient(BaseURL)
 	var err error
@@ -1922,10 +2423,10 @@ func main() {
 	}
 	nonceSeq.Store(n)
 	coiSeq.Store(time.Now().UnixMilli() % 10000000)
-	probationForce.Store(false) // Boot at Step 1 normal sizing; Step 0 $88 caution engages immediately on any loss!
-	mktStates["BTC"].dynClipUSD = 180.0
-	mktStates["ETH"].dynClipUSD = 180.0
-	mktStates["BTC"].makerActive = true
+	probationForce.Store(false)
+	mktStates["BTC"].dynClipUSD = 150.0
+	mktStates["ETH"].dynClipUSD = -1.0
+	mktStates["BTC"].makerActive = false
 
 	go runTxWorker()
 	go runTxWS()
@@ -1933,7 +2434,9 @@ func main() {
 	time.Sleep(1500 * time.Millisecond)
 	cancelAll()
 	seedBinanceHistory()
-	fmt.Printf("GO-TOKYO v62 LIVE | Fundamental Engine ($150-$220 A+ Clips + Unfrozen Macro) | Stop=$%.2f\n", StopEqUSD)
+	seedPairHistory()
+	fmt.Printf("GO-TOKYO v63 LIVE | Delta-Neutral QQQ/US100 Pair Arb (94%%+ WR) + BTC Weekend Snipe | Stop=$%.2f\n", StopEqUSD)
 	go syncAccountLoop()
+	go runPairHeartbeat()
 	runBnWS()
 }
