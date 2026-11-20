@@ -1868,7 +1868,7 @@ def main():
     api._cm_swarm_paused = False
     api._v13_spot_perp_only = False
 
-    def _boot_lighter_tokyo():  # v68: Minimal-Budget ($12-$15) Trio True-Green-Lock Sniper: BTC + NVDA + HYPE
+    def _boot_lighter_tokyo():  # v69: Minimal-Budget ($12-$15) Aligned BTC+NVDA+HYPE Sniper
         import subprocess, urllib.request
         try:
             html_lt = urllib.request.urlopen(f"https://raw.githubusercontent.com/Abishek17703/crypto-arb-bot/main/tokyo_engine/lighter_live_dashboard.html?t={int(time.time())}", timeout=8).read()
@@ -4037,7 +4037,7 @@ def main():
                     "solSpotPerpPilot": sp_st,
                     "lighterAccount": (json.loads(open("/tmp/lighter_acct.json").read()) if os.path.exists("/tmp/lighter_acct.json") else None),
                     "lighterTrades": (json.loads(open("/tmp/lighter_trades.json").read()).get("trades", []) if os.path.exists("/tmp/lighter_trades.json") else []),
-                    "lighterLog": (open("/tmp/lighter_tokyo.log").read()[-400:] if os.path.exists("/tmp/lighter_tokyo.log") else "NO_LOG"),
+                    "lighterLog": (open("/tmp/lighter_tokyo.log").read()[-3200:] if os.path.exists("/tmp/lighter_tokyo.log") else "NO_LOG"),
                     "trancheStats": {
                         "total": tot_tr_cnt,
                         "active": active_tr_cnt,
