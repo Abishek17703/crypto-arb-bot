@@ -1039,29 +1039,29 @@ func manageCoin(sym string) {
 		holdS = now.Sub(st.posOpenTS).Seconds()
 	}
 
-	slInit, lockPeak, lockFloor := 4.5, 1.25, 0.40
+	slInit, lockPeak, lockFloor := 4.5, 1.20, 0.55
 	if sym == "NVDA" {
-		lockFloor = 0.35
+		lockFloor = 0.50
 	} else if sym == "HYPE" {
-		slInit, lockPeak, lockFloor = 5.2, 1.50, 0.45
+		slInit, lockPeak, lockFloor = 5.0, 1.40, 0.65
 	}
 
-	// 2. Closing orders: Real-Book True Green Floor Lock + Zero Modify Spam + Dual-Confirmed Risk Cap
+	// 2. Closing orders: Executable curTk True Green Floor Lock + Zero Modify Spam + Tight Stop Cap
 	if pos <= -m.MinB && ae > 0 {
-		favMkShort := (ae - lb) / ae * 10000.0
 		curTkShort := (ae - la) / ae * 10000.0
 		fairAdvShort := (fairLt - ae) / ae * 10000.0
-		if favMkShort > st.peakFavBps {
-			st.peakFavBps = favMkShort
+		if curTkShort > st.peakFavBps {
+			st.peakFavBps = curTkShort
 		}
-		greenLockShort := st.peakFavBps >= lockPeak && curTkShort <= lockFloor && la <= roundTo(ae-tick, m.PxDec)
-		hardSlShort := (curTkShort <= -slInit && fairAdvShort >= 2.8) || curTkShort <= -(slInit+2.0)
+		greenShortPx := roundTo(math.Min(ae-tick, ae*(1.0-0.25/10000.0)), m.PxDec)
+		greenLockShort := st.peakFavBps >= lockPeak && curTkShort <= lockFloor && la <= greenShortPx
+		hardSlShort := (curTkShort <= -slInit && spBps <= 3.0 && fairAdvShort >= 1.2) || curTkShort <= -(slInit+1.2)
 		slHitShort := hardSlShort || greenLockShort
-		defBailShort := vel3sBps >= 8.5 && obi >= 0.55 && curTkShort <= -4.0 && fairAdvShort >= 4.0
+		defBailShort := vel3sBps >= 8.5 && obi >= 0.55 && curTkShort <= -3.8 && fairAdvShort >= 3.5
 		timeScratchShort := holdS >= 75.0
 		closeShortPx := roundTo(la*1.0005, m.PxDec)
 		if greenLockShort {
-			closeShortPx = roundTo(ae-tick, m.PxDec) // Strictly GREEN limit IOC above entry!
+			closeShortPx = greenShortPx // Strictly GREEN limit IOC above entry!
 		}
 		if posUSD > -10.10 {
 			if (curTkShort >= stepBps || slHitShort || defBailShort || timeScratchShort) && st.activeOrds["BID"] == nil && now.Sub(st.lastOrdTS["BID"]) >= 2*time.Second && takeWriteSlot(true) {
@@ -1090,8 +1090,8 @@ func manageCoin(sym string) {
 			}
 		} else {
 			wantBid := roundTo(ae*(1.0-stepBps/10000.0), m.PxDec)
-			if st.peakFavBps >= lockPeak && curTkShort < lockFloor {
-				wantBid = roundTo(ae-tick, m.PxDec) // Rest strictly green scratch if dipped 1-2 ticks after peak!
+			if st.peakFavBps >= lockPeak && curTkShort < 0.20 {
+				wantBid = greenShortPx // Only tighten to green scratch if curTk pulled back after real peak!
 			}
 			if ao := st.activeOrds["BID"]; ao != nil && ao.IsClose && !ao.IsIOC && math.Abs(ao.Px-wantBid)/ae*10000.0 >= 0.45 && now.Sub(st.lastOrdTS["BID"]) >= 1500*time.Millisecond && takeWriteSlot(true) {
 				st.lastOrdTS["BID"] = now
@@ -1131,20 +1131,20 @@ func manageCoin(sym string) {
 	}
 
 	if pos >= m.MinB && ae > 0 {
-		favMkLong := (la - ae) / ae * 10000.0
 		curTkLong := (lb - ae) / ae * 10000.0
 		fairAdvLong := (ae - fairLt) / ae * 10000.0
-		if favMkLong > st.peakFavBps {
-			st.peakFavBps = favMkLong
+		if curTkLong > st.peakFavBps {
+			st.peakFavBps = curTkLong
 		}
-		greenLockLong := st.peakFavBps >= lockPeak && curTkLong <= lockFloor && lb >= roundTo(ae+tick, m.PxDec)
-		hardSlLong := (curTkLong <= -slInit && fairAdvLong >= 2.8) || curTkLong <= -(slInit+2.0)
+		greenLongPx := roundTo(math.Max(ae+tick, ae*(1.0+0.25/10000.0)), m.PxDec)
+		greenLockLong := st.peakFavBps >= lockPeak && curTkLong <= lockFloor && lb >= greenLongPx
+		hardSlLong := (curTkLong <= -slInit && spBps <= 3.0 && fairAdvLong >= 1.2) || curTkLong <= -(slInit+1.2)
 		slHitLong := hardSlLong || greenLockLong
-		defBailLong := vel3sBps <= -8.5 && obi <= -0.55 && curTkLong <= -4.0 && fairAdvLong >= 4.0
+		defBailLong := vel3sBps <= -8.5 && obi <= -0.55 && curTkLong <= -3.8 && fairAdvLong >= 3.5
 		timeScratchLong := holdS >= 75.0
 		closeLongPx := roundTo(lb*0.9995, m.PxDec)
 		if greenLockLong {
-			closeLongPx = roundTo(ae+tick, m.PxDec) // Strictly GREEN limit IOC above entry!
+			closeLongPx = greenLongPx // Strictly GREEN limit IOC above entry!
 		}
 		if posUSD < 10.10 {
 			if (curTkLong >= stepBps || slHitLong || defBailLong || timeScratchLong) && st.activeOrds["ASK"] == nil && now.Sub(st.lastOrdTS["ASK"]) >= 2*time.Second && takeWriteSlot(true) {
@@ -1173,8 +1173,8 @@ func manageCoin(sym string) {
 			}
 		} else {
 			wantAsk := roundTo(ae*(1.0+stepBps/10000.0), m.PxDec)
-			if st.peakFavBps >= lockPeak && curTkLong < lockFloor {
-				wantAsk = roundTo(ae+tick, m.PxDec) // Rest strictly green scratch if dipped 1-2 ticks after peak!
+			if st.peakFavBps >= lockPeak && curTkLong < 0.20 {
+				wantAsk = greenLongPx // Only tighten to green scratch if curTk pulled back after real peak!
 			}
 			if ao := st.activeOrds["ASK"]; ao != nil && ao.IsClose && !ao.IsIOC && math.Abs(ao.Px-wantAsk)/ae*10000.0 >= 0.45 && now.Sub(st.lastOrdTS["ASK"]) >= 1500*time.Millisecond && takeWriteSlot(true) {
 				st.lastOrdTS["ASK"] = now
@@ -1220,7 +1220,7 @@ func manageCoin(sym string) {
 	}
 	logMu.Unlock()
 	if shouldLog {
-		fmt.Printf("[%s] GO-TOKYO v70 Eq=$%.4f | %s Pos=%.5f | Net=$%.2f | Rng60s=%.1fbps | Sp=%.2fbps | Strk=%d | Prob=%v | OBI=%.2f\n",
+		fmt.Printf("[%s] GO-TOKYO v71 Eq=$%.4f | %s Pos=%.5f | Net=$%.2f | Rng60s=%.1fbps | Sp=%.2fbps | Strk=%d | Prob=%v | OBI=%.2f\n",
 			now.Format("15:04:05"), float64(eqNow.Load())/1e6, sym, pos, netUSD, st.range60sBps, spBps, streakWins.Load(), probationForce.Load(), obi)
 	}
 }
@@ -2589,7 +2589,7 @@ func main() {
 	time.Sleep(1500 * time.Millisecond)
 	cancelAll()
 	seedBinanceHistory()
-	fmt.Printf("GO-TOKYO v70 LIVE | Minimal-Budget ($12-$15) Loss-Eliminated Trio Sniper: BTC + NVDA + HYPE (39/min cap) | Stop=$%.2f\n", StopEqUSD)
+	fmt.Printf("GO-TOKYO v71 LIVE | Minimal-Budget ($12-$15) Executable-curTk Full-TP + Green-Lock Trio Sniper: BTC + NVDA + HYPE (39/min cap) | Stop=$%.2f\n", StopEqUSD)
 	go syncAccountLoop()
 	runBnWS()
 }
