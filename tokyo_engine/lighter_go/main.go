@@ -55,14 +55,15 @@ var markets = map[string]Market{
 	"SOL":   {Sym: "SOL", ID: 2, SzDec: 3, PxDec: 3, MinB: 0.055, AllowEntry: true, ClipUSD: 480.0, EdgeBps: 5.4},
 	"XRP":   {Sym: "XRP", ID: 7, SzDec: 0, PxDec: 6, MinB: 4.0, AllowEntry: true, ClipUSD: 480.0, EdgeBps: 5.4},
 	"HYPE":  {Sym: "HYPE", ID: 24, SzDec: 2, PxDec: 4, MinB: 0.07, AllowEntry: true, ClipUSD: 480.0, EdgeBps: 5.8},
-	"ZEC":   {Sym: "ZEC", ID: 90, SzDec: 3, PxDec: 3, MinB: 0.004, AllowEntry: false, ClipUSD: 12.0, EdgeBps: 10.0},
+	"BNB":   {Sym: "BNB", ID: 25, SzDec: 2, PxDec: 4, MinB: 0.01, AllowEntry: true, ClipUSD: 480.0, EdgeBps: 5.4},
+	"ZEC":   {Sym: "ZEC", ID: 90, SzDec: 3, PxDec: 3, MinB: 0.004, AllowEntry: true, ClipUSD: 480.0, EdgeBps: 5.4},
 	"NVDA":  {Sym: "NVDA", ID: 110, SzDec: 3, PxDec: 3, MinB: 0.025, AllowEntry: false, ClipUSD: 12.0, EdgeBps: 5.0},
 	"QQQ":   {Sym: "QQQ", ID: 129, SzDec: 4, PxDec: 2, MinB: 0.0170, AllowEntry: false, ClipUSD: 255.0, EdgeBps: 1.75},
 	"US100": {Sym: "US100", ID: 181, SzDec: 6, PxDec: 0, MinB: 0.00042, AllowEntry: false, ClipUSD: 255.0, EdgeBps: 0.0},
 }
 var evergreenSyms = []string{"BTC", "ETH"}
 var bootTS = time.Now()
-var idToSym = map[int64]string{0: "ETH", 1: "BTC", 2: "SOL", 7: "XRP", 24: "HYPE", 90: "ZEC", 110: "NVDA", 129: "QQQ", 181: "US100"}
+var idToSym = map[int64]string{0: "ETH", 1: "BTC", 2: "SOL", 7: "XRP", 24: "HYPE", 25: "BNB", 90: "ZEC", 110: "NVDA", 129: "QQQ", 181: "US100"}
 
 type ActiveOrder struct {
 	COI     int64
@@ -155,7 +156,7 @@ var (
 	mktStates = map[string]*MarketState{
 		"BTC": newMarketState(680.0), "ETH": newMarketState(-1.0),
 		"SOL": newMarketState(480.0), "XRP": newMarketState(480.0), "HYPE": newMarketState(480.0),
-		"ZEC": newMarketState(-1.0), "NVDA": newMarketState(-1.0), "QQQ": newMarketState(255.0), "US100": newMarketState(255.0),
+		"BNB": newMarketState(480.0), "ZEC": newMarketState(480.0), "NVDA": newMarketState(-1.0), "QQQ": newMarketState(255.0), "US100": newMarketState(255.0),
 	}
 	pairMu                 sync.Mutex
 	pairMarketActive       atomic.Bool
@@ -853,7 +854,7 @@ func manageCoin(sym string) {
 	if eu > 0 {
 		vel3sBps = (mid - eu) / eu * 10000.0
 		coolVel := 5.5
-		if sym == "SOL" || sym == "XRP" {
+		if sym == "SOL" || sym == "XRP" || sym == "BNB" || sym == "ZEC" {
 			coolVel = 7.0
 		} else if sym == "NVDA" {
 			coolVel = 6.5
@@ -871,7 +872,7 @@ func manageCoin(sym string) {
 	spBps := (la - lb) / ltMid * 10000.0
 	instBasis := (ltMid - mid) / mid * 10000.0
 	basisMaxSp := 1.25
-	if sym == "SOL" || sym == "XRP" || sym == "HYPE" || sym == "NVDA" {
+	if sym == "SOL" || sym == "XRP" || sym == "HYPE" || sym == "BNB" || sym == "ZEC" || sym == "NVDA" {
 		basisMaxSp = 2.20
 	}
 	if st.lastBasisTS.IsZero() {
@@ -898,7 +899,7 @@ func manageCoin(sym string) {
 		st.emaSpreadBps += (1.0 - math.Exp(-bdt/45.0)) * (spBps - st.emaSpreadBps)
 	}
 	refFair := micro
-	if sym == "SOL" || sym == "XRP" || sym == "HYPE" || sym == "NVDA" {
+	if sym == "SOL" || sym == "XRP" || sym == "HYPE" || sym == "BNB" || sym == "ZEC" || sym == "NVDA" {
 		refFair = mid
 	}
 	fairLt := refFair * (1.0 + st.basisBps/10000.0)
@@ -969,10 +970,10 @@ func manageCoin(sym string) {
 		impMax = 5.5
 		velLo, velHi = 0.45, 5.5
 		obiMin = 0.18
-	} else if sym == "SOL" || sym == "XRP" {
+	} else if sym == "SOL" || sym == "XRP" || sym == "BNB" || sym == "ZEC" {
 		volSafeSnipe = st.range60sBps >= 7.0 && st.range60sBps <= 36.0
 		snipeMaxSp = 1.20
-		if sym == "XRP" {
+		if sym == "XRP" || sym == "BNB" || sym == "ZEC" {
 			snipeMaxSp = 1.30
 		}
 		snipeThresh = 4.6
@@ -1035,7 +1036,7 @@ func manageCoin(sym string) {
 	keepBid := makerAllowed && volSafe && !clockPause && !inCool && now.After(st.dropCoolUntil) && macroTrendBps >= -55.0 && macroTrendBps <= 105.0 && mom5mBps >= -14.5 && mom5mBps <= 25.0 && vel3sBps > -4.2 && obi >= -0.55
 	keepAsk := makerAllowed && volSafe && !clockPause && !inCool && now.After(st.pumpCoolUntil) && macroTrendBps <= 55.0 && macroTrendBps >= -105.0 && mom5mBps <= 14.5 && mom5mBps >= -25.0 && vel3sBps < 4.2 && obi <= 0.55
 
-	snipeSym := sym == "BTC" || sym == "SOL" || sym == "XRP" || sym == "HYPE"
+	snipeSym := sym == "BTC" || sym == "SOL" || sym == "XRP" || sym == "HYPE" || sym == "BNB" || sym == "ZEC"
 	v75AlignBuy := ret3mBps >= -0.5 && ret5mBps >= -1.5 && ret15mBps >= -4.0 && ret15mBps <= 55.0
 	v75AlignSell := ret3mBps <= 0.5 && ret5mBps <= 1.5 && ret15mBps <= 4.0 && ret15mBps >= -55.0
 	staleSnipeBuy := snipeSym && v75AlignBuy && coinActive && volSafeSnipe && !clockPause && !inCoolBuy && spBps <= snipeMaxSp && (la*st.ltAskSz) >= 16.0 && now.After(st.dropCoolUntil) && math.Abs(posUSD) < 1.0 && (dirCap-otherPendBid) >= 12.0 && (fairLt-la)/la*10000.0 >= snipeThresh && macroTrendBps >= macLo && macroTrendBps <= macHi && mom5mBps >= momLo && mom5mBps <= momHi && trendBps >= trLo && trendBps <= trHi && impBps <= impMax && vel3sBps >= velLo && vel3sBps <= velHi && fObi >= obiMin
@@ -1094,7 +1095,7 @@ func manageCoin(sym string) {
 	}
 
 	slInit, lockPeak, lockFloor := 2.6, 1.00, 0.50
-	if sym == "SOL" || sym == "XRP" {
+	if sym == "SOL" || sym == "XRP" || sym == "BNB" || sym == "ZEC" {
 		slInit, lockPeak, lockFloor = 2.8, 1.05, 0.50
 	} else if sym == "NVDA" {
 		slInit, lockPeak, lockFloor = 2.8, 1.05, 0.50
@@ -1308,9 +1309,9 @@ func rebalanceFromTrades(tb []byte) {
 		return
 	}
 	nowMS := time.Now().UnixMilli()
-	pnl := map[string]float64{"BTC": 0, "ETH": 0, "SOL": 0, "XRP": 0, "HYPE": 0, "NVDA": 0}
-	wins := map[string]float64{"BTC": 0, "ETH": 0, "SOL": 0, "XRP": 0, "HYPE": 0, "NVDA": 0}
-	closes := map[string]float64{"BTC": 0, "ETH": 0, "SOL": 0, "XRP": 0, "HYPE": 0, "NVDA": 0}
+	pnl := map[string]float64{"BTC": 0, "ETH": 0, "SOL": 0, "XRP": 0, "HYPE": 0, "BNB": 0, "ZEC": 0, "NVDA": 0}
+	wins := map[string]float64{"BTC": 0, "ETH": 0, "SOL": 0, "XRP": 0, "HYPE": 0, "BNB": 0, "ZEC": 0, "NVDA": 0}
+	closes := map[string]float64{"BTC": 0, "ETH": 0, "SOL": 0, "XRP": 0, "HYPE": 0, "BNB": 0, "ZEC": 0, "NVDA": 0}
 	latestDecided := false
 	inCaution := probationForce.Load()
 	streak := 0
@@ -1404,12 +1405,12 @@ func rebalanceFromTrades(tb []byte) {
 	// v74 Trend-Aligned Trailing Runner: BTC 7x (~$680) & SOL/XRP/HYPE 5x (~$480, 45% L1 depth capped), max ~$0.13 stop!
 	_ = inCaution
 	_ = bestSym
-	for _, sym := range []string{"BTC", "ETH", "SOL", "XRP", "HYPE", "NVDA"} {
+	for _, sym := range []string{"BTC", "ETH", "SOL", "XRP", "HYPE", "BNB", "ZEC", "NVDA"} {
 		st := mktStates[sym]
 		clip := -1.0
 		if sym == "BTC" {
 			clip = math.Min(780.0, curEq*7.0)
-		} else if sym == "SOL" || sym == "XRP" || sym == "HYPE" {
+		} else if sym == "SOL" || sym == "XRP" || sym == "HYPE" || sym == "BNB" || sym == "ZEC" {
 			clip = math.Min(540.0, curEq*5.0)
 		}
 		st.mu.Lock()
@@ -1892,7 +1893,7 @@ func runLtWS() {
 }
 
 func runBnWS() {
-	url := "wss://fstream.binance.com/stream?streams=btcusdt@bookTicker/ethusdt@bookTicker/solusdt@bookTicker/xrpusdt@bookTicker/hypeusdt@bookTicker"
+	url := "wss://fstream.binance.com/stream?streams=btcusdt@bookTicker/ethusdt@bookTicker/solusdt@bookTicker/xrpusdt@bookTicker/hypeusdt@bookTicker/bnbusdt@bookTicker/zecusdt@bookTicker"
 	for {
 		conn, _, err := websocket.DefaultDialer.Dial(url, nil)
 		if err != nil {
@@ -2006,7 +2007,7 @@ func seedBinanceHistory() {
 	now := time.Now()
 	slot := now.Unix() / 10
 	idx := int(slot % 6)
-	for _, sym := range []string{"BTC", "ETH", "SOL", "XRP", "HYPE"} {
+	for _, sym := range []string{"BTC", "ETH", "SOL", "XRP", "HYPE", "BNB", "ZEC"} {
 		st := mktStates[sym]
 		if st == nil {
 			continue
@@ -2747,12 +2748,16 @@ func main() {
 	mktStates["SOL"].dynClipUSD = 480.0
 	mktStates["XRP"].dynClipUSD = 480.0
 	mktStates["HYPE"].dynClipUSD = 480.0
+	mktStates["BNB"].dynClipUSD = 480.0
+	mktStates["ZEC"].dynClipUSD = 480.0
 	mktStates["NVDA"].dynClipUSD = -1.0
 	mktStates["BTC"].makerActive = false
 	mktStates["ETH"].makerActive = false
 	mktStates["SOL"].makerActive = false
 	mktStates["XRP"].makerActive = false
 	mktStates["HYPE"].makerActive = false
+	mktStates["BNB"].makerActive = false
+	mktStates["ZEC"].makerActive = false
 
 	go runTxWorker()
 	go runTxWS()
@@ -2761,7 +2766,7 @@ func main() {
 	time.Sleep(1500 * time.Millisecond)
 	cancelAll()
 	seedBinanceHistory()
-	fmt.Printf("GO-TOKYO v75 LIVE | Unlimited Step-Ratchet Runner + 4-Layer Loss Cutters ($480-$680, 45%% L1 cap) | Stop=$%.2f\n", StopEqUSD)
+	fmt.Printf("GO-TOKYO v75 LIVE | Unlimited Step-Ratchet Runner + 4-Layer Loss Cutters (BTC/SOL/XRP/HYPE/BNB/ZEC) | Stop=$%.2f\n", StopEqUSD)
 	go syncAccountLoop()
 	runBnWS()
 }
