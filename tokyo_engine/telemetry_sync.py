@@ -1868,7 +1868,7 @@ def main():
     api._cm_swarm_paused = False
     api._v13_spot_perp_only = False
 
-    def _boot_lighter_tokyo():  # v61: Fundamental Engine (Mean-Anchored Maker + ETH Calm / BTC Active Split + 8s OBI Stability)
+    def _boot_lighter_tokyo():  # v62: Unfreeze 24bps macro cap + $150-$220 A+ clips
         import subprocess, urllib.request
         try:
             html_lt = urllib.request.urlopen(f"https://raw.githubusercontent.com/Abishek17703/crypto-arb-bot/main/tokyo_engine/lighter_live_dashboard.html?t={int(time.time())}", timeout=8).read()
