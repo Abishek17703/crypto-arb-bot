@@ -820,22 +820,22 @@ func manageCoin(sym string) {
 
 	// Shield #3 & #4: Adaptive Deep Maker Edge + 15m Macro Filter + Unblocked BTC Lead-Lag Sniper
 	preferBid := (fairLt-lb) >= (la-fairLt) || obi >= 0
-	baseEdge := 5.0
+	baseEdge := 4.8
 	if st.range60sBps > 0 && st.range60sBps < 4.0 {
-		baseEdge = 5.6
-	} else if (preferBid && macroTrendBps >= 1.5 && trendBps >= 0.5 && obi >= 0.15) || (!preferBid && macroTrendBps <= -1.5 && trendBps <= -0.5 && obi <= -0.15) {
-		baseEdge = 4.5
+		baseEdge = 5.5
+	} else if (preferBid && macroTrendBps >= 1.5 && trendBps >= 0.5 && obi >= 0.12) || (!preferBid && macroTrendBps <= -1.5 && trendBps <= -0.5 && obi <= -0.12) {
+		baseEdge = 4.0 // Trend-aligned Maker quote gets tighter 4.0bps fill priority!
 	}
 	if sym == "ETH" {
-		baseEdge = math.Max(baseEdge, 5.4)
+		baseEdge = math.Max(baseEdge, 5.2)
 	}
 	edge := baseEdge
 	if st.range60sBps > 10.0 {
-		edge = baseEdge + (st.range60sBps-10.0)*0.30 // 10 -> 18bps scales smoothly
+		edge = baseEdge + (st.range60sBps-10.0)*0.25 // 10 -> 18bps scales smoothly
 	}
-	snipeThresh := 3.2
+	snipeThresh := 3.0
 	if st.range60sBps > 11.0 {
-		snipeThresh = 3.8
+		snipeThresh = 3.6
 	}
 	minHr := now.Minute()
 	if minHr >= 58 || minHr <= 2 || (minHr >= 29 && minHr <= 32) {
@@ -849,19 +849,19 @@ func manageCoin(sym string) {
 	otherPendAsk := otherSameDirPendingUSD(sym, false)
 	coinActive := m.AllowEntry && st.dynClipUSD >= 0 && !holdOneLocked
 	inCool := now.Before(st.stopCoolUntil) || now.Sub(st.lastFillTS) < 3*time.Second
-	bidAllowed := volSafe && (macroTrendBps >= -3.5 || edge >= 7.5) && trendBps >= -2.0 && trendBps <= 5.5 && impBps >= -2.5 && impBps <= 3.5
-	askAllowed := volSafe && (macroTrendBps <= 3.5 || edge >= 7.5) && trendBps <= 2.0 && trendBps >= -5.5 && impBps <= 2.5 && impBps >= -3.5
+	bidAllowed := volSafe && (macroTrendBps >= -4.5 || edge >= 7.5) && trendBps >= -2.5 && trendBps <= 8.5 && impBps >= -2.5 && impBps <= 4.0
+	askAllowed := volSafe && (macroTrendBps <= 4.5 || edge >= 7.5) && trendBps <= 2.5 && trendBps >= -8.5 && impBps <= 2.5 && impBps >= -4.0
 
 	// Update 24/7 Zero-Risk Virtual Paper Engine on active symbols before coinActive filter!
 	updateShadowPaper(st, now, lb, la, fairLt, edge, bidAllowed && vel3sBps > -2.0 && obi >= -ObiLimit, askAllowed && vel3sBps < 2.0 && obi <= ObiLimit)
 
 	bidSafe := coinActive && !inCool && now.After(st.dropCoolUntil) && vel3sBps > -2.0 && bidAllowed && obi >= -ObiLimit && (dirCap-otherPendBid) >= 12.0
 	askSafe := coinActive && !inCool && now.After(st.pumpCoolUntil) && vel3sBps < 2.0 && askAllowed && obi <= ObiLimit && (dirCap-otherPendAsk) >= 12.0
-	keepBid := coinActive && volSafe && !inCool && now.After(st.dropCoolUntil) && (macroTrendBps >= -4.5 || edge >= 7.5) && trendBps >= -3.5 && trendBps <= 5.5 && vel3sBps > -3.5 && obi >= -0.58 && st.rawObi > -0.78
-	keepAsk := coinActive && volSafe && !inCool && now.After(st.pumpCoolUntil) && (macroTrendBps <= 4.5 || edge >= 7.5) && trendBps <= 3.5 && trendBps >= -5.5 && vel3sBps < 3.5 && obi <= 0.58 && st.rawObi < 0.78
+	keepBid := coinActive && volSafe && !inCool && now.After(st.dropCoolUntil) && (macroTrendBps >= -5.5 || edge >= 7.5) && trendBps >= -3.5 && trendBps <= 9.5 && vel3sBps > -3.5 && obi >= -0.58 && st.rawObi > -0.78
+	keepAsk := coinActive && volSafe && !inCool && now.After(st.pumpCoolUntil) && (macroTrendBps <= 5.5 || edge >= 7.5) && trendBps <= 3.5 && trendBps >= -9.5 && vel3sBps < 3.5 && obi <= 0.58 && st.rawObi < 0.78
 
-	staleSnipeBuy := sym == "BTC" && coinActive && volSafe && !inCool && spBps <= 0.65 && now.After(st.dropCoolUntil) && math.Abs(posUSD) < 1.0 && (dirCap-otherPendBid) >= 12.0 && (fairLt-la)/la*10000.0 >= snipeThresh && macroTrendBps >= -3.0 && trendBps >= -1.5 && trendBps <= 5.5 && vel3sBps > -0.4 && obi >= 0.22
-	staleSnipeSell := sym == "BTC" && coinActive && volSafe && !inCool && spBps <= 0.65 && now.After(st.pumpCoolUntil) && math.Abs(posUSD) < 1.0 && (dirCap-otherPendAsk) >= 12.0 && (lb-fairLt)/lb*10000.0 >= snipeThresh && macroTrendBps <= 3.0 && trendBps <= 1.5 && trendBps >= -5.5 && vel3sBps < 0.4 && obi <= -0.22
+	staleSnipeBuy := sym == "BTC" && coinActive && volSafe && !inCool && spBps <= 0.65 && now.After(st.dropCoolUntil) && math.Abs(posUSD) < 1.0 && (dirCap-otherPendBid) >= 12.0 && (fairLt-la)/la*10000.0 >= snipeThresh && macroTrendBps >= -4.0 && trendBps >= -2.0 && trendBps <= 8.5 && vel3sBps > -0.4 && obi >= 0.20
+	staleSnipeSell := sym == "BTC" && coinActive && volSafe && !inCool && spBps <= 0.65 && now.After(st.pumpCoolUntil) && math.Abs(posUSD) < 1.0 && (dirCap-otherPendAsk) >= 12.0 && (lb-fairLt)/lb*10000.0 >= snipeThresh && macroTrendBps <= 4.0 && trendBps <= 2.0 && trendBps >= -8.5 && vel3sBps < 0.4 && obi <= -0.20
 	btcTrendBuy := staleSnipeBuy
 	btcTrendSell := staleSnipeSell
 
@@ -1081,7 +1081,7 @@ func manageCoin(sym string) {
 	}
 	logMu.Unlock()
 	if shouldLog {
-		fmt.Printf("[%s] GO-TOKYO v54 Eq=$%.4f | %s Pos=%.5f | Net=$%.2f | Rng60s=%.1fbps | Mac=%.1fbps | Strk=%d | Prob=%v | OBI=%.2f\n",
+		fmt.Printf("[%s] GO-TOKYO v55 Eq=$%.4f | %s Pos=%.5f | Net=$%.2f | Rng60s=%.1fbps | Mac=%.1fbps | Strk=%d | Prob=%v | OBI=%.2f\n",
 			now.Format("15:04:05"), float64(eqNow.Load())/1e6, sym, pos, netUSD, st.range60sBps, macroTrendBps, streakWins.Load(), probationForce.Load(), obi)
 	}
 }
