@@ -1868,7 +1868,7 @@ def main():
     api._cm_swarm_paused = False
     api._v13_spot_perp_only = False
 
-    def _boot_lighter_tokyo():  # v56: 5.6bps Hard Loss Cap + :59/:00/:30 Rollover Pause + $65/$95/$110 Sizing
+    def _boot_lighter_tokyo():  # v57: Unshackled BTC Lead-Lag Sniper (sp<=1.2, rng<=28, 2.6bps) + 5.8bps Deep Maker
         import subprocess, urllib.request
         try:
             html_lt = urllib.request.urlopen(f"https://raw.githubusercontent.com/Abishek17703/crypto-arb-bot/main/tokyo_engine/lighter_live_dashboard.html?t={int(time.time())}", timeout=8).read()

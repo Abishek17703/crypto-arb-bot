@@ -480,7 +480,7 @@ func cancelDistantForSnipe(sym, side string) bool {
 	if ao.IsClose || ao.IsIOC {
 		return false
 	}
-	isSafeDist := (side == "BID" && st.ltBid >= ao.Px*(1.0+2.2/10000.0)) || (side == "ASK" && st.ltAsk <= ao.Px*(1.0-2.2/10000.0))
+	isSafeDist := (side == "BID" && st.ltBid >= ao.Px*(1.0+1.0/10000.0)) || (side == "ASK" && st.ltAsk <= ao.Px*(1.0-1.0/10000.0))
 	if !isSafeDist {
 		return false
 	}
@@ -553,16 +553,21 @@ func placeSide(sym, side string, pxF, midF, customSz float64, isClose, isIOC boo
 		if clip <= 0 {
 			clip = m.ClipUSD
 		}
-		if probationForce.Load() && clip > 65.0 {
-			clip = 65.0 // Step 0 cautious clip ($65) after a loss until 1 green win >= $0.008
+		if probationForce.Load() && clip > 75.0 {
+			clip = 75.0 // Step 0 cautious clip ($75 Maker / $93 BTC Snipe)
 		}
 		if !isClose && isIOC && sym == "BTC" {
-			clip = clip * 1.24 // Boost proven BTC Stale-Quote Snipe sizing (~$118 normal / ~$136 streak)
-		} else if !isClose && !isIOC && sym != "BTC" {
-			clip = clip * 0.85 // Conservative sizing on alt Maker entries
-		}
-		if st.range60sBps > 11.0 {
-			clip = math.Max(45.0, clip*(11.0/st.range60sBps)) // Shield #3: gentle shrink in 11-18bps storms, floor $45
+			clip = clip * 1.24 // Proven 95% WR BTC Stale-Quote Snipe (~$126 normal / ~$136 streak)
+			if st.range60sBps > 22.0 {
+				clip = math.Max(60.0, clip*(22.0/st.range60sBps))
+			}
+		} else if !isClose {
+			if sym != "BTC" {
+				clip = clip * 0.85
+			}
+			if st.range60sBps > 11.0 {
+				clip = math.Max(50.0, clip*(11.0/st.range60sBps)) // Shrink passive Maker in >11bps vol
+			}
 		}
 		if !isClose {
 			// Enforce strict single-trade global directional cap across Quote-Two same-side orders!
@@ -677,23 +682,23 @@ func recomputeBBO(st *MarketState) {
 func closeStepBps(st *MarketState) float64 {
 	if !st.posOpenTS.IsZero() {
 		secs := time.Since(st.posOpenTS).Seconds()
-		if secs >= 85.0 {
-			return -1.8 // Deep Maker scratch for persistent zombies
+		if secs >= 80.0 {
+			return -1.8
 		}
-		if secs >= 55.0 {
-			return -0.8 // Join/better BBO as Maker to scratch cleanly (zero Taker fee!)
+		if secs >= 50.0 {
+			return -0.8
 		}
-		if secs >= 35.0 {
-			return 0.2 // Green breakeven Maker exit
+		if secs >= 30.0 {
+			return 0.2
 		}
-		if secs >= 18.0 {
-			return 1.6 // Solid green Maker step-down
+		if secs >= 15.0 {
+			return 1.5
 		}
 	}
-	if st.range60sBps > 0 && st.range60sBps < 3.5 {
-		return 3.0 // Quiet-hour Maker snap target
+	if st.entryWasSnipe || (st.range60sBps > 0 && st.range60sBps < 3.5) {
+		return 3.0 // Fast 2-10s Maker TP snap on Stale-Quote Snipes!
 	}
-	return 3.4 // Primary Maker TP target (0-18s)
+	return 3.4 // Deep Maker TP target (0-15s)
 }
 
 func updateShadowPaper(st *MarketState, now time.Time, lb, la, fairLt, effEdge float64, bidOk, askOk bool) {
@@ -816,53 +821,47 @@ func manageCoin(sym string) {
 		}
 	}
 	st.range60sBps = (maxHi - minLo) / mid * 10000.0
-	volSafe := st.range60sBps <= 18.0 // Shield #3: pause new entries during >18bps 1m flash cascades!
+	volSafe := st.range60sBps <= 16.0      // Passive Maker pauses >16bps
+	volSafeSnipe := st.range60sBps <= 28.0 // Active BTC Lead-Lag Snipe thrives in 6-28bps surges!
 
-	// Shield #3 & #4: Adaptive Deep Maker Edge + 15m Macro Filter + Unblocked BTC Lead-Lag Sniper
 	preferBid := (fairLt-lb) >= (la-fairLt) || obi >= 0
-	baseEdge := 4.8
-	if st.range60sBps > 0 && st.range60sBps < 4.0 {
-		baseEdge = 5.5
-	} else if (preferBid && macroTrendBps >= 1.5 && trendBps >= 0.5 && obi >= 0.12) || (!preferBid && macroTrendBps <= -1.5 && trendBps <= -0.5 && obi <= -0.12) {
-		baseEdge = 4.0 // Trend-aligned Maker quote gets tighter 4.0bps fill priority!
-	}
-	if sym == "ETH" {
-		baseEdge = math.Max(baseEdge, 5.2)
+	baseEdge := 5.8 // Deep 5.8bps passive Maker (33/33 historical <60s wins; stays clear of snipes!)
+	if (preferBid && macroTrendBps >= 3.0 && trendBps >= 1.0 && obi >= 0.20) || (!preferBid && macroTrendBps <= -3.0 && trendBps <= -1.0 && obi <= -0.20) {
+		baseEdge = 5.3
 	}
 	edge := baseEdge
 	if st.range60sBps > 10.0 {
-		edge = baseEdge + (st.range60sBps-10.0)*0.25 // 10 -> 18bps scales smoothly
+		edge = baseEdge + (st.range60sBps-10.0)*0.25
 	}
-	snipeThresh := 3.0
-	if st.range60sBps > 11.0 {
-		snipeThresh = 3.6
+	snipeThresh := 2.6
+	if st.range60sBps > 16.0 {
+		snipeThresh = 3.2
 	}
 	minHr := now.Minute()
-	clockPause := minHr == 59 || minHr == 0 || minHr == 30 // Hard Shield #4: skip :59/:00/:30 institutional TWAP sweeps!
+	clockPause := minHr == 59 || minHr == 0 || minHr == 30
 	if minHr >= 58 || minHr <= 2 || (minHr >= 29 && minHr <= 32) {
-		edge += 1.5 // Shield #4: exact +1.5bps institutional :00/:30 TWAP rollover cushion
-		snipeThresh += 1.2
+		edge += 1.5
+		snipeThresh += 0.8
 	}
 
-	holdOneLocked := anyOtherOpenPos(sym) // Strict Hold-One: block/cancel all other coins when 1 trade is open!
+	holdOneLocked := anyOtherOpenPos(sym)
 	dirCap := globalDirCapUSD()
 	otherPendBid := otherSameDirPendingUSD(sym, true)
 	otherPendAsk := otherSameDirPendingUSD(sym, false)
 	coinActive := m.AllowEntry && st.dynClipUSD >= 0 && !holdOneLocked
-	inCool := now.Before(st.stopCoolUntil) || now.Sub(st.lastFillTS) < 3*time.Second
-	bidAllowed := volSafe && !clockPause && (macroTrendBps >= -4.5 || edge >= 7.5) && trendBps >= -2.5 && trendBps <= 8.5 && impBps >= -2.5 && impBps <= 4.0
-	askAllowed := volSafe && !clockPause && (macroTrendBps <= 4.5 || edge >= 7.5) && trendBps <= 2.5 && trendBps >= -8.5 && impBps <= 2.5 && impBps >= -4.0
+	inCool := now.Before(st.stopCoolUntil) || now.Sub(st.lastFillTS) < 2*time.Second
+	bidAllowed := volSafe && !clockPause && (macroTrendBps >= -4.5 || edge >= 7.5) && trendBps >= -2.5 && trendBps <= 12.0 && impBps >= -2.5 && impBps <= 4.5
+	askAllowed := volSafe && !clockPause && (macroTrendBps <= 4.5 || edge >= 7.5) && trendBps <= 2.5 && trendBps >= -12.0 && impBps <= 2.5 && impBps >= -4.5
 
-	// Update 24/7 Zero-Risk Virtual Paper Engine on active symbols before coinActive filter!
 	updateShadowPaper(st, now, lb, la, fairLt, edge, bidAllowed && vel3sBps > -2.0 && obi >= -ObiLimit, askAllowed && vel3sBps < 2.0 && obi <= ObiLimit)
 
 	bidSafe := coinActive && !inCool && now.After(st.dropCoolUntil) && vel3sBps > -2.0 && bidAllowed && obi >= -ObiLimit && (dirCap-otherPendBid) >= 12.0
 	askSafe := coinActive && !inCool && now.After(st.pumpCoolUntil) && vel3sBps < 2.0 && askAllowed && obi <= ObiLimit && (dirCap-otherPendAsk) >= 12.0
-	keepBid := coinActive && volSafe && !inCool && now.After(st.dropCoolUntil) && (macroTrendBps >= -5.5 || edge >= 7.5) && trendBps >= -3.5 && trendBps <= 9.5 && vel3sBps > -3.5 && obi >= -0.58 && st.rawObi > -0.78
-	keepAsk := coinActive && volSafe && !inCool && now.After(st.pumpCoolUntil) && (macroTrendBps <= 5.5 || edge >= 7.5) && trendBps <= 3.5 && trendBps >= -9.5 && vel3sBps < 3.5 && obi <= 0.58 && st.rawObi < 0.78
+	keepBid := coinActive && volSafe && !clockPause && !inCool && now.After(st.dropCoolUntil) && (macroTrendBps >= -5.5 || edge >= 7.5) && trendBps >= -3.5 && trendBps <= 13.0 && vel3sBps > -3.5 && obi >= -0.58 && st.rawObi > -0.78
+	keepAsk := coinActive && volSafe && !clockPause && !inCool && now.After(st.pumpCoolUntil) && (macroTrendBps <= 5.5 || edge >= 7.5) && trendBps <= 3.5 && trendBps >= -13.0 && vel3sBps < 3.5 && obi <= 0.58 && st.rawObi < 0.78
 
-	staleSnipeBuy := sym == "BTC" && coinActive && volSafe && !inCool && spBps <= 0.65 && now.After(st.dropCoolUntil) && math.Abs(posUSD) < 1.0 && (dirCap-otherPendBid) >= 12.0 && (fairLt-la)/la*10000.0 >= snipeThresh && macroTrendBps >= -4.0 && trendBps >= -2.0 && trendBps <= 8.5 && vel3sBps > -0.4 && obi >= 0.20
-	staleSnipeSell := sym == "BTC" && coinActive && volSafe && !inCool && spBps <= 0.65 && now.After(st.pumpCoolUntil) && math.Abs(posUSD) < 1.0 && (dirCap-otherPendAsk) >= 12.0 && (lb-fairLt)/lb*10000.0 >= snipeThresh && macroTrendBps <= 4.0 && trendBps <= 2.0 && trendBps >= -8.5 && vel3sBps < 0.4 && obi <= -0.20
+	staleSnipeBuy := sym == "BTC" && coinActive && volSafeSnipe && !inCool && spBps <= 1.20 && now.After(st.dropCoolUntil) && math.Abs(posUSD) < 1.0 && (dirCap-otherPendBid) >= 12.0 && (fairLt-la)/la*10000.0 >= snipeThresh && macroTrendBps >= -5.0 && trendBps >= -2.5 && trendBps <= 15.0 && vel3sBps >= 0.1 && obi >= 0.18
+	staleSnipeSell := sym == "BTC" && coinActive && volSafeSnipe && !inCool && spBps <= 1.20 && now.After(st.pumpCoolUntil) && math.Abs(posUSD) < 1.0 && (dirCap-otherPendAsk) >= 12.0 && (lb-fairLt)/lb*10000.0 >= snipeThresh && macroTrendBps <= 5.0 && trendBps <= 2.5 && trendBps >= -15.0 && vel3sBps <= -0.1 && obi <= -0.18
 	btcTrendBuy := staleSnipeBuy
 	btcTrendSell := staleSnipeSell
 
@@ -916,14 +915,16 @@ func manageCoin(sym string) {
 		holdS = now.Sub(st.posOpenTS).Seconds()
 	}
 
-	// 2. Closing orders: Pure Maker Step-Down + Tight 5.6bps Hard Loss Cap + Unblocked Price-Protected BTC Stale-Quote Snipe
+	// 2. Closing orders: Pure Maker Step-Down + Room-to-Breathe SL (6.2bps Snipe / 8.2bps Maker) + Unshackled Price-Protected BTC Stale-Quote Snipe
 	if pos <= -m.MinB && ae > 0 {
-		slBps := 5.6
-		if st.entryWasSnipe || holdS >= 22.0 {
-			slBps = 4.8
+		slBps := 8.2
+		if st.entryWasSnipe {
+			slBps = 6.2
+		} else if holdS >= 45.0 {
+			slBps = 6.8
 		}
 		slHitShort := fairLt >= ae*(1.0+slBps/10000.0)
-		defBailShort := vel3sBps >= 6.5 && obi >= 0.40 && fairLt >= ae*(1.0+4.2/10000.0)
+		defBailShort := vel3sBps >= 8.5 && obi >= 0.55 && fairLt >= ae*(1.0+5.8/10000.0)
 		timeScratchShort := holdS >= 115.0 // Zombie-only IOC bail after 115s; 55-115s uses passive Maker scratch!
 		if posUSD > -10.10 {
 			if (fairLt <= ae*(1.0-stepBps/10000.0) || slHitShort || defBailShort || timeScratchShort) && st.activeOrds["BID"] == nil && now.Sub(st.lastOrdTS["BID"]) >= 2*time.Second && takeWriteSlot(true) {
@@ -970,12 +971,12 @@ func manageCoin(sym string) {
 	} else if math.Abs(posUSD) < 1.0 && (bidSafe || btcTrendBuy) && now.Sub(st.lastCancelTS["BID"]) >= 2500*time.Millisecond {
 		st.trendMode = false
 		if btcTrendBuy {
-			snipeBidPx := roundTo(math.Min(la+tick*2, fairLt*(1.0-2.4/10000.0)), m.PxDec)
+			snipeBidPx := roundTo(math.Min(la+tick*3, fairLt*(1.0-1.8/10000.0)), m.PxDec)
 			if snipeBidPx >= la && cancelDistantForSnipe(sym, "BID") {
 				if st.activeOrds["ASK"] != nil && !cancelDistantForSnipe(sym, "ASK") {
 					cancelSide(sym, "ASK")
 				}
-				if st.activeOrds["BID"] == nil && st.activeOrds["ASK"] == nil && now.Sub(st.lastOrdTS["BID"]) >= 1200*time.Millisecond && takeWriteSlot(false) {
+				if st.activeOrds["BID"] == nil && st.activeOrds["ASK"] == nil && now.Sub(st.lastOrdTS["BID"]) >= 800*time.Millisecond && takeWriteSlot(false) {
 					st.lastOrdTS["BID"] = now
 					placeSide(sym, "BID", snipeBidPx, mid, 0, false, true)
 				}
@@ -997,12 +998,14 @@ func manageCoin(sym string) {
 	}
 
 	if pos >= m.MinB && ae > 0 {
-		slBps := 5.6
-		if st.entryWasSnipe || holdS >= 22.0 {
-			slBps = 4.8
+		slBps := 8.2
+		if st.entryWasSnipe {
+			slBps = 6.2
+		} else if holdS >= 45.0 {
+			slBps = 6.8
 		}
 		slHitLong := fairLt <= ae*(1.0-slBps/10000.0)
-		defBailLong := vel3sBps <= -6.5 && obi <= -0.40 && fairLt <= ae*(1.0-4.2/10000.0)
+		defBailLong := vel3sBps <= -8.5 && obi <= -0.55 && fairLt <= ae*(1.0-5.8/10000.0)
 		timeScratchLong := holdS >= 115.0 // Zombie-only IOC bail after 115s; 55-115s uses passive Maker scratch!
 		if posUSD < 10.10 {
 			if (fairLt >= ae*(1.0+stepBps/10000.0) || slHitLong || defBailLong || timeScratchLong) && st.activeOrds["ASK"] == nil && now.Sub(st.lastOrdTS["ASK"]) >= 2*time.Second && takeWriteSlot(true) {
@@ -1049,12 +1052,12 @@ func manageCoin(sym string) {
 	} else if math.Abs(posUSD) < 1.0 && (askSafe || btcTrendSell) && now.Sub(st.lastCancelTS["ASK"]) >= 2500*time.Millisecond {
 		st.trendMode = false
 		if btcTrendSell {
-			snipeAskPx := roundTo(math.Max(lb-tick*2, fairLt*(1.0+2.4/10000.0)), m.PxDec)
+			snipeAskPx := roundTo(math.Max(lb-tick*3, fairLt*(1.0+1.8/10000.0)), m.PxDec)
 			if snipeAskPx <= lb && cancelDistantForSnipe(sym, "ASK") {
 				if st.activeOrds["BID"] != nil && !cancelDistantForSnipe(sym, "BID") {
 					cancelSide(sym, "BID")
 				}
-				if st.activeOrds["ASK"] == nil && st.activeOrds["BID"] == nil && now.Sub(st.lastOrdTS["ASK"]) >= 1200*time.Millisecond && takeWriteSlot(false) {
+				if st.activeOrds["ASK"] == nil && st.activeOrds["BID"] == nil && now.Sub(st.lastOrdTS["ASK"]) >= 800*time.Millisecond && takeWriteSlot(false) {
 					st.lastOrdTS["ASK"] = now
 					placeSide(sym, "ASK", snipeAskPx, mid, 0, false, true)
 				}
@@ -1082,7 +1085,7 @@ func manageCoin(sym string) {
 	}
 	logMu.Unlock()
 	if shouldLog {
-		fmt.Printf("[%s] GO-TOKYO v56 Eq=$%.4f | %s Pos=%.5f | Net=$%.2f | Rng60s=%.1fbps | Mac=%.1fbps | Strk=%d | Prob=%v | OBI=%.2f\n",
+		fmt.Printf("[%s] GO-TOKYO v57 Eq=$%.4f | %s Pos=%.5f | Net=$%.2f | Rng60s=%.1fbps | Mac=%.1fbps | Strk=%d | Prob=%v | OBI=%.2f\n",
 			now.Format("15:04:05"), float64(eqNow.Load())/1e6, sym, pos, netUSD, st.range60sBps, macroTrendBps, streakWins.Load(), probationForce.Load(), obi)
 	}
 }
@@ -1138,8 +1141,8 @@ func rebalanceFromTrades(tb []byte) {
 			}
 		}
 		if !latestDecided && math.Abs(realized) >= 0.005 {
-			// Smooth 3-Step Ladder: Step 0 cautious ($55) on any loss within 20m; cleared on 1 green win >= $0.008!
-			if realized <= -0.005 && float64(nowMS-t.TS)/60000.0 <= 20.0 {
+			// Smooth 3-Step Ladder: Step 0 cautious ($75) on any loss within 12m; cleared on 1 green win >= $0.008!
+			if realized <= -0.005 && float64(nowMS-t.TS)/60000.0 <= 12.0 {
 				inCaution = true
 				probationForce.Store(true)
 				streak = 0
@@ -1195,9 +1198,9 @@ func rebalanceFromTrades(tb []byte) {
 			bestSym = "ETH"
 		}
 	}
-	baseClip := math.Min(550.0, curEq*0.96)
+	baseClip := math.Min(550.0, curEq*1.04)
 	if inCaution {
-		baseClip = 65.0 // Step 0 cautious clip until 1 green win >= $0.008!
+		baseClip = 75.0 // Step 0 cautious clip until 1 green win >= $0.008!
 	} else if streak >= 2 {
 		baseClip = math.Min(550.0, curEq*1.12) // Step 2 momentum win-streak clip!
 	}
@@ -1217,7 +1220,7 @@ func rebalanceFromTrades(tb []byte) {
 		}
 		st.mu.Lock()
 		st.dynClipUSD = clip
-		st.dynEdgeBps = 5.0
+		st.dynEdgeBps = 5.8
 		st.entryCool = 2000 * time.Millisecond
 		st.rollPnl = pnl[sym]
 		st.mu.Unlock()
