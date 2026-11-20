@@ -838,24 +838,24 @@ func manageCoin(sym string) {
 	volSafeSnipe := st.range60sBps <= 28.0 // Active BTC Lead-Lag Snipe thrives in 6-28bps surges!
 
 	preferBid := (fairLt-lb) >= (la-fairLt) || obi >= 0
-	baseEdge := 5.3 // Proven calm Maker cushion (with 2.2bps early Anti-Pickoff + Peak Winner Lock)
+	baseEdge := 4.3 // Balanced 4.3bps Maker cushion (with 1.35bps Anti-Pickoff + Peak Winner Lock)
 	if st.range60sBps > 0 && st.range60sBps < 3.8 {
-		baseEdge = 5.7 // Extra thin-book cushion in quiet minutes
+		baseEdge = 4.8 // Extra thin-book cushion in quiet minutes
 	} else if (preferBid && macroTrendBps >= 2.0 && macroTrendBps <= 24.0 && trendBps >= 0.5 && trendBps <= 5.0 && obi >= 0.20) || (!preferBid && macroTrendBps <= -2.0 && macroTrendBps >= -24.0 && trendBps <= -0.5 && trendBps >= -5.0 && obi <= -0.20) {
-		baseEdge = 4.9 // High-conviction non-exhausted trend-aligned Maker
+		baseEdge = 4.0 // High-conviction non-exhausted trend-aligned Maker
 	}
 	if sym == "ETH" {
-		baseEdge = math.Max(baseEdge, 5.6)
+		baseEdge = math.Max(baseEdge, 5.2)
 	}
 	edge := baseEdge
 	if st.range60sBps > 10.0 {
 		edge = baseEdge + (st.range60sBps-10.0)*0.25
 	}
-	snipeMaxSp := 0.90
-	snipeThresh := 3.3 // Proven 18/18 (<25s) high-conviction BTC lead-lag threshold!
-	minEdgeGuarantee := 2.2
+	snipeMaxSp := 0.95
+	snipeThresh := 2.9 // Balanced 2.9bps BTC lead-lag threshold with strict exhaustion cap!
+	minEdgeGuarantee := 1.9
 	if st.range60sBps > 16.0 {
-		snipeThresh = 3.8
+		snipeThresh = 3.4
 	}
 	minHr := now.Minute()
 	clockPause := minHr == 59 || minHr == 0 || minHr == 30
@@ -871,25 +871,25 @@ func manageCoin(sym string) {
 	coinActive := m.AllowEntry && st.dynClipUSD >= 0 && !holdOneLocked
 	makerAllowed := coinActive && st.makerActive
 	inCool := now.Before(st.stopCoolUntil) || now.Sub(st.lastFillTS) < 3*time.Second
-	// Exhaustion-capped directional gate: block falling knives AND overextended blow-off tops/bottoms!
-	bidAllowed := volSafe && !clockPause && macroTrendBps >= -4.0 && macroTrendBps <= 28.0 && trendBps >= -2.2 && trendBps <= 5.5 && impBps >= -2.5 && impBps <= 3.5
-	askAllowed := volSafe && !clockPause && macroTrendBps <= 4.0 && macroTrendBps >= -28.0 && trendBps <= 2.2 && trendBps >= -5.5 && impBps <= 2.5 && impBps >= -3.5
+	// Exhaustion-capped directional gate: allow healthy bounce/pullback turns (±10bps Mac) while blocking blow-off peaks!
+	bidAllowed := volSafe && !clockPause && macroTrendBps >= -10.0 && macroTrendBps <= 28.0 && trendBps >= -2.2 && trendBps <= 5.5 && impBps >= -2.5 && impBps <= 3.5
+	askAllowed := volSafe && !clockPause && macroTrendBps <= 10.0 && macroTrendBps >= -28.0 && trendBps <= 2.2 && trendBps >= -5.5 && impBps <= 2.5 && impBps >= -3.5
 
 	updateShadowPaper(st, now, lb, la, fairLt, edge, bidAllowed && vel3sBps > -2.0 && obi >= -ObiLimit, askAllowed && vel3sBps < 2.0 && obi <= ObiLimit)
 
 	bidSafe := makerAllowed && !inCool && now.After(st.dropCoolUntil) && vel3sBps > -2.0 && bidAllowed && obi >= -ObiLimit && (dirCap-otherPendBid) >= 12.0
 	askSafe := makerAllowed && !inCool && now.After(st.pumpCoolUntil) && vel3sBps < 2.0 && askAllowed && obi <= ObiLimit && (dirCap-otherPendAsk) >= 12.0
-	keepBid := makerAllowed && volSafe && !clockPause && !inCool && now.After(st.dropCoolUntil) && macroTrendBps >= -5.5 && macroTrendBps <= 32.0 && trendBps >= -3.5 && trendBps <= 6.5 && vel3sBps > -3.5 && obi >= -0.58 && st.rawObi > -0.78
-	keepAsk := makerAllowed && volSafe && !clockPause && !inCool && now.After(st.pumpCoolUntil) && macroTrendBps <= 5.5 && macroTrendBps >= -32.0 && trendBps <= 3.5 && trendBps >= -6.5 && vel3sBps < 3.5 && obi <= 0.58 && st.rawObi < 0.78
+	keepBid := makerAllowed && volSafe && !clockPause && !inCool && now.After(st.dropCoolUntil) && macroTrendBps >= -12.0 && macroTrendBps <= 32.0 && trendBps >= -3.5 && trendBps <= 6.5 && vel3sBps > -3.5 && obi >= -0.58 && st.rawObi > -0.78
+	keepAsk := makerAllowed && volSafe && !clockPause && !inCool && now.After(st.pumpCoolUntil) && macroTrendBps <= 12.0 && macroTrendBps >= -32.0 && trendBps <= 3.5 && trendBps >= -6.5 && vel3sBps < 3.5 && obi <= 0.58 && st.rawObi < 0.78
 
-	// BTC-ONLY Stale-Quote Snipe with strict exhaustion cap (blocks 08:47 & 08:50 peak chasing while catching 08:44/08:49/08:50 fresh impulses!)
-	staleSnipeBuy := sym == "BTC" && coinActive && volSafeSnipe && !clockPause && !inCool && spBps <= snipeMaxSp && now.After(st.dropCoolUntil) && math.Abs(posUSD) < 1.0 && (dirCap-otherPendBid) >= 12.0 && (fairLt-la)/la*10000.0 >= snipeThresh && macroTrendBps >= -4.0 && macroTrendBps <= 28.0 && trendBps >= -1.8 && trendBps <= 5.5 && impBps >= -1.2 && impBps <= 3.6 && vel3sBps >= 0.15 && vel3sBps <= 4.8 && obi >= 0.22
-	staleSnipeSell := sym == "BTC" && coinActive && volSafeSnipe && !clockPause && !inCool && spBps <= snipeMaxSp && now.After(st.pumpCoolUntil) && math.Abs(posUSD) < 1.0 && (dirCap-otherPendAsk) >= 12.0 && (lb-fairLt)/lb*10000.0 >= snipeThresh && macroTrendBps <= 4.0 && macroTrendBps >= -28.0 && trendBps <= 1.8 && trendBps >= -5.5 && impBps <= 1.2 && impBps >= -3.6 && vel3sBps <= -0.15 && vel3sBps >= -4.8 && obi <= -0.22
+	// BTC-ONLY Stale-Quote Snipe with strict exhaustion cap (blocks 08:47 & 08:50 peak chasing while catching fresh V-bounces!)
+	staleSnipeBuy := sym == "BTC" && coinActive && volSafeSnipe && !clockPause && !inCool && spBps <= snipeMaxSp && now.After(st.dropCoolUntil) && math.Abs(posUSD) < 1.0 && (dirCap-otherPendBid) >= 12.0 && (fairLt-la)/la*10000.0 >= snipeThresh && macroTrendBps >= -12.0 && macroTrendBps <= 28.0 && trendBps >= -1.8 && trendBps <= 5.5 && impBps >= -1.2 && impBps <= 3.6 && vel3sBps >= 0.15 && vel3sBps <= 4.8 && obi >= 0.20
+	staleSnipeSell := sym == "BTC" && coinActive && volSafeSnipe && !clockPause && !inCool && spBps <= snipeMaxSp && now.After(st.pumpCoolUntil) && math.Abs(posUSD) < 1.0 && (dirCap-otherPendAsk) >= 12.0 && (lb-fairLt)/lb*10000.0 >= snipeThresh && macroTrendBps <= 12.0 && macroTrendBps >= -28.0 && trendBps <= 1.8 && trendBps >= -5.5 && impBps <= 1.2 && impBps >= -3.6 && vel3sBps <= -0.15 && vel3sBps >= -4.8 && obi <= -0.20
 	btcTrendBuy := staleSnipeBuy
 	btcTrendSell := staleSnipeSell
 
 	// 1. Manage resting orders: ModifyOrder (1 write) or Quota-Free 0ms L2CancelOrder!
-	pickoffBuf := math.Max(2.2, edge*0.42) // Pull resting Maker 2.2bps early when Binance moves toward it!
+	pickoffBuf := 1.35 // Fix over-cancel starvation: pull only if Binance moves within 1.35bps!
 	for _, side := range []string{"BID", "ASK"} {
 		ao := st.activeOrds[side]
 		if ao == nil {
@@ -1118,7 +1118,7 @@ func manageCoin(sym string) {
 	}
 	logMu.Unlock()
 	if shouldLog {
-		fmt.Printf("[%s] GO-TOKYO v59 Eq=$%.4f | %s Pos=%.5f | Net=$%.2f | Rng60s=%.1fbps | Mac=%.1fbps | Strk=%d | Prob=%v | OBI=%.2f\n",
+		fmt.Printf("[%s] GO-TOKYO v60 Eq=$%.4f | %s Pos=%.5f | Net=$%.2f | Rng60s=%.1fbps | Mac=%.1fbps | Strk=%d | Prob=%v | OBI=%.2f\n",
 			now.Format("15:04:05"), float64(eqNow.Load())/1e6, sym, pos, netUSD, st.range60sBps, macroTrendBps, streakWins.Load(), probationForce.Load(), obi)
 	}
 }
@@ -1255,7 +1255,7 @@ func rebalanceFromTrades(tb []byte) {
 		st.mu.Lock()
 		st.dynClipUSD = clip
 		st.makerActive = isMakerSym
-		st.dynEdgeBps = 5.3
+		st.dynEdgeBps = 4.3
 		st.entryCool = 2000 * time.Millisecond
 		st.rollPnl = pnl[sym]
 		st.mu.Unlock()
@@ -1885,7 +1885,7 @@ func main() {
 	time.Sleep(1500 * time.Millisecond)
 	cancelAll()
 	seedBinanceHistory()
-	fmt.Printf("GO-TOKYO v59 LIVE | 1:1.25 Payoff + Exhaustion-Capped BTC Snipe/Maker + Global IOC Lock | Stop=$%.2f\n", StopEqUSD)
+	fmt.Printf("GO-TOKYO v60 LIVE | Fix Starvation (1.35bps Pickoff + 4.3bps Maker + 2.9bps Snipe + Winner Lock) | Stop=$%.2f\n", StopEqUSD)
 	go syncAccountLoop()
 	runBnWS()
 }
