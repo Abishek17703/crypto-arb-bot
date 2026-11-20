@@ -1106,6 +1106,7 @@ func manageCoin(sym string) {
 	keepAsk := makerAllowed && volSafe && !clockPause && !inCool && now.After(st.pumpCoolUntil) && macroTrendBps <= 55.0 && macroTrendBps >= -105.0 && mom5mBps <= 14.5 && mom5mBps >= -25.0 && vel3sBps < 4.2 && obi <= 0.55
 
 	_ = fObi
+	_ = impBps
 	_ = minEdgeGuarantee
 	_ = snipeMaxSp
 	_ = snipeThresh
