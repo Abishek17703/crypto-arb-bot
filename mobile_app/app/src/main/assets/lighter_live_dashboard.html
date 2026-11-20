@@ -378,11 +378,11 @@
         const elapsedMs = nowTs - POS_TIMERS[sym].ts;
         const entry = parseFloat(p.avg_entry_price || 0);
         const usd = absSz * entry;
-        // v53 strict 5-shield decay: 0-16s +3.5bps, 16-25s +1.4bps, 25-36s 0.0bps BE, 36-40s -0.8bps, 40s Time-Stop
-        const stepBps = elapsedMs >= 36000 ? -0.8 : (elapsedMs >= 25000 ? 0.0 : (elapsedMs >= 16000 ? 1.4 : 3.5));
+        // v54 Zero-Bleed Maker decay: 0-18s +3.4bps, 18-35s +1.6bps, 35-55s +0.2bps BE, 55-85s -0.8bps, 85s+ -1.8bps (115s zombie)
+        const stepBps = elapsedMs >= 85000 ? -1.8 : (elapsedMs >= 55000 ? -0.8 : (elapsedMs >= 35000 ? 0.2 : (elapsedMs >= 18000 ? 1.6 : 3.4)));
         const tgt = (absSz > 0 && entry > 0) ? (sz > 0 ? entry * (1 + stepBps / 10000) : entry * (1 - stepBps / 10000)) : null;
         const cdTxt = absSz > 0
-          ? (elapsedMs < 25000 ? `⏳${fmtAgo(25000 - elapsedMs)} BE` : (elapsedMs < 40000 ? `⏳${fmtAgo(40000 - elapsedMs)} STOP` : "EXIT"))
+          ? (elapsedMs < 35000 ? `⏳${fmtAgo(35000 - elapsedMs)} BE` : (elapsedMs < 115000 ? `⏳${fmtAgo(115000 - elapsedMs)} SCRATCH` : "EXIT"))
           : `⏳${fmtAgo(Math.max(0, 35000 - (elapsedMs % 35000)))}`;
         const szTxt = absSz > 0 ? `${fmtQty(absSz, sym)}<span class="usd-sub">($${usd.toFixed(1)})</span>` : "0";
         html += `<tr>
