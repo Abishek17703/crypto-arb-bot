@@ -783,7 +783,7 @@ func retMinBps(st *MarketState, curMin, minsAgo int64, mid, fallbackBps float64)
 	return fallbackBps
 }
 
-func wavePullbackSignal(st *MarketState, curMin int64, mid, eu, ef, fallbackMacro float64) (bool, bool) {
+func wavePullbackSignal(st *MarketState, curMin int64, mid, eu, ef, vel3sBps, fallbackMacro float64) (bool, bool) {
 	if mid <= 0 {
 		return false, false
 	}
@@ -826,8 +826,8 @@ func wavePullbackSignal(st *MarketState, curMin int64, mid, eu, ef, fallbackMacr
 	if cnt10 < 3 {
 		return false, false
 	}
-	waveSell := r15 >= -110.0 && r15 <= -10.0 && r45 <= -12.0 && (hi4-lo10)/mid*10000.0 >= 3.5 && (hi4-lo10)/mid*10000.0 <= 28.0 && (hi4-mid)/mid*10000.0 >= 1.5 && r1 <= -1.0 && (eu == 0 || ef == 0 || eu <= ef)
-	waveBuy := r15 >= 10.0 && r15 <= 110.0 && r45 >= 12.0 && (hi10-lo4)/mid*10000.0 >= 3.5 && (hi10-lo4)/mid*10000.0 <= 28.0 && (mid-lo4)/mid*10000.0 >= 1.5 && r1 >= 1.0 && (eu == 0 || ef == 0 || eu >= ef)
+	waveSell := r15 >= -110.0 && r15 <= -10.0 && r45 <= -12.0 && (hi4-lo10)/mid*10000.0 >= 3.5 && (hi4-lo10)/mid*10000.0 <= 28.0 && (hi4-mid)/mid*10000.0 >= 1.5 && (hi4-mid)/mid*10000.0 <= 8.5 && r1 <= -1.0 && vel3sBps <= -0.35 && (eu == 0 || ef == 0 || eu <= ef)
+	waveBuy := r15 >= 10.0 && r15 <= 110.0 && r45 >= 12.0 && (hi10-lo4)/mid*10000.0 >= 3.5 && (hi10-lo4)/mid*10000.0 <= 28.0 && (mid-lo4)/mid*10000.0 >= 1.5 && (mid-lo4)/mid*10000.0 <= 8.5 && r1 >= 1.0 && vel3sBps >= 0.35 && (eu == 0 || ef == 0 || eu >= ef)
 	return waveBuy, waveSell
 }
 
@@ -1091,7 +1091,7 @@ func manageCoin(sym string) {
 	otherPendAsk := otherSameDirPendingUSD(sym, false)
 	coinActive := m.AllowEntry && st.dynClipUSD >= 0 && !holdOneLocked && st.basisWarmTicks >= 15 && !remotePaused.Load()
 	makerAllowed := false // Directional passive Makers permanently OFF; pure single-leg True-Green-Lock snipes only!
-	inCool := now.Before(st.stopCoolUntil) || now.Sub(st.lastFillTS) < 60*time.Second
+	inCool := now.Before(st.stopCoolUntil) || now.Sub(st.lastFillTS) < 135*time.Second
 	inCoolBuy := now.Before(st.stopCoolUntil) || now.Sub(st.lastFillTS) < 2*time.Second || (st.lastEntryDir == 1 && now.Sub(st.lastFillTS) < 18*time.Second)
 	inCoolSell := now.Before(st.stopCoolUntil) || now.Sub(st.lastFillTS) < 2*time.Second || (st.lastEntryDir == -1 && now.Sub(st.lastFillTS) < 18*time.Second)
 
@@ -1127,10 +1127,11 @@ func manageCoin(sym string) {
 	_ = ret5mBps
 	_ = ret15mBps
 	waveSym := sym == "BTC" || sym == "XAU"
-	waveBuy, waveSell := wavePullbackSignal(st, curMin, mid, eu, ef, macroTrendBps)
+	waveBuy, waveSell := wavePullbackSignal(st, curMin, mid, eu, ef, vel3sBps, macroTrendBps)
 	twoSidedOk := math.Min(st.ltBidDepthUSD, st.ltAskDepthUSD) >= 1200.0
-	btcTrendBuy := waveSym && coinActive && !inCool && spBps <= 1.15 && twoSidedOk && math.Abs(posUSD) < 1.0 && (dirCap-otherPendBid) >= 100.0 && waveBuy
-	btcTrendSell := waveSym && coinActive && !inCool && spBps <= 1.15 && twoSidedOk && math.Abs(posUSD) < 1.0 && (dirCap-otherPendAsk) >= 100.0 && waveSell
+	calmBar := st.range60sBps <= 24.0
+	btcTrendBuy := waveSym && coinActive && !inCool && spBps <= 1.15 && twoSidedOk && calmBar && math.Abs(posUSD) < 1.0 && (dirCap-otherPendBid) >= 100.0 && waveBuy
+	btcTrendSell := waveSym && coinActive && !inCool && spBps <= 1.15 && twoSidedOk && calmBar && math.Abs(posUSD) < 1.0 && (dirCap-otherPendAsk) >= 100.0 && waveSell
 
 	// 1. Manage resting orders: ModifyOrder (1 write) or Quota-Free 0ms L2CancelOrder!
 	pickoffBuf := 1.25
@@ -2869,7 +2870,7 @@ func main() {
 	time.Sleep(1500 * time.Millisecond)
 	cancelAll()
 	seedBinanceHistory()
-	fmt.Printf("GO-TOKYO v76 LIVE | BTC+XAU Trend-Bounce Wave + Step-Ratchet ($900-$950, 2-Sided Depth Cap) | Stop=$%.2f\n", StopEqUSD)
+	fmt.Printf("GO-TOKYO v77 LIVE | BTC+XAU Wave <=8.5bps + vel3s + 135s Cool ($900-$950) | Stop=$%.2f\n", StopEqUSD)
 	go syncAccountLoop()
 	runBnWS()
 }
