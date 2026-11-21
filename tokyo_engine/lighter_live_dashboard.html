@@ -159,8 +159,8 @@
       </div>
     </div>
 
-    <!-- Tier 2: Recent Windows -->
-    <div class="sec-grid">
+    <!-- Tier 2: Recent Windows & Live Dual-Venue Scanner -->
+    <div class="sec-grid" style="grid-template-columns: 1fr 1.25fr;">
       <div class="sec-card">
         <div class="lbl">Recent Windows</div>
         <div class="tf-row mono">
@@ -169,6 +169,31 @@
           <span>1h <b id="tf1h">$0.000</b></span>
           <span class="desktop-only">24h <b id="tf24h">$0.000</b></span>
         </div>
+      </div>
+      <div class="sec-card">
+        <div class="card-hd" style="margin-bottom:0.25rem;">
+          <div class="lbl">Tokyo Dual-Venue Engine (Leg 1 Lighter 0% &rarr; Leg 2 Binance)</div>
+          <span class="badge mono" id="dnEngineBadge" style="font-size:0.64rem;">SYNCING</span>
+        </div>
+        <div class="sec-sub mono" id="dnScanLine" style="color:var(--text);font-size:0.77rem;">Scanning 164 auto-discovered common contracts...</div>
+      </div>
+    </div>
+
+    <!-- Tier 2.5: Plain-English Dual-Venue Arbitrage Trades (Both Legs + Net PnL) -->
+    <div class="card" style="margin-bottom:1rem;">
+      <div class="card-hd">
+        <div class="lbl">Dual-Venue Hedged Arbitrage Trades (Lighter + Binance Combined)</div>
+        <div class="sec-sub mono" id="dnTradeMeta" style="margin:0;font-size:0.72rem;">Waiting for telemetry...</div>
+      </div>
+      <div class="tbl-wrap" style="max-height:210px;">
+        <table>
+          <thead>
+            <tr><th>Time (IST)</th><th>Coin</th><th>Plain-English Action (Both Legs)</th><th>Size</th><th>Hold</th><th>Combined Net PnL</th><th>Status</th></tr>
+          </thead>
+          <tbody id="dnArbBody">
+            <tr><td colspan="7" style="color:var(--muted);">Loading hedged arbitrage ledger from Tokyo EC2...</td></tr>
+          </tbody>
+        </table>
       </div>
     </div>
 
@@ -540,10 +565,107 @@
       }
     }
 
+    function humanizeLegs(legs) {
+      if (!legs) return { coin: "—", desc: "Hedged Dual-Venue Trade" };
+      let m = legs.match(/^LT_([A-Z0-9]+)_(ASK|BID)\+BN_([A-Z0-9]+)_(BUY|SELL)$/);
+      if (m) {
+        const ltAct = m[2] === "ASK" ? "Sold Lighter (0% Maker)" : "Bought Lighter (0% Maker)";
+        const bnAct = m[4] === "BUY" ? "Bought Binance" : "Sold Binance";
+        return { coin: m[1], desc: `${ltAct} + ${bnAct} (${m[3]})` };
+      }
+      m = legs.match(/^BN_([A-Z0-9]+)_(BUY|SELL)\+LT_(ASK|BID)$/);
+      if (m) {
+        const coin = m[1].replace(/(USDC|USDT)$/, "");
+        const bnAct = m[2] === "BUY" ? "Bought Binance" : "Sold Binance";
+        const ltAct = m[3] === "ASK" ? "Sold Lighter (0%)" : "Bought Lighter (0%)";
+        return { coin, desc: `${bnAct} (${m[1]}) + ${ltAct}` };
+      }
+      m = legs.match(/^HOURLY_FUND_([A-Z0-9]+)_BN_(BUY|SELL)\+LT_(ASK|BID)$/);
+      if (m) {
+        return { coin: m[1], desc: `Hourly Funding Lock: Binance ${m[2]} + Lighter ${m[3] === "ASK" ? "SELL" : "BUY"}` };
+      }
+      return { coin: legs.split("_")[0], desc: legs };
+    }
+
+    function renderDnTelemetry(data) {
+      const logTxt = String(data.lighterLog || "");
+      const lines = logTxt.split("\n");
+      let ver = "LIVE";
+      let scanTxt = "";
+      let readyTxt = "";
+      const byId = new Map();
+
+      for (const ln of lines) {
+        const vm = ln.match(/GO-TOKYO (v[0-9.]+) LIVE/);
+        if (vm) ver = vm[1];
+        if (ln.includes("[DN_READY]")) readyTxt = ln.replace(/^.*\[DN_READY\]\s*/, "").trim();
+        if (ln.includes("[DN_SCAN]")) {
+          const sm = ln.match(/best=([A-Z0-9]+).*?netEdge=([+-]?[0-9.]+bp)/);
+          scanTxt = sm ? `Best spread right now: ${sm[1]} (${sm[2]} after fees)` : ln.replace(/^.*\[DN_SCAN\]\s*/, "").trim();
+        }
+        let om = ln.match(/\[STRAT_OPEN id=(\d+) strat=([A-Z0-9_]+) legs="([^"]+)" usd=\$([0-9.]+) mult=[0-9.]+x edge=([+-]?[0-9.]+)bp\s*([^\]]*)\]/);
+        if (om) {
+          byId.set(om[1], {
+            id: Number(om[1]), strat: om[2], legs: om[3], usd: parseFloat(om[4]),
+            edgeBps: parseFloat(om[5]), detail: om[6], status: "OPEN", holdS: null, pnlBps: null, pnlUsd: null
+          });
+        }
+        let cm = ln.match(/\[STRAT_CLOSE id=(\d+) strat=([A-Z0-9_]+) legs="([^"]+)" usd=\$([0-9.]+) hold=([0-9.]+)s pnl=([+-]?[0-9.]+)bp\(\$([+-]?[0-9.]+)\) reason=([^\]]+)\]/);
+        if (cm) {
+          const prev = byId.get(cm[1]) || { id: Number(cm[1]), strat: cm[2], legs: cm[3], usd: parseFloat(cm[4]) };
+          prev.holdS = parseFloat(cm[5]);
+          prev.pnlBps = parseFloat(cm[6]);
+          prev.pnlUsd = parseFloat(cm[7]);
+          prev.reason = cm[8];
+          prev.status = "CLOSED";
+          byId.set(cm[1], prev);
+        }
+      }
+
+      const badgeEl = document.getElementById("dnEngineBadge");
+      const paused = !!data.userPaused;
+      badgeEl.textContent = paused ? "PAUSED" : `TOKYO ${ver}`;
+      badgeEl.style.color = paused ? "#ef4444" : "#10b981";
+      document.getElementById("dnScanLine").textContent = scanTxt || readyTxt || "Scanning all 164 auto-discovered common contracts...";
+
+      const rows = Array.from(byId.values()).sort((a, b) => b.id - a.id);
+      const bodyEl = document.getElementById("dnArbBody");
+      const metaEl = document.getElementById("dnTradeMeta");
+      const bnUsd = data.totalLiveUsd ? ` • Binance Equity $${Number(data.totalLiveUsd).toFixed(2)}` : "";
+      metaEl.textContent = `${rows.length} session arb trade${rows.length === 1 ? "" : "s"}${bnUsd}`;
+
+      if (!rows.length) {
+        bodyEl.innerHTML = `<tr><td colspan="7" style="color:var(--muted);">Armed &amp; scanning 164 pairs for clean fee-covered spreads — next trade will appear here automatically.</td></tr>`;
+        return;
+      }
+      let html = "";
+      for (const r of rows) {
+        const h = humanizeLegs(r.legs);
+        const holdTxt = r.holdS !== null ? `${r.holdS.toFixed(1)}s` : "Live…";
+        const pnlTxt = r.pnlUsd !== null
+          ? `<b class="${colorCls(r.pnlUsd)}">${fmtSigned(r.pnlUsd, 4)}</b> <span class="usd-sub">(${r.pnlBps >= 0 ? "+" : ""}${r.pnlBps.toFixed(2)}bp)</span>`
+          : `<span class="pos">Locked ${r.edgeBps >= 0 ? "+" : ""}${(r.edgeBps || 0).toFixed(2)}bp</span>`;
+        const stBadge = r.status === "OPEN"
+          ? `<span class="badge">HEDGED LIVE</span>`
+          : `<span class="badge" style="color:var(--muted);border-color:var(--border);background:transparent;">${r.reason || "CLOSED"}</span>`;
+        html += `<tr>
+          <td class="mono" style="color:var(--muted);">${fmtIST(r.id)}</td>
+          <td class="mono"><b>${h.coin}</b></td>
+          <td>${h.desc}</td>
+          <td class="mono">$${r.usd.toFixed(2)}</td>
+          <td class="mono">${holdTxt}</td>
+          <td class="mono">${pnlTxt}</td>
+          <td>${stBadge}</td>
+        </tr>`;
+      }
+      bodyEl.innerHTML = html;
+    }
+
     async function poll() {
       try {
         const res = await fetch(API_URL + Date.now());
         const data = await res.json();
+        renderDnTelemetry(data);
         const acct = data.lighterAccount || (data.accounts || [])[0];
         const tradesChanged = data.lighterTrades ? ingestTrades(data.lighterTrades, false) : false;
         if (!acct) return;
