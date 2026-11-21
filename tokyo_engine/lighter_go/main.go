@@ -6932,8 +6932,7 @@ func runZeroFeeDnLoop() {
 					continue
 				}
 				st := mktStates[sp.Sym]
-				m, okM := markets[sp.Sym]
-				if st == nil || !okM {
+				if st == nil {
 					continue
 				}
 				st.mu.Lock()
