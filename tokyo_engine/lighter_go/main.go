@@ -192,6 +192,7 @@ type TwinState struct {
 	WasHedged       bool
 	LastDualSendTS  time.Time
 	LastHedgeTS     time.Time
+	CoolUntil       time.Time
 	LastLog         time.Time
 }
 
@@ -201,10 +202,10 @@ var (
 		"SOL": newMarketState(-1.0), "XRP": newMarketState(-1.0), "HYPE": newMarketState(-1.0),
 		"BNB": newMarketState(-1.0), "ZEC": newMarketState(-1.0), "XAU": newMarketState(-1.0), "NVDA": newMarketState(-1.0),
 		"SPY": newMarketState(240.0), "US500": newMarketState(240.0), "QQQ": newMarketState(240.0), "US100": newMarketState(240.0),
-		"SOXL": newMarketState(240.0),
+		"SOXL": newMarketState(160.0),
 	}
 	twins = []*TwinState{
-		{Name: "US500/SPY", ThinSym: "US500", DeepSym: "SPY", AlwaysActive: true, BidEdgeBps: 3.6, AskEdgeBps: 4.4, FallbackRatio: 10.002},
+		{Name: "US500/SPY", ThinSym: "US500", DeepSym: "SPY", AlwaysActive: false, BidEdgeBps: 3.6, AskEdgeBps: 4.4, FallbackRatio: 10.002},
 		{Name: "US100/QQQ", ThinSym: "US100", DeepSym: "QQQ", AlwaysActive: false, BidEdgeBps: 4.2, AskEdgeBps: 4.2, FallbackRatio: 41.032},
 	}
 	pairMu           sync.Mutex
@@ -279,7 +280,10 @@ func houseMoneyClipUSD() float64 {
 	if eq >= 96.00 {
 		return 320.0
 	}
-	return 240.0
+	if eq >= 95.00 {
+		return 240.0
+	}
+	return 160.0
 }
 
 func takeWriteSlotTier(tier int) bool {
@@ -2756,6 +2760,7 @@ func manageTwin(tw *TwinState) bool {
 		if tw.WasHedged {
 			if math.Abs(tPos) < tM.MinB && math.Abs(dPos) >= dM.MinB && now.Sub(tw.LastHedgeTS) >= 900*time.Millisecond && takeWriteSlotTier(2) {
 				tw.LastHedgeTS = now
+				tw.CoolUntil = now.Add(45 * time.Second)
 				if dPos > 0 {
 					placePairOrder(tw.DeepSym, "ASK", roundTo(db*0.9994, dM.PxDec), dMid, math.Abs(dPos), true, true)
 				} else {
@@ -2763,6 +2768,7 @@ func manageTwin(tw *TwinState) bool {
 				}
 			} else if math.Abs(dPos) < dM.MinB && math.Abs(tPos) >= tM.MinB && now.Sub(tw.LastHedgeTS) >= 900*time.Millisecond && takeWriteSlotTier(2) {
 				tw.LastHedgeTS = now
+				tw.CoolUntil = now.Add(45 * time.Second)
 				if tPos > 0 {
 					placePairOrder(tw.ThinSym, "ASK", roundTo(tb*0.9994, tM.PxDec), tMid, math.Abs(tPos), true, true)
 				} else {
@@ -2811,7 +2817,8 @@ func manageTwin(tw *TwinState) bool {
 			availExitUSD = 0.80 * math.Min(ta*taSz, db*dbSz)
 		}
 		allowCarry := tPos > 0 && tw.ThinSym == "US500" && execNetBps > -6.0
-		if (execNetBps <= -18.0 || (ageS >= 1800.0 && !allowCarry)) && takeWriteSlotTier(2) {
+		tightStopBook := tSpBps <= 3.0 && dSpBps <= 2.0
+		if ((execNetBps <= -18.0 && tightStopBook) || (ageS >= 1800.0 && !allowCarry && tightStopBook)) && takeWriteSlotTier(2) {
 			if tBidOrd != nil && tBidOrd.IsClose && !tBidOrd.IsIOC {
 				cancelPairSide(tw.ThinSym, "BID")
 			}
@@ -2819,6 +2826,7 @@ func manageTwin(tw *TwinState) bool {
 				cancelPairSide(tw.ThinSym, "ASK")
 			}
 			tw.LastDualSendTS = now
+			tw.CoolUntil = now.Add(45 * time.Second)
 			if availExitUSD >= 22.0 {
 				tCl, dCl := math.Abs(tPos), math.Abs(dPos)
 				if availExitUSD < math.Abs(tUSD)-14.0 {
@@ -2846,6 +2854,7 @@ func manageTwin(tw *TwinState) bool {
 				cancelPairSide(tw.ThinSym, "ASK")
 			}
 			tw.LastDualSendTS = now
+			tw.CoolUntil = now.Add(45 * time.Second)
 			if tPos > 0 {
 				fireTwinIOC(tw, "ASK", tb, tMid, math.Abs(tPos), "BID", da, dMid, math.Abs(dPos), true)
 			} else {
@@ -2887,7 +2896,7 @@ func manageTwin(tw *TwinState) bool {
 			break
 		}
 	}
-	deepBookSafe := booksFresh && dSpBps <= 1.85 && tSpBps <= 6.0 && db*dbSz >= 800.0 && da*daSz >= 800.0 && tw.EmaRatio > 0 && tw.WarmTicks >= 5
+	deepBookSafe := booksFresh && now.After(tw.CoolUntil) && dSpBps <= 1.85 && tSpBps <= 6.0 && db*dbSz >= 800.0 && da*daSz >= 800.0 && tw.EmaRatio > 0 && tw.WarmTicks >= 5
 	if !pairAllowed || otherBusy || remotePaused.Load() || !deepBookSafe {
 		cancelThinEntries()
 		return pairAllowed
@@ -3049,7 +3058,7 @@ func main() {
 	mktStates["BNB"].dynClipUSD = -1.0
 	mktStates["ZEC"].dynClipUSD = -1.0
 	mktStates["NVDA"].dynClipUSD = -1.0
-	mktStates["SOXL"].dynClipUSD = 240.0
+	mktStates["SOXL"].dynClipUSD = 160.0
 	if !isOffHoursUTC(time.Now()) {
 		mktStates["SOXL"].dynClipUSD = -1.0
 	}
@@ -3067,7 +3076,7 @@ func main() {
 	seedBinanceHistory()
 	seedPairHistory()
 	go runPairHeartbeat()
-	fmt.Printf("GO-TOKYO v80 LIVE | Dual-Regime Discrepancy (Wknd SOXL+US500/SPY | Wkdy US500/SPY+US100/QQQ) | Stop=$%.2f\n", StopEqUSD)
+	fmt.Printf("GO-TOKYO v81 LIVE | Wknd/OffHrs SOXL-Only Maker | Mon-Fri US500/SPY+US100/QQQ Twin Arb | Stop=$%.2f\n", StopEqUSD)
 	go syncAccountLoop()
 	runBnWS()
 }
