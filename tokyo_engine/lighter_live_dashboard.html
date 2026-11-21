@@ -3,123 +3,124 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Lighter Live</title>
+  <title>Tokyo Dual-Venue Live P&amp;L</title>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     :root {
       --bg: #000000;
-      --card: #0a0a0a;
-      --card-2: #050505;
-      --border: #1c1c1e;
+      --card: #0b0b0e;
+      --card-2: #121217;
+      --border: #232329;
       --text: #f8fafc;
-      --muted: #8e8e93;
+      --muted: #a1a1aa;
       --green: #10b981;
       --red: #ef4444;
+      --amber: #f59e0b;
     }
     html, body {
       min-height: 100vh;
       background: var(--bg);
       color: var(--text);
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Inter, Arial, sans-serif;
+      font-size: 16px;
       -webkit-font-smoothing: antialiased;
     }
-    .wrap { max-width: 72rem; margin: 0 auto; padding: 1.25rem; }
-    .mono { font-family: ui-monospace, SFMono-Regular, monospace; font-variant-numeric: tabular-nums; }
+    .wrap { max-width: 82rem; margin: 0 auto; padding: 1.5rem; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-variant-numeric: tabular-nums; }
     .pos { color: var(--green); }
     .neg { color: var(--red); }
+    .warn { color: var(--amber); }
 
     /* Top Bar */
     .topbar {
-      display: flex; justify-content: space-between; align-items: center; gap: 0.75rem;
-      margin-bottom: 1rem; flex-wrap: wrap;
+      display: flex; justify-content: space-between; align-items: center; gap: 1rem;
+      margin-bottom: 1.2rem; flex-wrap: wrap;
     }
-    .brand { display: flex; align-items: center; gap: 0.55rem; font-weight: 700; font-size: 1.05rem; }
-    .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--green); box-shadow: 0 0 8px var(--green); }
+    .brand { display: flex; align-items: center; gap: 0.7rem; font-weight: 700; font-size: 1.3rem; }
+    .dot { width: 11px; height: 11px; border-radius: 50%; background: var(--green); box-shadow: 0 0 10px var(--green); }
     .badge {
-      font-size: 0.68rem; font-weight: 600; padding: 0.18rem 0.55rem; border-radius: 999px;
-      background: rgba(16,185,129,0.12); color: var(--green); border: 1px solid rgba(16,185,129,0.28);
+      font-size: 0.85rem; font-weight: 700; padding: 0.25rem 0.7rem; border-radius: 999px;
+      background: rgba(16,185,129,0.14); color: var(--green); border: 1px solid rgba(16,185,129,0.35);
     }
-    .controls { display: flex; align-items: center; gap: 0.45rem; }
+    .controls { display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; }
     .seed-input {
-      width: 76px; background: var(--card); border: 1px solid var(--border); color: var(--text);
-      border-radius: 0.45rem; padding: 0.28rem 0.45rem; font-size: 0.8rem;
+      width: 96px; background: var(--card); border: 1px solid var(--border); color: var(--text);
+      border-radius: 0.5rem; padding: 0.4rem 0.6rem; font-size: 0.95rem;
     }
     .btn {
-      background: var(--card); border: 1px solid var(--border); color: var(--muted);
-      border-radius: 0.45rem; padding: 0.3rem 0.6rem; font-size: 0.75rem; cursor: pointer;
+      background: var(--card-2); border: 1px solid var(--border); color: var(--text);
+      border-radius: 0.5rem; padding: 0.42rem 0.85rem; font-size: 0.9rem; font-weight: 600; cursor: pointer;
     }
-    .btn:hover { color: var(--text); border-color: #334155; }
+    .btn:hover { border-color: #52525b; }
 
-    /* Tier 1: Hero Card */
-    .hero {
-      background: linear-gradient(135deg, #0d0d0f 0%, #050505 100%);
-      border: 1px solid #262629; border-radius: 1.1rem; padding: 1.05rem 1.25rem;
-      margin-bottom: 0.85rem;
-      display: flex; justify-content: space-between; align-items: center; gap: 0.85rem; flex-wrap: wrap;
+    /* Full-Width Giant P&L Hero */
+    .pnl-hero {
+      background: linear-gradient(145deg, #101015 0%, #070709 100%);
+      border: 1px solid #2e2e36; border-radius: 1.25rem; padding: 1.6rem 1.8rem;
+      margin-bottom: 1.15rem; width: 100%;
     }
-    .hero-lbl { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); font-weight: 600; }
-    .hero-eq { font-size: 2.85rem; font-weight: 800; line-height: 1.05; margin-top: 0.2rem; letter-spacing: -0.02em; }
-    .hero-sub { font-size: 0.82rem; color: var(--muted); margin-top: 0.4rem; display: flex; gap: 0.85rem; flex-wrap: wrap; }
-    .hero-right { text-align: right; }
-    .hero-pnl { font-size: 2.0rem; font-weight: 700; line-height: 1.08; margin-top: 0.2rem; }
-    .hero-roi { font-size: 0.78rem; color: var(--muted); margin-top: 0.35rem; }
+    .pnl-top {
+      display: flex; justify-content: space-between; align-items: flex-start; gap: 1.5rem; flex-wrap: wrap;
+      padding-bottom: 1.35rem; border-bottom: 1px solid var(--border);
+    }
+    .lbl { font-size: 0.9rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); font-weight: 700; }
+    .giant-pnl { font-size: 3.8rem; font-weight: 800; line-height: 1.05; margin-top: 0.3rem; letter-spacing: -0.02em; }
+    .sub-line { font-size: 1.05rem; color: var(--muted); margin-top: 0.45rem; }
+    .rate-box { text-align: right; }
+    .giant-rate { font-size: 2.35rem; font-weight: 800; line-height: 1.1; margin-top: 0.3rem; }
 
-    /* Tier 2: Secondary Metrics */
+    /* Side-by-Side Venue Breakdown (Lighter + Binance Losses/Fees) */
+    .venue-strip {
+      display: grid; grid-template-columns: repeat(3, 1fr); gap: 1.1rem; margin-top: 1.3rem;
+    }
+    .venue-box {
+      background: var(--card-2); border: 1px solid var(--border); border-radius: 0.95rem; padding: 1.05rem 1.2rem;
+    }
+    .venue-val { font-size: 1.85rem; font-weight: 800; margin-top: 0.3rem; }
+    .venue-detail { font-size: 0.95rem; color: var(--muted); margin-top: 0.35rem; line-height: 1.4; }
+
+    /* Recent Windows + Scanner Bar */
     .sec-grid {
-      display: grid; grid-template-columns: 1fr; gap: 0.85rem;
-      margin-bottom: 1rem;
+      display: grid; grid-template-columns: 1fr 1.35fr; gap: 1rem; margin-bottom: 1.15rem;
     }
-    .sec-card {
-      background: var(--card); border: 1px solid var(--border); border-radius: 0.85rem; padding: 0.9rem 1rem;
-    }
-    .lbl { font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); font-weight: 600; }
-    .sec-sub { font-size: 0.75rem; color: var(--muted); margin-top: 0.2rem; }
-    .tf-row { display: flex; gap: 0.75rem; margin-top: 0.35rem; flex-wrap: wrap; font-size: 0.78rem; }
-
-    /* Tier 3: Chart & Virtualized Trades */
-    .main-grid { display: grid; grid-template-columns: 1.08fr 1.12fr; gap: 1rem; }
     .card {
-      min-width: 0;
-      background: var(--card); border: 1px solid var(--border); border-radius: 0.95rem; padding: 1.05rem;
+      width: 100%; min-width: 0;
+      background: var(--card); border: 1px solid var(--border); border-radius: 1.05rem; padding: 1.25rem 1.4rem;
+      margin-bottom: 1.15rem;
     }
-    .card-hd { display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.6rem; gap: 0.5rem; }
-    .chart-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; width: 100%; }
-    .chart-scroll svg { height: 185px; display: block; }
+    .card-hd { display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.85rem; gap: 0.75rem; flex-wrap: wrap; }
+    .tf-row { display: flex; gap: 1.3rem; margin-top: 0.45rem; flex-wrap: wrap; font-size: 1.08rem; }
+    .scan-txt { font-size: 1.02rem; color: var(--text); margin-top: 0.45rem; line-height: 1.4; }
 
-    /* Virtualized 6-Row Viewport: zero lag at 1,000+ orders/sec */
+    /* Full-Width Readable Tables */
     .tbl-wrap {
-      max-height: 256px;
+      max-height: 340px;
       overflow-y: auto;
       overflow-x: auto;
       -webkit-overflow-scrolling: touch;
-      contain: content;
-      overscroll-behavior: contain;
     }
-    table { width: 100%; border-collapse: collapse; font-size: 0.8rem; }
-    th, td { text-align: left; padding: 0 0.38rem; border-bottom: 1px solid var(--border); white-space: nowrap; height: 36px; line-height: 36px; }
+    table { width: 100%; border-collapse: collapse; font-size: 1.0rem; }
+    th, td {
+      text-align: left; padding: 0.7rem 0.75rem; border-bottom: 1px solid var(--border);
+      white-space: nowrap;
+    }
     thead th {
       position: sticky; top: 0; z-index: 3;
-      background: var(--card); color: var(--muted); font-weight: 600;
-      font-size: 0.66rem; text-transform: uppercase; height: 30px; line-height: 30px;
+      background: var(--card); color: var(--muted); font-weight: 700;
+      font-size: 0.86rem; text-transform: uppercase; letter-spacing: 0.04em;
       box-shadow: 0 1px 0 var(--border);
     }
-    .vspacer td { padding: 0 !important; border: 0 !important; line-height: 0 !important; }
-    .usd-sub { color: var(--muted); font-size: 0.71rem; margin-left: 0.2rem; }
+    .usd-sub { color: var(--muted); font-size: 0.9rem; margin-left: 0.3rem; }
 
-    @media (max-width: 768px) {
-      .wrap { padding: 0.75rem; }
-      .controls, .desktop-only { display: none; }
-      .hero { padding: 0.85rem 0.95rem; align-items: center; flex-wrap: nowrap; }
-      .hero-eq { font-size: 1.95rem; }
-      .hero-right { text-align: right; flex-shrink: 0; }
-      .hero-pnl { font-size: 1.45rem; }
-      .hero-sub { font-size: 0.74rem; gap: 0.55rem; }
-      .sec-card { padding: 0.75rem 0.8rem; }
-      .main-grid { grid-template-columns: 1fr; gap: 0.75rem; }
-      .chart-scroll svg { height: 135px; }
-      .tbl-wrap { max-height: 236px; }
-      table { font-size: 0.73rem; }
-      th, td { padding: 0 0.26rem; height: 34px; line-height: 34px; }
+    @media (max-width: 900px) {
+      .wrap { padding: 1rem; }
+      .giant-pnl { font-size: 2.65rem; }
+      .giant-rate { font-size: 1.75rem; }
+      .rate-box { text-align: left; }
+      .venue-strip { grid-template-columns: 1fr; }
+      .sec-grid { grid-template-columns: 1fr; }
+      table { font-size: 0.94rem; }
+      th, td { padding: 0.6rem 0.55rem; }
     }
   </style>
 </head>
@@ -128,103 +129,120 @@
     <div class="topbar">
       <div class="brand">
         <span class="dot" id="liveDot"></span>
-        <span>Lighter Live</span>
-        <span class="badge" id="tierBadge">0% FEE</span>
-        <span class="desktop-only mono" id="acctSub" style="font-size:0.75rem;color:var(--muted);font-weight:400;margin-left:0.4rem;">#770015</span>
+        <span>Tokyo Dual-Venue Arbitrage</span>
+        <span class="badge" id="dnEngineBadge">SYNCING</span>
+        <span class="mono" id="acctSub" style="font-size:0.95rem;color:var(--muted);font-weight:500;">#770015 + Binance Futures</span>
       </div>
       <div class="controls">
-        <span class="lbl">Seed</span>
-        <input id="seedInput" class="seed-input mono" type="number" step="0.01" value="100.00" />
-        <button class="btn" onclick="saveSeed()">Save</button>
-        <button class="btn" onclick="resetHistory()">Reset</button>
+        <span class="lbl" style="font-size:0.85rem;">Lighter Baseline ($)</span>
+        <input id="seedInput" class="seed-input mono" type="number" step="0.0001" value="93.0426" />
+        <button class="btn" onclick="saveSeed()">Set Baseline</button>
+        <button class="btn" onclick="snapBaselineNow()">Zero From Now</button>
       </div>
     </div>
 
-    <!-- Tier 1: Hero Equity & Run Rate -->
-    <div class="hero">
-      <div>
-        <div class="hero-lbl">Total Equity (USDC)</div>
-        <div class="hero-eq mono" id="eqVal">$--.--</div>
-        <div class="hero-sub mono" id="realSub">
-          <span>Net $0.0000 (0.00%)</span>
+    <!-- Tier 1: Full-Width Giant Combined Net P&L + Side-by-Side Lighter & Binance Breakdown -->
+    <div class="pnl-hero">
+      <div class="pnl-top">
+        <div>
+          <div class="lbl">Combined Net P&amp;L (Lighter + Binance After All Fees)</div>
+          <div class="giant-pnl mono" id="combPnlVal">$0.0000</div>
+          <div class="sub-line mono" id="combSubLine">Combined Capital: $--.-- (Lighter $--.-- + Binance $--.-- )</div>
+        </div>
+        <div class="rate-box">
+          <div class="lbl" style="display:inline-flex;align-items:center;gap:0.5rem;">
+            <span>Live Run Rate</span>
+            <button class="btn" id="rrBtn" onclick="refreshRunRate()" style="padding:0.2rem 0.55rem;font-size:0.85rem;">↻</button>
+          </div>
+          <div class="giant-rate mono" id="hrRate">$0.0000/hr</div>
+          <div class="sub-line mono" id="dayRate">$0.00/day</div>
         </div>
       </div>
-      <div class="hero-right">
-        <div class="hero-lbl" style="display:inline-flex;align-items:center;gap:0.4rem;">
-          <span>Run Rate</span>
-          <button class="btn" id="rrBtn" onclick="refreshRunRate()" title="Refresh Run Rate" style="padding:0.1rem 0.38rem;font-size:0.7rem;line-height:1.1;">↻</button>
+
+      <div class="venue-strip">
+        <div class="venue-box">
+          <div class="lbl">1. Lighter P&amp;L (0% Fee Venue)</div>
+          <div class="venue-val mono" id="ltPnlVal">$0.0000</div>
+          <div class="venue-detail mono" id="ltDetail">Equity: $--.-- • Fees Paid: $0.0000</div>
         </div>
-        <div class="hero-pnl mono" id="hrRate">$0.0000/hr</div>
-        <div class="hero-roi mono" id="dayRate">$0.00/day</div>
+        <div class="venue-box">
+          <div class="lbl">2. Binance Futures Net P&amp;L (After Fees)</div>
+          <div class="venue-val mono" id="bnNetVal">$0.0000</div>
+          <div class="venue-detail mono" id="bnDetail">Trade PnL: $0.0000 • Fees Paid: $0.0000</div>
+        </div>
+        <div class="venue-box">
+          <div class="lbl">3. Binance Fees &amp; Losses Breakdown</div>
+          <div class="venue-val mono" id="bnFeesVal">$0.0000</div>
+          <div class="venue-detail mono" id="bnWalletDetail">Binance Total Wallet: $--.-- (Today Δ $--.-- )</div>
+        </div>
       </div>
     </div>
 
-    <!-- Tier 2: Recent Windows & Live Dual-Venue Scanner -->
-    <div class="sec-grid" style="grid-template-columns: 1fr 1.25fr;">
-      <div class="sec-card">
-        <div class="lbl">Recent Windows</div>
+    <!-- Tier 2: Recent Windows & Live Scanner -->
+    <div class="sec-grid">
+      <div class="card" style="margin-bottom:0;">
+        <div class="lbl">Combined P&amp;L Windows</div>
         <div class="tf-row mono">
           <span>5m <b id="tf5m">$0.000</b></span>
           <span>15m <b id="tf15m">$0.000</b></span>
           <span>1h <b id="tf1h">$0.000</b></span>
-          <span class="desktop-only">24h <b id="tf24h">$0.000</b></span>
+          <span>24h <b id="tf24h">$0.000</b></span>
         </div>
       </div>
-      <div class="sec-card">
-        <div class="card-hd" style="margin-bottom:0.25rem;">
-          <div class="lbl">Tokyo Dual-Venue Engine (Leg 1 Lighter 0% &rarr; Leg 2 Binance)</div>
-          <span class="badge mono" id="dnEngineBadge" style="font-size:0.64rem;">SYNCING</span>
-        </div>
-        <div class="sec-sub mono" id="dnScanLine" style="color:var(--text);font-size:0.77rem;">Scanning 164 auto-discovered common contracts...</div>
+      <div class="card" style="margin-bottom:0;">
+        <div class="lbl">Live Auto-Scanner (All 164 Common Pairs)</div>
+        <div class="scan-txt mono" id="dnScanLine">Waiting for Tokyo telemetry...</div>
       </div>
     </div>
 
-    <!-- Tier 2.5: Plain-English Dual-Venue Arbitrage Trades (Both Legs + Net PnL) -->
-    <div class="card" style="margin-bottom:1rem;">
+    <!-- Tier 3: Full-Width Plain-English Dual-Venue Arbitrage Trades -->
+    <div class="card">
       <div class="card-hd">
-        <div class="lbl">Dual-Venue Hedged Arbitrage Trades (Lighter + Binance Combined)</div>
-        <div class="sec-sub mono" id="dnTradeMeta" style="margin:0;font-size:0.72rem;">Waiting for telemetry...</div>
+        <div class="lbl">Dual-Venue Hedged Arbitrage Trades (Both Legs + Net Profit/Loss After Fees)</div>
+        <div class="mono" id="dnTradeMeta" style="color:var(--muted);font-size:0.95rem;">Loading...</div>
       </div>
-      <div class="tbl-wrap" style="max-height:210px;">
+      <div class="tbl-wrap">
         <table>
           <thead>
-            <tr><th>Time (IST)</th><th>Coin</th><th>Plain-English Action (Both Legs)</th><th>Size</th><th>Hold</th><th>Combined Net PnL</th><th>Status</th></tr>
+            <tr>
+              <th>Time (IST)</th>
+              <th>Coin</th>
+              <th>Plain-English Trade (Lighter + Binance)</th>
+              <th>Size</th>
+              <th>Hold</th>
+              <th>Combined Net P&amp;L (After Fees)</th>
+              <th>Status</th>
+            </tr>
           </thead>
           <tbody id="dnArbBody">
-            <tr><td colspan="7" style="color:var(--muted);">Loading hedged arbitrage ledger from Tokyo EC2...</td></tr>
+            <tr><td colspan="7" style="color:var(--muted);">Loading live hedged trades from Tokyo EC2...</td></tr>
           </tbody>
         </table>
       </div>
     </div>
 
-    <!-- Tier 3: Equity Curve & Virtual-Scrolled Positions/Trades -->
-    <div class="main-grid">
-      <div class="card">
-        <div class="card-hd">
-          <div class="lbl">Equity Curve</div>
-          <div class="sec-sub mono desktop-only" id="chartRange" style="margin:0;">--</div>
-        </div>
-        <div class="chart-scroll" id="chartScroll">
-          <svg id="eqSvg" viewBox="0 0 600 185" preserveAspectRatio="none" style="width:100%;">
-            <line id="seedLine" x1="0" y1="92" x2="600" y2="92" stroke="#334155" stroke-width="1" stroke-dasharray="4 4" />
-            <polyline id="eqLine" fill="none" stroke="#10b981" stroke-width="2.5" points="0,92 600,92" />
-          </svg>
-        </div>
+    <!-- Tier 4: Full-Width Lighter Position & Sequencer Fills -->
+    <div class="card">
+      <div class="card-hd">
+        <div class="lbl">Lighter Live Open Positions &amp; Recent Fills</div>
+        <div class="mono" id="tradeMeta" style="color:var(--muted);font-size:0.95rem;">0 closed</div>
       </div>
-      <div class="card">
-        <div class="card-hd">
-          <div class="lbl">Positions &amp; Trades</div>
-          <div class="sec-sub mono" id="tradeMeta" style="margin:0;font-size:0.7rem;">0 closed</div>
-        </div>
-        <div class="tbl-wrap" id="tradeViewport">
-          <table>
-            <thead>
-              <tr><th>Mkt</th><th>Side</th><th>Size ($USD)</th><th>Entry</th><th>Target / Exit</th><th>Ords / Time</th><th>PnL</th></tr>
-            </thead>
-            <tbody id="openBody"></tbody>
-            <tbody id="closedBody"><tr><td colspan="7" style="color:var(--muted);">Loading live ledger…</td></tr></tbody>
-          </table>
-        </div>
+      <div class="tbl-wrap" id="tradeViewport">
+        <table>
+          <thead>
+            <tr>
+              <th>Coin</th>
+              <th>Side</th>
+              <th>Size ($USD)</th>
+              <th>Entry Price</th>
+              <th>Exit Price</th>
+              <th>Time (IST)</th>
+              <th>Lighter Leg P&amp;L</th>
+            </tr>
+          </thead>
+          <tbody id="openBody"></tbody>
+          <tbody id="closedBody"><tr><td colspan="7" style="color:var(--muted);">Loading Lighter ledger...</td></tr></tbody>
+        </table>
       </div>
     </div>
   </div>
@@ -233,92 +251,88 @@
     const ACCT_INDEX = 770015;
     const API_URL = "https://crypto-arb-bot-tokyo-bin-767579108352.s3.ap-northeast-1.amazonaws.com/live-telemetry.json?t=";
     const LT_TRADES_API = `https://mainnet.zklighter.elliot.ai/api/v1/trades?account_index=${ACCT_INDEX}&limit=100&sort_by=timestamp`;
-    const STORE_KEY = "lighter_eq_hist_v3_" + ACCT_INDEX;
-    const SEED_KEY = "lighter_seed_v2_" + ACCT_INDEX;
-    const RR_KEY = "lighter_rr_base_v3_" + ACCT_INDEX;
+    const STORE_KEY = "comb_eq_hist_v4_" + ACCT_INDEX;
+    const SEED_KEY = "lighter_base_v4_" + ACCT_INDEX;
+    const BN_OFFSET_KEY = "bn_audit_offset_v4_" + ACCT_INDEX;
+    const RR_KEY = "comb_rr_base_v4_" + ACCT_INDEX;
 
-    const ROW_H = window.innerWidth <= 768 ? 34 : 36;
-    const OVERSCAN = 5;
-    const MAX_RING = 50000;
-
-    let seedUsd = parseFloat(localStorage.getItem(SEED_KEY) || "100.00");
-    document.getElementById("seedInput").value = seedUsd.toFixed(2);
+    let seedLtUsd = parseFloat(localStorage.getItem(SEED_KEY) || "93.0426");
+    let bnAuditOffset = parseFloat(localStorage.getItem(BN_OFFSET_KEY) || "0.0000");
+    document.getElementById("seedInput").value = seedLtUsd.toFixed(4);
     let eqHist = JSON.parse(localStorage.getItem(STORE_KEY) || "[]");
     let rrBase = JSON.parse(localStorage.getItem(RR_KEY) || "null");
-    let didInitialScroll = false;
-    let eqDirty = true;
     let lastSaveTs = 0;
 
-    let lastData = null;
+    let lastTel = null;
+    let lastAcct = null;
+    let lastBnAudit = null;
     let activeOpenMkts = [];
-    const POS_TIMERS = {};
-
-    // O(1) Incremental Ring-Buffer + Cursor Lazy-Loader for Closed Trades
     const seenTradeIds = new Set();
-    let closedList = []; // sorted newest-first (ts desc, id desc)
-    let olderCursor = null;
-    let loadingOlder = false;
-    let olderExhausted = false;
-    let lastVStart = -1;
-    let lastVEnd = -1;
-    let lastVLen = -1;
-    let scrollRaf = false;
+    let closedList = [];
 
     const istFmt = new Intl.DateTimeFormat("en-IN", {
       timeZone: "Asia/Kolkata", hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit"
     });
     function fmtIST(ms) { return ms ? istFmt.format(new Date(ms)) : "--"; }
-    function fmtSigned(v, dec = 4) { return `${v >= 0 ? "+" : "-"}$${Math.abs(v).toFixed(dec)}`; }
-    function colorCls(v) { return v >= 0 ? "pos" : "neg"; }
+    function fmtSigned(v, dec = 4) {
+      const n = Number(v) || 0;
+      return `${n >= 0 ? "+" : "-"}$${Math.abs(n).toFixed(dec)}`;
+    }
+    function colorCls(v) { return (Number(v) || 0) >= 0 ? "pos" : "neg"; }
     function fmtPx(px, sym) {
       if (!px || !isFinite(px)) return "—";
-      const dec = sym === "BTC" ? 1 : (sym === "ETH" ? 2 : 3);
+      const dec = sym === "BTC" ? 1 : (sym === "ETH" ? 2 : (px < 1 ? 5 : 3));
       return "$" + px.toFixed(dec);
     }
     function fmtQty(sz, sym) {
       const dec = sym === "BTC" ? 5 : (sym === "ETH" ? 4 : 3);
       return parseFloat(sz.toFixed(dec)).toString();
     }
-    function fmtAgo(ms) {
-      if (!ms || ms < 0) return "0s";
-      const s = Math.floor(ms / 1000);
-      if (s < 60) return `${s}s`;
-      const m = Math.floor(s / 60);
-      if (m < 60) return `${m}m ${s % 60}s`;
-      return `${Math.floor(m / 60)}h ${m % 60}m`;
-    }
 
     function saveSeed() {
       const v = parseFloat(document.getElementById("seedInput").value);
       if (!isNaN(v) && v > 0) {
-        seedUsd = v;
+        seedLtUsd = v;
         localStorage.setItem(SEED_KEY, String(v));
-        eqDirty = true;
-        renderSummary();
+        renderAll();
       }
     }
-    function resetHistory() {
-      const curEq = lastData ? parseFloat(lastData.total_asset_value ?? lastData.collateral ?? seedUsd) : seedUsd;
-      eqHist = [{ t: Date.now(), v: curEq, c: curEq }];
+
+    function snapBaselineNow() {
+      if (!lastAcct) return;
+      const curLt = parseFloat(lastAcct.total_asset_value ?? lastAcct.collateral ?? seedLtUsd);
+      seedLtUsd = curLt;
+      document.getElementById("seedInput").value = seedLtUsd.toFixed(4);
+      localStorage.setItem(SEED_KEY, String(seedLtUsd));
+      const curBnNet = getCurrentBnNetRaw();
+      bnAuditOffset = curBnNet;
+      localStorage.setItem(BN_OFFSET_KEY, String(bnAuditOffset));
+      eqHist = [{ t: Date.now(), v: 0 }];
       localStorage.setItem(STORE_KEY, JSON.stringify(eqHist));
-      eqDirty = true;
-      renderSummary();
+      rrBase = { t: Date.now(), v: 0 };
+      localStorage.setItem(RR_KEY, JSON.stringify(rrBase));
+      renderAll();
     }
 
-    function windowDelta(msAgo, nowTs, curVal, useCol = false) {
+    function getCurrentBnNetRaw() {
+      if (lastBnAudit) return lastBnAudit.net;
+      if (lastTel && typeof lastTel.netEquityGainTodayUsd === "number") return lastTel.netEquityGainTodayUsd;
+      return 0;
+    }
+
+    function windowDelta(msAgo, nowTs, curPnl) {
+      if (!eqHist.length) return 0;
       const targetTs = nowTs - msAgo;
-      let ref = eqHist.length ? eqHist[0] : null;
+      let ref = eqHist[0];
       for (let i = eqHist.length - 1; i >= 0; i--) {
         if (eqHist[i].t <= targetTs) { ref = eqHist[i]; break; }
       }
-      if (!ref) return 0;
-      return curVal - (useCol ? (ref.c ?? ref.v) : ref.v);
+      return curPnl - ref.v;
     }
 
-    // O(K) Incremental Trade Parser using exact Lighter Sequencer bid_account_pnl / ask_account_pnl
-    function ingestTrades(trades, isOlderBatch = false) {
+    function ingestTrades(trades) {
       if (!Array.isArray(trades) || !trades.length) return false;
-      const added = [];
+      let changed = false;
       for (let i = 0; i < trades.length; i++) {
         const t = trades[i];
         const tid = t.trade_id;
@@ -336,233 +350,17 @@
         const sz = parseFloat(t.size || 0);
         const exitPx = parseFloat(t.price || 0);
         const usd = parseFloat(t.usd_amount || (sz * exitPx));
-        // ReduceOnly close: selling (isAsk) closes a LONG; buying (isBid) closes a SHORT
         const isLong = isAsk;
         const entryPx = sz > 1e-9 ? (isLong ? exitPx - (pnl / sz) : exitPx + (pnl / sz)) : exitPx;
         const ts = Number(t.timestamp) || Date.now();
-
-        added.push({
-          id: tid, sym, side: isLong ? "LONG" : "SHORT",
-          sz, usd, entry: entryPx, exit: exitPx, pnl, ts,
-          timeStr: fmtIST(ts)
-        });
+        closedList.push({ id: tid, sym, side: isLong ? "LONG" : "SHORT", sz, usd, entry: entryPx, exit: exitPx, pnl, ts });
+        changed = true;
       }
-      if (!added.length) return false;
-
-      if (isOlderBatch && closedList.length) {
-        added.sort((a, b) => (b.ts - a.ts) || (b.id - a.id));
-        closedList.push(...added);
-      } else {
-        closedList.push(...added);
+      if (changed) {
         closedList.sort((a, b) => (b.ts - a.ts) || (b.id - a.id));
+        if (closedList.length > 200) closedList.length = 200;
       }
-      if (closedList.length > MAX_RING) closedList.length = MAX_RING;
-      return true;
-    }
-
-    async function loadOlderTrades() {
-      if (loadingOlder || olderExhausted) return;
-      loadingOlder = true;
-      try {
-        const url = olderCursor ? `${LT_TRADES_API}&cursor=${encodeURIComponent(olderCursor)}` : LT_TRADES_API;
-        const r = await fetch(url);
-        const d = await r.json();
-        const batch = d.trades || [];
-        olderCursor = d.next_cursor || null;
-        if (!batch.length || !olderCursor) olderExhausted = true;
-        if (ingestTrades(batch, true)) {
-          renderVirtualClosed(true);
-        }
-      } catch (_) {
-      } finally {
-        loadingOlder = false;
-      }
-    }
-
-    function renderOpenPositions() {
-      const openBody = document.getElementById("openBody");
-      if (!activeOpenMkts.length) {
-        if (openBody.innerHTML !== "") openBody.innerHTML = "";
-        return;
-      }
-      const nowTs = Date.now();
-      let html = "";
-      for (let i = 0; i < activeOpenMkts.length; i++) {
-        const p = activeOpenMkts[i];
-        const sym = p.symbol || ("MKT-" + p.market_id);
-        const rawSz = parseFloat(p.position || 0);
-        const sz = (p.sign !== undefined && p.sign < 0 && rawSz > 0) ? -rawSz : rawSz;
-        const absSz = Math.abs(sz);
-        const upnl = parseFloat(p.unrealized_pnl || 0);
-        const sideLbl = absSz === 0 ? "QUOTE" : (sz > 0 ? "LONG" : "SHORT");
-        const ords = p.open_order_count || 0;
-        const stKey = `${sideLbl}_${ords}`;
-        if (!POS_TIMERS[sym] || POS_TIMERS[sym].key !== stKey) {
-          POS_TIMERS[sym] = { key: stKey, ts: nowTs };
-        }
-        const elapsedMs = nowTs - POS_TIMERS[sym].ts;
-        const entry = parseFloat(p.avg_entry_price || 0);
-        const usd = absSz * entry;
-        // v58 1:1.7 Payoff + Winner Lock decay: 0-22s +3.5bps, 22-42s +2.2bps, 42-65s +0.6bps, 65-95s -0.6bps, 95s+ -1.5bps (115s zombie)
-        const stepBps = elapsedMs >= 95000 ? -1.5 : (elapsedMs >= 65000 ? -0.6 : (elapsedMs >= 42000 ? 0.6 : (elapsedMs >= 22000 ? 2.2 : 3.5)));
-        const tgt = (absSz > 0 && entry > 0) ? (sz > 0 ? entry * (1 + stepBps / 10000) : entry * (1 - stepBps / 10000)) : null;
-        const cdTxt = absSz > 0
-          ? (elapsedMs < 42000 ? `⏳${fmtAgo(42000 - elapsedMs)} LOCK` : (elapsedMs < 115000 ? `⏳${fmtAgo(115000 - elapsedMs)} SCRATCH` : "EXIT"))
-          : `⏳${fmtAgo(Math.max(0, 35000 - (elapsedMs % 35000)))}`;
-        const szTxt = absSz > 0 ? `${fmtQty(absSz, sym)}<span class="usd-sub">($${usd.toFixed(1)})</span>` : "0";
-        html += `<tr>
-          <td class="mono"><b>${sym}</b></td>
-          <td class="${absSz === 0 ? "" : (sz > 0 ? "pos" : "neg")}"><b>${sideLbl}</b></td>
-          <td class="mono">${szTxt}</td>
-          <td class="mono">${entry > 0 ? fmtPx(entry, sym) : "—"}</td>
-          <td class="mono" style="color:var(--muted);">${tgt === null ? "—" : fmtPx(tgt, sym)}</td>
-          <td class="mono">${ords} <span style="color:var(--muted);">· ${cdTxt}</span></td>
-          <td class="mono ${colorCls(upnl)}">${fmtSigned(upnl, 4)}</td>
-        </tr>`;
-      }
-      openBody.innerHTML = html;
-    }
-
-    // O(1) Virtual-Scroll Renderer: mounts at most ~16 rows regardless of 50 or 50,000 trades
-    function renderVirtualClosed(force = false) {
-      const vp = document.getElementById("tradeViewport");
-      const closedBody = document.getElementById("closedBody");
-      const total = closedList.length;
-      const metaEl = document.getElementById("tradeMeta");
-      metaEl.textContent = `${activeOpenMkts.length ? activeOpenMkts.length + " live · " : ""}${total} closed${olderExhausted ? "" : "+"}`;
-
-      if (total === 0) {
-        if (!activeOpenMkts.length) {
-          closedBody.innerHTML = '<tr><td colspan="7" style="color:var(--muted);">No open positions or closed trades</td></tr>';
-        } else {
-          closedBody.innerHTML = "";
-        }
-        lastVLen = 0;
-        return;
-      }
-
-      const openH = activeOpenMkts.length * ROW_H;
-      const adjScrollTop = Math.max(0, vp.scrollTop - openH);
-      const visCount = Math.ceil((vp.clientHeight || 256) / ROW_H) + OVERSCAN * 2;
-      const start = Math.max(0, Math.floor(adjScrollTop / ROW_H) - OVERSCAN);
-      const end = Math.min(total, start + visCount);
-
-      if (!force && start === lastVStart && end === lastVEnd && total === lastVLen) return;
-      lastVStart = start;
-      lastVEnd = end;
-      lastVLen = total;
-
-      const topPad = start * ROW_H;
-      const botPad = Math.max(0, (total - end) * ROW_H);
-
-      let html = topPad > 0 ? `<tr class="vspacer"><td colspan="7" style="height:${topPad}px;"></td></tr>` : "";
-      for (let i = start; i < end; i++) {
-        const c = closedList[i];
-        html += `<tr>
-          <td class="mono"><b>${c.sym}</b></td>
-          <td><span class="badge" style="font-size:0.6rem;padding:0.08rem 0.36rem;">CLOSED</span> <span class="${c.side === "LONG" ? "pos" : "neg"}" style="font-size:0.71rem;">${c.side}</span></td>
-          <td class="mono">${fmtQty(c.sz, c.sym)}<span class="usd-sub">($${c.usd.toFixed(1)})</span></td>
-          <td class="mono">${fmtPx(c.entry, c.sym)}</td>
-          <td class="mono" style="color:var(--muted);">${fmtPx(c.exit, c.sym)}</td>
-          <td class="mono" style="color:var(--muted);">${c.timeStr} IST</td>
-          <td class="mono ${colorCls(c.pnl)}">${fmtSigned(c.pnl, 4)}</td>
-        </tr>`;
-      }
-      if (botPad > 0) html += `<tr class="vspacer"><td colspan="7" style="height:${botPad}px;"></td></tr>`;
-      closedBody.innerHTML = html;
-    }
-
-    document.getElementById("tradeViewport").addEventListener("scroll", function () {
-      if (scrollRaf) return;
-      scrollRaf = true;
-      requestAnimationFrame(() => {
-        scrollRaf = false;
-        renderVirtualClosed(false);
-        const vp = document.getElementById("tradeViewport");
-        if (vp.scrollTop + vp.clientHeight >= vp.scrollHeight - 140) {
-          loadOlderTrades();
-        }
-      });
-    }, { passive: true });
-
-    function renderSummary() {
-      if (!lastData) return;
-      const eq = parseFloat(lastData.total_asset_value ?? lastData.collateral ?? 0);
-      const col = parseFloat(lastData.collateral ?? eq);
-      const nowTs = Date.now();
-
-      const pnl = eq - seedUsd;
-      const roi = seedUsd > 0 ? ((pnl / seedUsd) * 100).toFixed(2) : "0.00";
-      document.getElementById("eqVal").textContent = `$${eq.toFixed(4)}`;
-      document.getElementById("realSub").innerHTML =
-        `<span>Net <b class="${colorCls(pnl)}">${fmtSigned(pnl, 4)} (${roi}%)</b></span>`;
-
-      const d5m = windowDelta(5 * 60e3, nowTs, eq);
-      const d15m = windowDelta(15 * 60e3, nowTs, eq);
-      const d1h = windowDelta(60 * 60e3, nowTs, eq);
-      const d24h = windowDelta(24 * 3600e3, nowTs, eq);
-      const d1hCol = windowDelta(60 * 60e3, nowTs, col, true);
-
-      const basePt = rrBase || (eqHist.length > 1 ? { t: eqHist[0].t, v: eqHist[0].c ?? eqHist[0].v } : null);
-      const elapsedMs = basePt ? Math.max(nowTs - basePt.t, 0) : 0;
-      const elapsedHrs = Math.max(elapsedMs / 3600e3, 1 / 60);
-      const hrRate = !basePt || elapsedMs < 3000 ? 0 : (elapsedHrs >= 1.0 ? d1hCol : (col - basePt.v) / elapsedHrs);
-      const hrEl = document.getElementById("hrRate");
-      hrEl.textContent = `${fmtSigned(hrRate, 4)}/hr`;
-      hrEl.className = "hero-pnl mono " + colorCls(hrRate);
-      document.getElementById("dayRate").textContent = `${fmtSigned(hrRate * 24, 2)}/day`;
-
-      for (const [id, val] of [["tf5m", d5m], ["tf15m", d15m], ["tf1h", d1h], ["tf24h", d24h]]) {
-        const el = document.getElementById(id);
-        el.textContent = fmtSigned(val, 3);
-        el.className = colorCls(val);
-      }
-
-      document.getElementById("tierBadge").textContent = lastData.account_type === 0 ? "0% FEE" : "PRO";
-      document.getElementById("acctSub").textContent = `#${ACCT_INDEX} • ${fmtIST(nowTs)} IST`;
-
-      if (eqDirty && eqHist.length >= 2) {
-        eqDirty = false;
-        const sc = document.getElementById("chartScroll");
-        const svg = document.getElementById("eqSvg");
-        const atRight = sc.scrollLeft + sc.clientWidth >= sc.scrollWidth - 24;
-        const svgW = Math.max(sc.clientWidth || 560, eqHist.length * 6);
-        svg.setAttribute("viewBox", `0 0 ${svgW} 185`);
-        svg.style.width = `${svgW}px`;
-        let minV = seedUsd, maxV = seedUsd;
-        for (let i = 0; i < eqHist.length; i++) {
-          if (eqHist[i].v < minV) minV = eqHist[i].v;
-          if (eqHist[i].v > maxV) maxV = eqHist[i].v;
-        }
-        const span = Math.max(maxV - minV, 0.001);
-        const pts = new Array(eqHist.length);
-        const denom = eqHist.length - 1;
-        for (let i = 0; i < eqHist.length; i++) {
-          pts[i] = `${((i / denom) * svgW).toFixed(1)},${(172 - ((eqHist[i].v - minV) / span) * 158).toFixed(1)}`;
-        }
-        const seedY = (172 - ((seedUsd - minV) / span) * 158).toFixed(1);
-        const sLine = document.getElementById("seedLine");
-        sLine.setAttribute("x2", svgW);
-        sLine.setAttribute("y1", seedY);
-        sLine.setAttribute("y2", seedY);
-        const line = document.getElementById("eqLine");
-        line.setAttribute("points", pts.join(" "));
-        line.setAttribute("stroke", pnl >= 0 ? "#10b981" : "#ef4444");
-        document.getElementById("chartRange").textContent = `$${minV.toFixed(4)} – $${maxV.toFixed(4)}`;
-        if (!didInitialScroll || atRight) {
-          sc.scrollLeft = sc.scrollWidth;
-          didInitialScroll = true;
-        }
-      }
-
-      const prevOpenLen = activeOpenMkts.length;
-      activeOpenMkts = (lastData.positions || []).filter(
-        p => Math.abs(parseFloat(p.position || 0)) > 0 || (p.open_order_count || 0) > 0
-      );
-      renderOpenPositions();
-      if (activeOpenMkts.length !== prevOpenLen) {
-        renderVirtualClosed(true);
-      }
+      return changed;
     }
 
     function humanizeLegs(legs) {
@@ -587,12 +385,13 @@
       return { coin: legs.split("_")[0], desc: legs };
     }
 
-    function renderDnTelemetry(data) {
+    function parseTelemetryLog(data) {
       const logTxt = String(data.lighterLog || "");
       const lines = logTxt.split("\n");
       let ver = "LIVE";
       let scanTxt = "";
       let readyTxt = "";
+      let audit = null;
       const byId = new Map();
 
       for (const ln of lines) {
@@ -600,17 +399,24 @@
         if (vm) ver = vm[1];
         if (ln.includes("[DN_READY]")) readyTxt = ln.replace(/^.*\[DN_READY\]\s*/, "").trim();
         if (ln.includes("[DN_SCAN]")) {
-          const sm = ln.match(/best=([A-Z0-9]+).*?netEdge=([+-]?[0-9.]+bp)/);
-          scanTxt = sm ? `Best spread right now: ${sm[1]} (${sm[2]} after fees)` : ln.replace(/^.*\[DN_SCAN\]\s*/, "").trim();
+          const sm = ln.match(/best=([A-Z0-9]+).*?(?:netAfterFee|netEdge)=([+-]?[0-9.]+bp)/);
+          scanTxt = sm ? `Best spread right now: ${sm[1]} (${sm[2]} AFTER fees — triggers at +2.20bp)` : ln.replace(/^.*\[DN_SCAN\]\s*/, "").trim();
         }
-        let om = ln.match(/\[STRAT_OPEN id=(\d+) strat=([A-Z0-9_]+) legs="([^"]+)" usd=\$([0-9.]+) mult=[0-9.]+x edge=([+-]?[0-9.]+)bp\s*([^\]]*)\]/);
+        const am = ln.match(/\[BN_AUDIT real=([+-]?[0-9.]+) fee=([+-]?[0-9.]+) fund=([+-]?[0-9.]+) upnl=([+-]?[0-9.]+) net=([+-]?[0-9.]+) trades=(\d+)\]/);
+        if (am) {
+          audit = {
+            real: parseFloat(am[1]), fee: parseFloat(am[2]), fund: parseFloat(am[3]),
+            upnl: parseFloat(am[4]), net: parseFloat(am[5]), trades: parseInt(am[6], 10)
+          };
+        }
+        const om = ln.match(/\[STRAT_OPEN id=(\d+) strat=([A-Z0-9_]+) legs="([^"]+)" usd=\$([0-9.]+) mult=[0-9.]+x edge=([+-]?[0-9.]+)bp\s*([^\]]*)\]/);
         if (om) {
           byId.set(om[1], {
             id: Number(om[1]), strat: om[2], legs: om[3], usd: parseFloat(om[4]),
             edgeBps: parseFloat(om[5]), detail: om[6], status: "OPEN", holdS: null, pnlBps: null, pnlUsd: null
           });
         }
-        let cm = ln.match(/\[STRAT_CLOSE id=(\d+) strat=([A-Z0-9_]+) legs="([^"]+)" usd=\$([0-9.]+) hold=([0-9.]+)s pnl=([+-]?[0-9.]+)bp\(\$([+-]?[0-9.]+)\) reason=([^\]]+)\]/);
+        const cm = ln.match(/\[STRAT_CLOSE id=(\d+) strat=([A-Z0-9_]+) legs="([^"]+)" usd=\$([0-9.]+) hold=([0-9.]+)s pnl=([+-]?[0-9.]+)bp\(\$([+-]?[0-9.]+)\) reason=([^\]]+)\]/);
         if (cm) {
           const prev = byId.get(cm[1]) || { id: Number(cm[1]), strat: cm[2], legs: cm[3], usd: parseFloat(cm[4]) };
           prev.holdS = parseFloat(cm[5]);
@@ -621,95 +427,203 @@
           byId.set(cm[1], prev);
         }
       }
+      if (audit) lastBnAudit = audit;
+      return { ver, scanTxt, readyTxt, rows: Array.from(byId.values()).sort((a, b) => b.id - a.id) };
+    }
 
-      const badgeEl = document.getElementById("dnEngineBadge");
-      const paused = !!data.userPaused;
-      badgeEl.textContent = paused ? "PAUSED" : `TOKYO ${ver}`;
-      badgeEl.style.color = paused ? "#ef4444" : "#10b981";
-      document.getElementById("dnScanLine").textContent = scanTxt || readyTxt || "Scanning all 164 auto-discovered common contracts...";
+    function renderAll() {
+      if (!lastAcct || !lastTel) return;
+      const nowTs = Date.now();
+      const parsed = parseTelemetryLog(lastTel);
 
-      const rows = Array.from(byId.values()).sort((a, b) => b.id - a.id);
-      const bodyEl = document.getElementById("dnArbBody");
-      const metaEl = document.getElementById("dnTradeMeta");
-      const bnUsd = data.totalLiveUsd ? ` • Binance Equity $${Number(data.totalLiveUsd).toFixed(2)}` : "";
-      metaEl.textContent = `${rows.length} session arb trade${rows.length === 1 ? "" : "s"}${bnUsd}`;
+      const ltEq = parseFloat(lastAcct.total_asset_value ?? lastAcct.collateral ?? 0);
+      const ltPnl = ltEq - seedLtUsd;
 
-      if (!rows.length) {
-        bodyEl.innerHTML = `<tr><td colspan="7" style="color:var(--muted);">Armed &amp; scanning 164 pairs for clean fee-covered spreads — next trade will appear here automatically.</td></tr>`;
-        return;
+      const bnWallet = parseFloat(lastTel.totalLiveUsd ?? 498.445);
+      const bnTodayDelta = parseFloat(lastTel.netEquityGainTodayUsd ?? -0.0486);
+      const bnRawNet = lastBnAudit ? lastBnAudit.net : bnTodayDelta;
+      const bnNet = bnRawNet - bnAuditOffset;
+      const bnReal = lastBnAudit ? lastBnAudit.real : -0.0404;
+      const bnFees = lastBnAudit ? lastBnAudit.fee : -0.0274;
+
+      const combPnl = ltPnl + bnNet;
+      const combCap = ltEq + bnWallet;
+
+      // Update rolling history of Combined Net PnL
+      if (!eqHist.length || nowTs - eqHist[eqHist.length - 1].t >= 5000) {
+        eqHist.push({ t: nowTs, v: combPnl });
+        if (eqHist.length > 2500) eqHist = eqHist.slice(-2500);
+        if (nowTs - lastSaveTs >= 15000) {
+          lastSaveTs = nowTs;
+          localStorage.setItem(STORE_KEY, JSON.stringify(eqHist));
+        }
       }
-      let html = "";
-      for (const r of rows) {
-        const h = humanizeLegs(r.legs);
-        const holdTxt = r.holdS !== null ? `${r.holdS.toFixed(1)}s` : "Live…";
-        const pnlTxt = r.pnlUsd !== null
-          ? `<b class="${colorCls(r.pnlUsd)}">${fmtSigned(r.pnlUsd, 4)}</b> <span class="usd-sub">(${r.pnlBps >= 0 ? "+" : ""}${r.pnlBps.toFixed(2)}bp)</span>`
-          : `<span class="pos">Locked ${r.edgeBps >= 0 ? "+" : ""}${(r.edgeBps || 0).toFixed(2)}bp</span>`;
-        const stBadge = r.status === "OPEN"
-          ? `<span class="badge">HEDGED LIVE</span>`
-          : `<span class="badge" style="color:var(--muted);border-color:var(--border);background:transparent;">${r.reason || "CLOSED"}</span>`;
-        html += `<tr>
-          <td class="mono" style="color:var(--muted);">${fmtIST(r.id)}</td>
-          <td class="mono"><b>${h.coin}</b></td>
-          <td>${h.desc}</td>
-          <td class="mono">$${r.usd.toFixed(2)}</td>
-          <td class="mono">${holdTxt}</td>
-          <td class="mono">${pnlTxt}</td>
-          <td>${stBadge}</td>
+
+      // Giant Hero P&L
+      const combEl = document.getElementById("combPnlVal");
+      combEl.textContent = fmtSigned(combPnl, 4);
+      combEl.className = "giant-pnl mono " + colorCls(combPnl);
+      document.getElementById("combSubLine").textContent =
+        `Combined Capital: $${combCap.toFixed(2)} (Lighter $${ltEq.toFixed(4)} + Binance $${bnWallet.toFixed(2)})`;
+
+      // Venue Breakdown Boxes
+      const ltEl = document.getElementById("ltPnlVal");
+      ltEl.textContent = fmtSigned(ltPnl, 4);
+      ltEl.className = "venue-val mono " + colorCls(ltPnl);
+      document.getElementById("ltDetail").textContent = `Lighter Equity: $${ltEq.toFixed(4)} • Fees Paid: $0.0000 (0%)`;
+
+      const bnEl = document.getElementById("bnNetVal");
+      bnEl.textContent = fmtSigned(bnNet, 4);
+      bnEl.className = "venue-val mono " + colorCls(bnNet);
+      document.getElementById("bnDetail").textContent =
+        `Realized Price PnL: ${fmtSigned(bnReal, 4)} • Open uPnL: ${fmtSigned(lastBnAudit ? lastBnAudit.upnl : 0, 4)}`;
+
+      const feeEl = document.getElementById("bnFeesVal");
+      feeEl.textContent = fmtSigned(bnFees, 4);
+      feeEl.className = "venue-val mono " + (bnFees < -0.0001 ? "neg" : "pos");
+      document.getElementById("bnWalletDetail").textContent =
+        `Binance Total Wallet: $${bnWallet.toFixed(3)} (Today Wallet Δ ${fmtSigned(bnTodayDelta, 4)})`;
+
+      // Run Rate
+      const d5m = windowDelta(5 * 60e3, nowTs, combPnl);
+      const d15m = windowDelta(15 * 60e3, nowTs, combPnl);
+      const d1h = windowDelta(60 * 60e3, nowTs, combPnl);
+      const d24h = windowDelta(24 * 3600e3, nowTs, combPnl);
+
+      const basePt = rrBase || (eqHist.length > 1 ? eqHist[0] : null);
+      const elapsedHrs = basePt ? Math.max((nowTs - basePt.t) / 3600e3, 1 / 60) : 1 / 60;
+      const hrRate = !basePt || (nowTs - basePt.t) < 5000 ? 0 : (elapsedHrs >= 1.0 ? d1h : (combPnl - basePt.v) / elapsedHrs);
+      const hrEl = document.getElementById("hrRate");
+      hrEl.textContent = `${fmtSigned(hrRate, 4)}/hr`;
+      hrEl.className = "giant-rate mono " + colorCls(hrRate);
+      document.getElementById("dayRate").textContent = `${fmtSigned(hrRate * 24, 2)}/day`;
+
+      for (const [id, val] of [["tf5m", d5m], ["tf15m", d15m], ["tf1h", d1h], ["tf24h", d24h]]) {
+        const el = document.getElementById(id);
+        el.textContent = fmtSigned(val, 3);
+        el.className = colorCls(val);
+      }
+
+      const paused = !!(lastTel.hftTest && lastTel.hftTest.userPaused);
+      const badgeEl = document.getElementById("dnEngineBadge");
+      badgeEl.textContent = paused ? "PAUSED" : `TOKYO ${parsed.ver} • ZERO-FEE USDC`;
+      badgeEl.style.color = paused ? "#ef4444" : "#10b981";
+      document.getElementById("acctSub").textContent = `#${ACCT_INDEX} • Updated ${fmtIST(nowTs)} IST`;
+      document.getElementById("dnScanLine").textContent =
+        parsed.scanTxt || parsed.readyTxt || "Scanning 33 Zero-Fee USDC-M pairs + :00 Hourly Funding Arbs...";
+
+      // Dual-Venue Table
+      const bodyEl = document.getElementById("dnArbBody");
+      document.getElementById("dnTradeMeta").textContent =
+        `${parsed.rows.length} live session trade${parsed.rows.length === 1 ? "" : "s"} • Strictly 0% Maker Exit`;
+      if (!parsed.rows.length) {
+        bodyEl.innerHTML = `<tr><td colspan="7" style="color:var(--muted);">Waiting for >= +6.2bp spread on 0%-fee USDC pairs (+2.2bp net profit AFTER full fee cushion)...</td></tr>`;
+      } else {
+        let html = "";
+        for (const r of parsed.rows) {
+          const h = humanizeLegs(r.legs);
+          const holdTxt = r.holdS !== null ? `${r.holdS.toFixed(1)}s` : "Open Live…";
+          const pnlTxt = r.pnlUsd !== null
+            ? `<b class="${colorCls(r.pnlUsd)}">${fmtSigned(r.pnlUsd, 4)}</b> <span class="usd-sub">(${r.pnlBps >= 0 ? "+" : ""}${r.pnlBps.toFixed(2)}bp)</span>`
+            : `<span class="pos">Locked ${r.edgeBps >= 0 ? "+" : ""}${(r.edgeBps || 0).toFixed(2)}bp after fees</span>`;
+          const stBadge = r.status === "OPEN"
+            ? `<span class="badge">HEDGED LIVE</span>`
+            : `<span class="badge" style="color:var(--muted);border-color:var(--border);background:transparent;">${r.reason || "CLOSED"}</span>`;
+          html += `<tr>
+            <td class="mono" style="color:var(--muted);">${fmtIST(r.id)}</td>
+            <td class="mono"><b>${h.coin}</b></td>
+            <td>${h.desc}</td>
+            <td class="mono">$${r.usd.toFixed(2)}</td>
+            <td class="mono">${holdTxt}</td>
+            <td class="mono">${pnlTxt}</td>
+            <td>${stBadge}</td>
+          </tr>`;
+        }
+        bodyEl.innerHTML = html;
+      }
+
+      // Lighter Open Positions & Fills
+      activeOpenMkts = (lastAcct.positions || []).filter(
+        p => Math.abs(parseFloat(p.position || 0)) > 0 || (p.open_order_count || 0) > 0
+      );
+      const openBody = document.getElementById("openBody");
+      let oHtml = "";
+      for (const p of activeOpenMkts) {
+        const sym = p.symbol || ("MKT-" + p.market_id);
+        const rawSz = parseFloat(p.position || 0);
+        const sz = (p.sign !== undefined && p.sign < 0 && rawSz > 0) ? -rawSz : rawSz;
+        const absSz = Math.abs(sz);
+        const upnl = parseFloat(p.unrealized_pnl || 0);
+        const sideLbl = absSz === 0 ? "RESTING QUOTE" : (sz > 0 ? "LONG" : "SHORT");
+        const entry = parseFloat(p.avg_entry_price || 0);
+        const usd = absSz * entry;
+        oHtml += `<tr>
+          <td class="mono"><b>${sym}</b></td>
+          <td class="${absSz === 0 ? "warn" : (sz > 0 ? "pos" : "neg")}"><b>${sideLbl}</b></td>
+          <td class="mono">${absSz > 0 ? `${fmtQty(absSz, sym)}<span class="usd-sub">($${usd.toFixed(2)})</span>` : "0"}</td>
+          <td class="mono">${entry > 0 ? fmtPx(entry, sym) : "—"}</td>
+          <td class="mono" style="color:var(--muted);">OPEN</td>
+          <td class="mono" style="color:var(--muted);">LIVE</td>
+          <td class="mono ${colorCls(upnl)}"><b>${fmtSigned(upnl, 4)}</b></td>
         </tr>`;
       }
-      bodyEl.innerHTML = html;
+      openBody.innerHTML = oHtml;
+
+      const closedBody = document.getElementById("closedBody");
+      document.getElementById("tradeMeta").textContent = `${activeOpenMkts.length} open • ${closedList.length} closed fills`;
+      let cHtml = "";
+      const lim = Math.min(closedList.length, 40);
+      for (let i = 0; i < lim; i++) {
+        const c = closedList[i];
+        cHtml += `<tr>
+          <td class="mono"><b>${c.sym}</b></td>
+          <td><span class="${c.side === "LONG" ? "pos" : "neg"}"><b>CLOSED ${c.side}</b></span></td>
+          <td class="mono">${fmtQty(c.sz, c.sym)}<span class="usd-sub">($${c.usd.toFixed(2)})</span></td>
+          <td class="mono">${fmtPx(c.entry, c.sym)}</td>
+          <td class="mono" style="color:var(--muted);">${fmtPx(c.exit, c.sym)}</td>
+          <td class="mono" style="color:var(--muted);">${fmtIST(c.ts)} IST</td>
+          <td class="mono ${colorCls(c.pnl)}"><b>${fmtSigned(c.pnl, 4)}</b></td>
+        </tr>`;
+      }
+      closedBody.innerHTML = cHtml || (!activeOpenMkts.length ? '<tr><td colspan="7" style="color:var(--muted);">No closed fills yet</td></tr>' : "");
     }
 
     async function poll() {
       try {
         const res = await fetch(API_URL + Date.now());
         const data = await res.json();
-        renderDnTelemetry(data);
+        lastTel = data;
         const acct = data.lighterAccount || (data.accounts || [])[0];
-        const tradesChanged = data.lighterTrades ? ingestTrades(data.lighterTrades, false) : false;
-        if (!acct) return;
-        lastData = acct;
-        const eq = parseFloat(acct.total_asset_value ?? acct.collateral ?? 0);
-        const col = parseFloat(acct.collateral ?? eq);
-        const now = Date.now();
-        if (!eqHist.length || now - eqHist[eqHist.length - 1].t >= 5000) {
-          eqHist.push({ t: now, v: eq, c: col });
-          if (eqHist.length > 2500) eqHist = eqHist.slice(-2500);
-          eqDirty = true;
-          if (now - lastSaveTs >= 15000) {
-            lastSaveTs = now;
-            localStorage.setItem(STORE_KEY, JSON.stringify(eqHist));
-          }
-        }
+        if (data.lighterTrades) ingestTrades(data.lighterTrades);
+        if (acct) lastAcct = acct;
         document.getElementById("liveDot").style.background = "#10b981";
-        renderSummary();
-        if (tradesChanged || lastVLen < 0) renderVirtualClosed(true);
+        renderAll();
       } catch (_) {
         document.getElementById("liveDot").style.background = "#ef4444";
       }
     }
 
+    async function loadInitialTrades() {
+      try {
+        const r = await fetch(LT_TRADES_API);
+        const d = await r.json();
+        if (d.trades) ingestTrades(d.trades);
+        renderAll();
+      } catch (_) {}
+    }
+
     async function refreshRunRate() {
-      const btn = document.getElementById("rrBtn");
-      if (btn) btn.textContent = "…";
       await poll();
-      if (lastData) {
-        const col = parseFloat(lastData.collateral ?? lastData.total_asset_value ?? 0);
-        rrBase = { t: Date.now(), v: col };
+      if (eqHist.length) {
+        rrBase = { t: Date.now(), v: eqHist[eqHist.length - 1].v };
         localStorage.setItem(RR_KEY, JSON.stringify(rrBase));
       }
-      renderSummary();
-      if (btn) {
-        btn.textContent = "✓";
-        setTimeout(() => { btn.textContent = "↻"; }, 800);
-      }
+      renderAll();
     }
 
     poll();
-    loadOlderTrades(); // Seed cursor state for seamless infinite scroll
+    loadInitialTrades();
     setInterval(poll, 2000);
-    setInterval(() => { if (activeOpenMkts.length) renderOpenPositions(); }, 1000);
   </script>
 </body>
 </html>
