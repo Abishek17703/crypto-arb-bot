@@ -5993,9 +5993,28 @@ func setupBnUsdcMargin() bool {
 	_ = json.Unmarshal(body, &bals)
 	usdcBal := 0.0
 	for _, x := range bals {
-		if x.Asset == "USDC" {
-			usdcBal, _ = strconv.ParseFloat(x.Avail, 64)
+		if x.Asset == "USDC" || x.Asset == "USDT" {
+			av, _ := strconv.ParseFloat(x.Avail, 64)
+			if x.Asset == "USDC" {
+				usdcBal = av
+			}
 		}
+	}
+	// 2a. Also ensure $45 USDT is in UMFUTURE for high-yield USDT-M hourly funding arbs (e.g. MSTR +28bp!):
+	var usdtFut float64
+	for _, x := range bals {
+		if x.Asset == "USDT" {
+			usdtFut, _ = strconv.ParseFloat(x.Avail, 64)
+		}
+	}
+	if usdtFut < 35.0 {
+		tU := url.Values{}
+		tU.Set("type", "MAIN_UMFUTURE")
+		tU.Set("asset", "USDT")
+		tU.Set("amount", "45.00")
+		tSc, tB, _ := bnSignReq("POST", "api.binance.com", "/sapi/v1/asset/transfer", tU)
+		fmt.Printf("[DN_USDT_TRANSFER] moved $45.00 USDT MAIN->UMFUTURE status=%d resp=%s\n", tSc, string(tB))
+		time.Sleep(200 * time.Millisecond)
 	}
 	// 2. If UMFUTURE USDC < $28, convert $20 Spot USDT -> Spot USDC and transfer $32 USDC to UMFUTURE:
 	if usdcBal < 28.0 {
@@ -6063,14 +6082,14 @@ func setupBnUsdcMargin() bool {
 	pmP := url.Values{}
 	pmP.Set("dualSidePosition", "false")
 	_, _, _ = bnSignReq("POST", "fapi.binance.com", "/fapi/v1/positionSide/dual", pmP)
-	for _, sp := range []string{"SOLUSDC", "ETHUSDC", "XRPUSDC", "HYPEUSDC", "ZECUSDC", "SUIUSDC"} {
+	for _, sp := range []string{"SOLUSDC", "ETHUSDC", "XRPUSDC", "HYPEUSDC", "ZECUSDC", "SUIUSDC", "MSTRUSDT", "COINUSDT", "CRCLUSDT"} {
 		lvP := url.Values{}
 		lvP.Set("symbol", sp)
 		lvP.Set("leverage", "5")
 		_, _, _ = bnSignReq("POST", "fapi.binance.com", "/fapi/v1/leverage", lvP)
 	}
-	fmt.Printf("[DN_READY] Binance UMFUTURE 0%%-Maker USDC Avail=$%.2f across %d pairs!\n", usdcBal, len(dnSpecs))
-	return usdcBal >= 12.0
+	fmt.Printf("[DN_READY] Binance UMFUTURE 0%%-Maker USDC Avail=$%.2f + USDT Funding Ready across %d pairs!\n", usdcBal, len(dnSpecs))
+	return usdcBal >= 12.0 || usdtFut >= 25.0
 }
 
 func flattenBnDnAndSweep() {
@@ -6108,6 +6127,9 @@ func flattenBnDnAndSweep() {
 						cSide = "BUY"
 					}
 					qDec := 3
+					if pr.Symbol == "MSTRUSDT" || pr.Symbol == "COINUSDT" || pr.Symbol == "CRCLUSDT" {
+						qDec = 2
+					}
 					for _, s := range dnSpecs {
 						if s.BnSym == pr.Symbol {
 							qDec = s.QDec
@@ -6125,7 +6147,7 @@ func flattenBnDnAndSweep() {
 		}
 	}
 	_ = symsToClean
-	// Sweep UMFUTURE USDC back to Spot on pause so halt_all_orders_and_repay sees 100% clean Spot!
+	// Sweep UMFUTURE USDC & USDT back to Spot on pause so halt_all_orders_and_repay sees 100% clean Spot!
 	if sc, b, err := bnSignReq("GET", "fapi.binance.com", "/fapi/v2/balance", nil); err == nil && sc == 200 {
 		var bals []struct {
 			Asset string `json:"asset"`
@@ -6133,13 +6155,13 @@ func flattenBnDnAndSweep() {
 		}
 		if json.Unmarshal(b, &bals) == nil {
 			for _, x := range bals {
-				if x.Asset == "USDC" {
+				if x.Asset == "USDC" || x.Asset == "USDT" {
 					av, _ := strconv.ParseFloat(x.Avail, 64)
 					sw := math.Floor(av*100.0) / 100.0
 					if sw >= 0.50 {
 						tp := url.Values{}
 						tp.Set("type", "UMFUTURE_MAIN")
-						tp.Set("asset", "USDC")
+						tp.Set("asset", x.Asset)
 						tp.Set("amount", fmt.Sprintf("%.2f", sw))
 						_, _, _ = bnSignReq("POST", "api.binance.com", "/sapi/v1/asset/transfer", tp)
 					}
@@ -6158,11 +6180,234 @@ func placeLtHedgeIOC(sym, side string, px, mid, qty float64, isClose bool) {
 	placePairOrder(sym, side, roundTo(px, m.PxDec), mid, qty, isClose, true)
 }
 
+func runHourlyFundingSnipe() {
+	// Dedicated :00 Hourly Double-Paid Funding Arb Sniper (e.g. MSTR: Short Binance +26bp / Long Lighter +1.7bp = +28bp!)
+	var snipedHour int64 = -1
+	for {
+		time.Sleep(1500 * time.Millisecond)
+		if remotePaused.Load() || breakerTripped.Load() {
+			return
+		}
+		now := time.Now().UTC()
+		curHourID := now.Unix() / 3600
+		minInHr := now.Minute()
+		secInMin := now.Second()
+		// Trigger window: :50:00 to :58:45 UTC before the top of the hour!
+		if minInHr < 50 || (minInHr == 58 && secInMin > 45) || minInHr == 59 || snipedHour == curHourID {
+			continue
+		}
+		if awaitingReview.Load() || anyOpenAcctPos() || dnBusyFlag.Load() {
+			continue
+		}
+		nextHr := (now.Hour() + 1) % 24
+		// Check MSTR (id=122) live funding + live books:
+		m, ok := markets["MSTR"]
+		st := mktStates["MSTR"]
+		if !ok || st == nil {
+			continue
+		}
+		ensureLtSubscribed(m.ID)
+		// Fetch live Binance MSTRUSDT premiumIndex & bookTicker + Lighter funding-rates:
+		hc := &http.Client{Timeout: 3 * time.Second}
+		prResp, e1 := hc.Get("https://fapi.binance.com/fapi/v1/premiumIndex?symbol=MSTRUSDT")
+		bkResp, e2 := hc.Get("https://fapi.binance.com/fapi/v1/ticker/bookTicker?symbol=MSTRUSDT")
+		frResp, e3 := hc.Get(BaseURL + "/api/v1/funding-rates")
+		if e1 != nil || e2 != nil || e3 != nil {
+			continue
+		}
+		prB, _ := io.ReadAll(prResp.Body); prResp.Body.Close()
+		bkB, _ := io.ReadAll(bkResp.Body); bkResp.Body.Close()
+		frB, _ := io.ReadAll(frResp.Body); frResp.Body.Close()
+		var pr struct {
+			Rate string `json:"lastFundingRate"`
+		}
+		var bk struct {
+			Bid string `json:"bidPrice"`
+			Ask string `json:"askPrice"`
+		}
+		var fr struct {
+			Rates []struct {
+				ID   int64   `json:"market_id"`
+				Exch string  `json:"exchange"`
+				Rate float64 `json:"rate"`
+			} `json:"funding_rates"`
+		}
+		if json.Unmarshal(prB, &pr) != nil || json.Unmarshal(bkB, &bk) != nil || json.Unmarshal(frB, &fr) != nil {
+			continue
+		}
+		bnR, _ := strconv.ParseFloat(pr.Rate, 64)
+		bnBps := 0.0
+		if nextHr%8 == 0 { // MSTRUSDT settles at 00:00, 08:00, 16:00 UTC!
+			bnBps = bnR * 10000.0
+		}
+		ltBps := 0.0
+		for _, r := range fr.Rates {
+			if r.ID == 122 && r.Exch == "lighter" {
+				ltBps = (r.Rate / 8.0) * 10000.0
+			}
+		}
+		netFundBps := bnBps - ltBps // Positive means SHORT Binance + LONG Lighter collects netFundBps!
+		bb, _ := strconv.ParseFloat(bk.Bid, 64)
+		ba, _ := strconv.ParseFloat(bk.Ask, 64)
+		lb, la, _, laUSD := fetchLtBookREST(m.ID)
+		if bb <= 0 || ba <= 0 || lb <= 0 || la <= lb {
+			continue
+		}
+		entrySlipBps := (la - bb) / bb * 10000.0 // Buy Lt @ Ask, Short Bn @ Bid (or Maker Ask)
+		// Require net funding after 8bp conservative round-trip Binance fees + entry spread >= +10.0 bps!
+		if netFundBps-entrySlipBps-8.0 < 10.0 || laUSD < 180.0 {
+			continue
+		}
+		snipedHour = curHourID
+		dnBusyFlag.Store(true)
+
+		// Size $150 hedged notional (~1.86 MSTR: safe 3.3x on $45 Binance USDT & 1.6x on $93 Lighter!):
+		qty := math.Floor((150.0/la)/0.01) * 0.01
+		if qty < 0.25 {
+			dnBusyFlag.Store(false)
+			continue
+		}
+		tid := time.Now().UnixMilli()
+		// 1) Open SHORT on Binance MSTRUSDT first (try GTX Maker @ Ask for 2.5s, fallback MARKET so we never miss :00!):
+		bnFillPx := bb
+		p := url.Values{}
+		p.Set("symbol", "MSTRUSDT")
+		p.Set("side", "SELL")
+		p.Set("type", "LIMIT")
+		p.Set("timeInForce", "GTX")
+		p.Set("quantity", fmt.Sprintf("%.2f", qty))
+		p.Set("price", fmt.Sprintf("%.2f", ba))
+		sc, ob, err := bnSignReq("POST", "fapi.binance.com", "/fapi/v1/order", p)
+		filledBn := false
+		if err == nil && sc == 200 {
+			var or struct {
+				OrderID int64  `json:"orderId"`
+				Status  string `json:"status"`
+			}
+			if json.Unmarshal(ob, &or) == nil && or.OrderID > 0 && or.Status != "EXPIRED" {
+				for w := 0; w < 10; w++ {
+					time.Sleep(250 * time.Millisecond)
+					qp := url.Values{}
+					qp.Set("symbol", "MSTRUSDT")
+					qp.Set("orderId", strconv.FormatInt(or.OrderID, 10))
+					if gSc, gB, gE := bnSignReq("GET", "fapi.binance.com", "/fapi/v1/order", qp); gE == nil && gSc == 200 {
+						var goi struct {
+							Status string `json:"status"`
+							AvgPx  string `json:"avgPrice"`
+						}
+						_ = json.Unmarshal(gB, &goi)
+						if goi.Status == "FILLED" {
+							filledBn = true
+							bnFillPx, _ = strconv.ParseFloat(goi.AvgPx, 64)
+							if bnFillPx <= 0 {
+								bnFillPx = ba
+							}
+							break
+						}
+					}
+				}
+				if !filledBn {
+					dp := url.Values{}
+					dp.Set("symbol", "MSTRUSDT")
+					dp.Set("orderId", strconv.FormatInt(or.OrderID, 10))
+					_, dB, _ := bnSignReq("DELETE", "fapi.binance.com", "/fapi/v1/order", dp)
+					var dc struct {
+						Status string `json:"status"`
+					}
+					_ = json.Unmarshal(dB, &dc)
+					if dc.Status == "FILLED" {
+						filledBn = true
+						bnFillPx = ba
+					}
+				}
+			}
+		}
+		if !filledBn {
+			mp := url.Values{}
+			mp.Set("symbol", "MSTRUSDT")
+			mp.Set("side", "SELL")
+			mp.Set("type", "MARKET")
+			mp.Set("quantity", fmt.Sprintf("%.2f", qty))
+			mSc, mB, mE := bnSignReq("POST", "fapi.binance.com", "/fapi/v1/order", mp)
+			if mE != nil || mSc != 200 {
+				fmt.Printf("[DN_FUND_ERR] Binance MSTRUSDT entry failed sc=%d body=%s\n", mSc, string(mB))
+				dnBusyFlag.Store(false)
+				continue
+			}
+			var mo struct {
+				AvgPx string `json:"avgPrice"`
+			}
+			_ = json.Unmarshal(mB, &mo)
+			bnFillPx, _ = strconv.ParseFloat(mo.AvgPx, 64)
+			if bnFillPx <= 0 {
+				bnFillPx = bb
+			}
+		}
+		// 2) Immediately hedge LONG exact qty on 0%-fee Lighter!
+		lb2, la2, _, _ := fetchLtBookREST(m.ID)
+		if la2 <= 0 {
+			la2 = la
+		}
+		placeLtHedgeIOC("MSTR", "BID", roundTo(la2*1.004, m.PxDec), 0.5*(lb2+la2), qty, false)
+		recordStratOpen(tid, "ZERO_FEE_DN", "FUND_16Z_MSTR_LONG_LT_SHORT_BN", qty*bnFillPx, 1.0, netFundBps, fmt.Sprintf("bnFill=%.2f ltAsk=%.2f", bnFillPx, la2))
+		fmt.Printf("[DN_FUND_LOCKED id=%d] Bought %.2f MSTR on Lighter @ ~$%.2f + Shorted %.2f MSTR on Binance @ $%.2f | Waiting for :00:08 UTC payout (+%.2fbp)!\n",
+			tid, qty, la2, qty, bnFillPx, netFundBps)
+
+		// 3) Hold delta-neutral across :00:00 UTC until :00:10 UTC (so BOTH venues credit funding!), then unwind cleanly!
+		targetUnwind := time.Date(now.Year(), now.Month(), now.Day(), now.Hour(), 59, 59, 0, time.UTC).Add(11 * time.Second)
+		for time.Now().UTC().Before(targetUnwind) {
+			if remotePaused.Load() {
+				dnBusyFlag.Store(false)
+				return
+			}
+			time.Sleep(500 * time.Millisecond)
+		}
+		// 4) Unwind BOTH legs after :00:10 UTC funding credit!
+		cp := url.Values{}
+		cp.Set("symbol", "MSTRUSDT")
+		cp.Set("side", "BUY")
+		cp.Set("type", "MARKET")
+		cp.Set("reduceOnly", "true")
+		cp.Set("quantity", fmt.Sprintf("%.2f", qty))
+		_, cB, _ := bnSignReq("POST", "fapi.binance.com", "/fapi/v1/order", cp)
+		var co struct {
+			AvgPx string `json:"avgPrice"`
+		}
+		_ = json.Unmarshal(cB, &co)
+		bnExitPx, _ := strconv.ParseFloat(co.AvgPx, 64)
+		lb3, la3, _, _ := fetchLtBookREST(m.ID)
+		if bnExitPx <= 0 && ba > 0 {
+			bnExitPx = lb3
+		}
+		st.mu.Lock()
+		ltPos, ltAe := st.pos, st.avgEntry
+		st.mu.Unlock()
+		if ltAe <= 0 {
+			ltAe = la2
+		}
+		closeQty := qty
+		if math.Abs(ltPos) >= m.MinB {
+			closeQty = math.Abs(ltPos)
+		}
+		placeLtHedgeIOC("MSTR", "ASK", roundTo(lb3*0.995, m.PxDec), 0.5*(lb3+la3), closeQty, true)
+		pricePnlUSD := (bnFillPx-bnExitPx)*qty + (lb3-ltAe)*qty
+		fundUSD := (qty * bnFillPx) * (netFundBps / 10000.0)
+		bnFeesUSD := (qty * bnFillPx) * 0.0006 // ~6bp blended maker/taker fee
+		netUSD := pricePnlUSD + fundUSD - bnFeesUSD
+		netBps := netUSD / (qty * bnFillPx) * 10000.0
+		recordStratClose(tid, "ZERO_FEE_DN", "FUND_16Z_MSTR_LONG_LT_SHORT_BN", qty*bnFillPx, time.Since(now).Seconds(), netBps, netUSD, "HOURLY_FUND_CAPTURED")
+		fmt.Printf("[DN_FUND_DONE id=%d] Closed MSTR Hedge | PricePnL=$%+.4f + Funding=$%+.4f - Fees=$%.4f => NET=$%+.4f (%+.2fbp)!\n",
+			tid, pricePnlUSD, fundUSD, bnFeesUSD, netUSD, netBps)
+		dnBusyFlag.Store(false)
+	}
+}
+
 func runZeroFeeDnLoop() {
 	time.Sleep(5 * time.Second)
 	if remotePaused.Load() || !setupBnUsdcMargin() {
 		return
 	}
+	go runHourlyFundingSnipe()
 	dnMu.Lock()
 	dnState = "IDLE"
 	dnMu.Unlock()
