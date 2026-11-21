@@ -3600,8 +3600,10 @@ func flattenAndExitPause(reason string) {
 	if !remotePaused.CompareAndSwap(false, true) {
 		return
 	}
-	fmt.Printf("[INSTANT-PAUSE] %s — canceling orders, setting S3 pause & flattening in <1s!\n", reason)
-	triggerS3Pause(reason)
+	fmt.Printf("[INSTANT-PAUSE] %s — canceling orders & flattening in <1s!\n", reason)
+	if strings.HasPrefix(reason, "AUTO-BREAKER") || strings.HasPrefix(reason, "GOAL") || strings.HasPrefix(reason, "STOP-LOSS") {
+		triggerS3Pause(reason)
+	}
 	useWsSend = false
 	cancelAll()
 	for sym, st := range mktStates {
@@ -3651,11 +3653,14 @@ func runPauseWatchdog() {
 			return
 		}
 		s3Ticks++
-		if s3Ticks%5 == 0 {
+		if s3Ticks%5 == 0 && time.Since(bootTS) >= 45*time.Second {
 			if resp, err := hc.Get(fmt.Sprintf("https://crypto-arb-bot-tokyo-bin-767579108352.s3.ap-northeast-1.amazonaws.com/live-telemetry.json?t=%d", time.Now().UnixMilli())); err == nil {
 				b, _ := io.ReadAll(resp.Body)
 				resp.Body.Close()
-				if strings.Contains(string(b), `"userPaused":true`) {
+				var tel struct {
+					TS int64 `json:"ts"`
+				}
+				if json.Unmarshal(b, &tel) == nil && tel.TS > v87BootMS+5000 && strings.Contains(string(b), `"userPaused":true`) {
 					flattenAndExitPause("S3 userPaused=true")
 					return
 				}
