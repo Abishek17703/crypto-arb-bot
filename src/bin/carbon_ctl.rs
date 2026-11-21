@@ -25,6 +25,7 @@ struct Cli {
 #[derive(Subcommand)]
 enum Cmd {
     Status,
+    Strategies,
     Pause,
     Resume,
     WaitBuild {
@@ -273,6 +274,59 @@ async fn main() {
                 1
             }
         },
+        Cmd::Strategies => match tokio::join!(fetch_json(S3_TEL_URL), acct_snapshot()) {
+            (Ok(tel), Ok((eq, open))) => {
+                use std::io::Write;
+                let paused = tel["hftTest"]["userPaused"].as_bool().unwrap_or(false);
+                let age_s = (now_ms() - tel["ts"].as_i64().unwrap_or(0)) as f64 / 1000.0;
+                println!("Eq=${eq:.4} | userPaused={paused} | s3_age={age_s:.1}s | Open={open:?}");
+                let log = tel["lighterLog"].as_str().unwrap_or("");
+                let j_path = "strategy_journal.log";
+                let existing = std::fs::read_to_string(j_path).unwrap_or_default();
+                let mut seen: std::collections::HashSet<&str> = existing.lines().collect();
+                if existing.is_empty() {
+                    let _ = std::fs::write(j_path, "# GO-TOKYO v90.0 Strategy Journal (Auto-Synced)\n");
+                }
+                if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(j_path) {
+                    let mut board_latest: Option<&str> = None;
+                    for l in log.lines() {
+                        if l.contains("[STRAT_BOARD") {
+                            board_latest = Some(l);
+                        }
+                        if (l.contains("[STRAT_OPEN") || l.contains("[STRAT_CLOSE")) && !seen.contains(l) {
+                            let _ = writeln!(f, "{l}");
+                            seen.insert(l);
+                        }
+                    }
+                    if let Some(bl) = board_latest {
+                        if !seen.contains(bl) {
+                            let _ = writeln!(f, "{bl}");
+                        }
+                    }
+                }
+                let mut shown: Vec<&str> = log
+                    .lines()
+                    .filter(|l| {
+                        l.contains("GO-TOKYO v")
+                            || l.contains("[STRAT_BOARD")
+                            || l.contains("[STRAT_SCAN")
+                            || l.contains("[STRAT_OPEN")
+                            || l.contains("[STRAT_CLOSE")
+                    })
+                    .collect();
+                if shown.len() > 20 {
+                    shown = shown[shown.len() - 20..].to_vec();
+                }
+                for l in shown {
+                    println!("{l}");
+                }
+                0
+            }
+            (e1, e2) => {
+                eprintln!("STRATEGIES_ERR: {e1:?} {e2:?}");
+                1
+            }
+        },
         Cmd::Pause => {
             if let Err(e) = put_pause_control(json!({"paused": true, "ts": now_ms()})).await {
                 eprintln!("PAUSE_ERR: {e}");
@@ -395,7 +449,7 @@ async fn main() {
                     if seq > min_seq && (top_sc >= 7 || (min_seq == 0 && ticks >= 2) || ticks >= 30) {
                         println!("SCAN_READY Eq=${eq:.4} seq={seq} topScore={top_sc} Open={open:?}");
                         for l in log.lines() {
-                            if l.contains("[CARBON_SCAN") || l.contains("GO-TOKYO v89") || l.contains("[DISCOVER]") {
+                            if l.contains("[CARBON_SCAN") || l.contains("GO-TOKYO v") || l.contains("[DISCOVER]") || l.contains("[STRAT_") {
                                 println!("{l}");
                             }
                         }

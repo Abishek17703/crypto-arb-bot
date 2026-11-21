@@ -105,6 +105,43 @@ func isOffHoursUTC(t time.Time) bool {
 	return mins < (13*60+25) || mins >= (21*60+5)
 }
 
+func isGoldActiveUTC(t time.Time) bool {
+	u := t.UTC()
+	wd := u.Weekday()
+	mins := u.Hour()*60 + u.Minute()
+	if wd == time.Saturday {
+		return false
+	}
+	if wd == time.Sunday {
+		return mins >= 22*60+5
+	}
+	if wd == time.Friday {
+		return mins < 21*60
+	}
+	return true
+}
+
+func isTradFiSym(sym string) bool {
+	switch sym {
+	case "NVDA", "AMZN", "GOOGL", "META", "MU", "SOXL", "SPY", "QQQ", "US500", "US100",
+		"SPCX", "AAPL", "TSLA", "MSFT", "INTC", "AMD", "COIN", "HOOD", "MSTR", "PLTR",
+		"CRCL", "NBIS", "SNDK", "IREN", "OURA", "STONK", "ASELS", "TUR30",
+		"XAU", "XAG", "PAXG", "USDJPY", "USDCHF", "USDCAD", "EURUSD", "GBPUSD":
+		return true
+	}
+	return false
+}
+
+func isSymTradeable24hOrOpen(sym string, now time.Time) bool {
+	if !isTradFiSym(sym) {
+		return true
+	}
+	if sym == "XAU" || sym == "XAG" || sym == "PAXG" {
+		return isGoldActiveUTC(now)
+	}
+	return isUSRthUTC(now)
+}
+
 type ActiveOrder struct {
 	COI     int64
 	Px      float64
@@ -233,6 +270,8 @@ type TwinState struct {
 	LastHedgeTS      time.Time
 	CoolUntil        time.Time
 	LastLog          time.Time
+	TradeID          int64
+	LegUSD           float64
 }
 
 type CommonAsset struct {
@@ -268,7 +307,41 @@ type CarbonPos struct {
 	EntryPx    float64
 	TpSent     bool
 	BeArmed    bool
-	Closing    bool
+	Closing     bool
+	StratTag    string
+	CloseReason string
+	LastPnLBps  float64
+}
+
+type StratStat struct {
+	Wins   int
+	Losses int
+	PnlUSD float64
+}
+
+type ActiveOpenPos struct {
+	ID          int64
+	Mode        string // "BN_LAG_ARB" or "TRI_EQUALIZE"
+	SymA        string // Primary symbol (or LONG leg for TRI_EQUALIZE)
+	SideA       string // "LONG" / "SHORT"
+	SymB        string // SHORT leg for TRI_EQUALIZE
+	LegUSD      float64
+	EdgeBps     float64
+	Mult        float64
+	TpBps       float64
+	SlBps       float64
+	SentAt      time.Time
+	EntryPxA    float64
+	EntryPxB    float64
+	TpSent      bool
+	BeArmed     bool
+	Closing     bool
+	CloseReason string
+	CloseBps    float64
+	CloseUSD    float64
+	CoolSec     int64
+	LastPnlBps  float64
+	LastPnlUSD  float64
 }
 
 var (
@@ -277,27 +350,53 @@ var (
 		"SOL": newMarketState(-1.0), "XRP": newMarketState(-1.0), "HYPE": newMarketState(-1.0),
 		"BNB": newMarketState(-1.0), "PAXG": newMarketState(240.0), "ZEC": newMarketState(-1.0), "XAU": newMarketState(240.0), "NVDA": newMarketState(-1.0),
 		"AMZN": newMarketState(-1.0), "GOOGL": newMarketState(-1.0), "META": newMarketState(-1.0),
-		"SPY": newMarketState(240.0), "US500": newMarketState(240.0), "QQQ": newMarketState(-1.0), "US100": newMarketState(-1.0),
+		"SPY": newMarketState(240.0), "US500": newMarketState(240.0), "QQQ": newMarketState(240.0), "US100": newMarketState(240.0),
 		"MU": newMarketState(-1.0), "SOXL": newMarketState(-1.0),
 	}
 	twins = []*TwinState{
-		{Name: "PAXG/XAU", ThinSym: "PAXG", DeepSym: "XAU", AlwaysActive: true, MinGapBps: 7.5, MaxCapUSD: 1400.0, WfLB: 48, WfZ: 2.2, BidEdgeBps: 7.5, AskEdgeBps: 7.5, FallbackRatio: 1.0000},
+		{Name: "PAXG/XAU", ThinSym: "PAXG", DeepSym: "XAU", AlwaysActive: false, MinGapBps: 7.5, MaxCapUSD: 1400.0, WfLB: 48, WfZ: 2.2, BidEdgeBps: 7.5, AskEdgeBps: 7.5, FallbackRatio: 1.0000},
 		{Name: "US500/SPY", ThinSym: "US500", DeepSym: "SPY", AlwaysActive: false, MinGapBps: 5.0, MaxCapUSD: 4000.0, WfLB: 48, WfZ: 2.2, BidEdgeBps: 5.0, AskEdgeBps: 5.0, FallbackRatio: 10.002},
+		{Name: "US100/QQQ", ThinSym: "US100", DeepSym: "QQQ", AlwaysActive: false, MinGapBps: 5.0, MaxCapUSD: 4000.0, WfLB: 48, WfZ: 2.2, BidEdgeBps: 5.0, AskEdgeBps: 5.0, FallbackRatio: 41.15},
 	}
-	pairMu               sync.Mutex
-	pairMarketActive     atomic.Bool
-	probationForce       atomic.Bool
-	remotePaused         atomic.Bool
-	breakerTripped       atomic.Bool
-	l2TicksRecorded      atomic.Int64
-	l2RecCh              = make(chan string, 4096)
-	enableAutoTwins      = false
-	commonList           []*CommonAsset
-	carbonMu             sync.Mutex
-	activeCarbon         *CarbonPos
-	lastCarbonOrderID    int64
-	carbonScanSeq        atomic.Int64
-	lastStopMS           atomic.Int64
+	pairMu                  sync.Mutex
+	pairMarketActive        atomic.Bool
+	probationForce          atomic.Bool
+	remotePaused            atomic.Bool
+	breakerTripped          atomic.Bool
+	l2TicksRecorded         atomic.Int64
+	l2RecCh                 = make(chan string, 4096)
+	enableAutoTwins         = true
+	commonList              []*CommonAsset
+	carbonMu                sync.Mutex
+	activeCarbon            *CarbonPos
+	lastCarbonOrderID       int64
+	carbonScanSeq           atomic.Int64
+	lastStopMS              atomic.Int64
+	sessionRealizedMicroUSD atomic.Int64
+	sessionNetWins          atomic.Int64
+	openMu                  sync.Mutex
+	activeOpen              *ActiveOpenPos
+	stratCoolUntilMS        atomic.Int64
+	fastArbCh               = make(chan string, 64)
+	bnEthBtcMu              sync.Mutex
+	bnEthBtcBid             float64
+	bnEthBtcAsk             float64
+	bnEthBtcTS              time.Time
+	journalMu               sync.Mutex
+	stratMu                 sync.Mutex
+	stratStats              = map[string]*StratStat{
+		"BN_LAG_ARB":    {},
+		"TRI_EQUALIZE":  {},
+		"TWIN_EQUALIZE": {},
+		"BN_MOM_SNIPE":  {},
+	}
+	snapMu      sync.Mutex
+	snapLagDesc = "none"
+	snapLagEdge float64
+	snapTriDesc = "none"
+	snapTriEdge float64
+	snapMomDesc = "none"
+	snapMomSc   int
 	streakWins           atomic.Int64
 	globalEntryLockUntil atomic.Int64
 	rateMu    sync.Mutex
@@ -1713,39 +1812,33 @@ func rebalanceFromTrades(tb []byte) {
 	var pairRTs []closedFill
 	for _, f := range bootPairFills {
 		n := len(pairRTs)
-		if n > 0 && pairRTs[n-1].sym == f.sym && f.tsMS-pairRTs[n-1].tsMS <= 15000 {
+		if n > 0 && f.tsMS-pairRTs[n-1].tsMS <= 15000 {
 			pairRTs[n-1].pnl += f.pnl
 			pairRTs[n-1].tsMS = f.tsMS
 		} else {
 			pairRTs = append(pairRTs, f)
 		}
 	}
-	pairFlatNow := func(grp string) bool {
-		if grp == "PAXG/XAU" {
-			return math.Abs(float64(mktStates["PAXG"].netMicroUSD.Load()))/1e6 < 5.0 && math.Abs(float64(mktStates["XAU"].netMicroUSD.Load()))/1e6 < 5.0
-		}
-		if grp == "US500/SPY" {
-			return math.Abs(float64(mktStates["US500"].netMicroUSD.Load()))/1e6 < 5.0 && math.Abs(float64(mktStates["SPY"].netMicroUSD.Load()))/1e6 < 5.0
-		}
-		if st := mktStates[grp]; st != nil {
-			return math.Abs(float64(st.netMicroUSD.Load()))/1e6 < 5.0
-		}
-		return true
-	}
 	consecPairLosses := 0
 	sessionPairPnl := 0.0
+	var netWins int64
+	hasOpenPos := anyOpenAcctPos()
 	for _, prt := range pairRTs {
-		if nowMS-prt.tsMS < 5000 && !pairFlatNow(prt.sym) {
+		if nowMS-prt.tsMS < 8000 && hasOpenPos {
 			continue
 		}
 		sessionPairPnl += prt.pnl
-		if prt.pnl < -0.02 {
+		if prt.pnl < -0.03 {
 			consecPairLosses++
+			netWins--
 		} else if prt.pnl > 0.005 {
 			consecPairLosses = 0
+			netWins++
 		}
 	}
-	if !breakerTripped.Load() && (consecPairLosses >= 2 || sessionPairPnl <= -0.45) {
+	sessionRealizedMicroUSD.Store(int64(sessionPairPnl * 1e6))
+	sessionNetWins.Store(netWins)
+	if !breakerTripped.Load() && (consecPairLosses >= 2 || sessionPairPnl <= -0.55) {
 		breakerTripped.Store(true)
 		_ = os.WriteFile("/tmp/lighter_pause.flag", []byte("1"), 0644)
 		reason := fmt.Sprintf("AUTO-BREAKER losses=%d pnl=$%.4f", consecPairLosses, sessionPairPnl)
@@ -1971,7 +2064,7 @@ func syncAccountLoop() {
 							}
 						} else if math.Abs(sz) >= markets[sym].MinB {
 							for _, s := range []string{"BID", "ASK"} {
-								if ao := st.activeOrds[s]; ao != nil && !ao.IsClose {
+								if ao := st.activeOrds[s]; ao != nil && !ao.IsClose && !ao.IsIOC {
 									cancelSide(sym, s) // Never delete live entry orders from RAM without cancelling on Lighter!
 								}
 							}
@@ -2099,7 +2192,7 @@ func runTxWS() {
 }
 
 func isTwinSym(sym string) bool {
-	return sym == "PAXG" || sym == "XAU" || sym == "SPY" || sym == "US500"
+	return sym == "PAXG" || sym == "XAU" || sym == "SPY" || sym == "US500" || sym == "QQQ" || sym == "US100"
 }
 
 func pushL2Rec(line string) {
@@ -2286,6 +2379,9 @@ func runLtWS() {
 						if enableAutoTwins && isTwinSym(sym) {
 							manageAllTwins()
 						}
+						if isActiveOpenSym(sym) {
+							manageActiveOpenStrat()
+						}
 						if isActiveCarbonSym(sym) {
 							manageCarbonBracket()
 						}
@@ -2376,6 +2472,9 @@ func runLtWS() {
 					st.mu.Unlock()
 					if enableAutoTwins && isTwinSym(sym) && bboChanged {
 						manageAllTwins()
+					}
+					if bboChanged && isActiveOpenSym(sym) {
+						manageActiveOpenStrat()
 					}
 					if bboChanged && isActiveCarbonSym(sym) {
 						manageCarbonBracket()
@@ -3026,7 +3125,10 @@ func syncTwinWalkForward() {
 							inPos = false
 						}
 					} else {
-						rthOK := tw.AlwaysActive || isUSRthUTC(time.Unix(t, 0))
+						rthOK := isUSRthUTC(time.Unix(t, 0))
+						if tw.Name == "PAXG/XAU" {
+							rthOK = isGoldActiveUTC(time.Unix(t, 0))
+						}
 						if rthOK && math.Abs((r/mu-1.0)*10000.0) >= tw.MinGapBps {
 							if z <= -zTh && fDiff <= 2.0 {
 								inPos, posDir, entryR, entryT, accFund = true, 1.0, r, t, 0.0
@@ -3317,11 +3419,21 @@ func manageTwin(tw *TwinState) bool {
 		tw.UnhedgedSince = now
 	}
 	if math.Abs(tPos) < tM.MinB && math.Abs(dPos) < dM.MinB {
+		if tw.WasHedged && tw.TradeID > 0 {
+			holdS := 0.0
+			if !tw.EntryTS.IsZero() {
+				holdS = now.Sub(tw.EntryTS).Seconds()
+			}
+			estBps := math.Max(2.5, tw.MinGapBps*0.5)
+			recordStratClose(tw.TradeID, "TWIN_EQUALIZE", tw.Name, tw.LegUSD, holdS, estBps, tw.LegUSD*estBps/10000.0, "FLAT_LIMIT_TP")
+			tw.TradeID = 0
+		}
 		tw.WasHedged = false
 		tw.EntryTS = time.Time{}
 		tw.EntryEqUSD = 0
 		tw.AccruedFundBps = 0
 		tw.LastFundAccrueTS = time.Time{}
+		tw.TradeID = 0
 	} else if math.Abs(tUSD) >= 11.0 && math.Abs(dUSD) >= 11.0 && tUSD*dUSD < 0 {
 		tw.WasHedged = true
 		if tw.EntryTS.IsZero() {
@@ -3344,11 +3456,14 @@ func manageTwin(tw *TwinState) bool {
 		tw.AccruedFundBps += netCarryBpsHr * dtH
 	}
 
-	pairAllowed := tw.AlwaysActive || isUSRthUTC(now)
+	pairAllowed := isUSRthUTC(now)
+	if tw.Name == "PAXG/XAU" {
+		pairAllowed = isGoldActiveUTC(now)
+	}
 	bnLongOk, bnShortOk, bnDiffBps := bnBasisGuardOK(tw, tMid, now)
 	if pairAllowed && now.Sub(tw.LastLog) >= 30*time.Second {
 		tw.LastLog = now
-		fmt.Printf("[%s] GO-TOKYO v88.2 LIVE | %s Eq=$%.4f | Z=%+.2f/%.1f dev=%+.1fbps bnDiff=%+.2fbps(L=%v/S=%v) netCarry=%+.2fbps/h | Pos=%.4f($%.0f)/%.4f($%.0f) | Sp=%.2f/%.2f | L2Rec=%d\n",
+		fmt.Printf("[%s] GO-TOKYO v90.0 TWIN | %s Eq=$%.4f | Z=%+.2f/%.1f dev=%+.1fbps bnDiff=%+.2fbps(L=%v/S=%v) netCarry=%+.2fbps/h | Pos=%.4f($%.0f)/%.4f($%.0f) | Sp=%.2f/%.2f | L2Rec=%d\n",
 			now.Format("15:04:05"), tw.Name, float64(eqNow.Load())/1e6, liveZ, tw.WfZ, devBps, bnDiffBps, bnLongOk, bnShortOk, netCarryBpsHr, tPos, tUSD, dPos, dUSD, tSpBps, dSpBps, l2TicksRecorded.Load())
 	}
 
@@ -3359,6 +3474,10 @@ func manageTwin(tw *TwinState) bool {
 			tw.LastHedgeTS = now
 			tw.LastDualSendTS = now
 			tw.CoolUntil = now.Add(45 * time.Second)
+			if tw.TradeID > 0 {
+				recordStratClose(tw.TradeID, "TWIN_EQUALIZE", tw.Name, tw.LegUSD, float64(unhedgedMS)/1000.0, -2.0, -tw.LegUSD*0.0002, "ASYM_LEG_GUARD")
+				tw.TradeID = 0
+			}
 			cancelThinEntries()
 			fmt.Printf("[%s] [TWIN-UNHEDGED-500MS] %s flattening lone leg after %dms (tPos=%.5f dPos=%.5f)\n",
 				now.Format("15:04:05"), tw.Name, unhedgedMS, tPos, dPos)
@@ -3410,6 +3529,10 @@ func manageTwin(tw *TwinState) bool {
 		if stopTrig && takeWriteSlotTier(2) {
 			fmt.Printf("[%s] [TWIN-SL-EXIT] %s z=%.2f pnl=$%.3f(max=-$%.2f) bps=%.1f netCarry=%.2f accFund=%.2f age=%.0fs\n",
 				now.Format("15:04:05"), tw.Name, liveZ, tradePnlUSD, maxLossUSD, execNetBps, netCarryBpsHr, tw.AccruedFundBps, ageS)
+			if tw.TradeID > 0 {
+				recordStratClose(tw.TradeID, "TWIN_EQUALIZE", tw.Name, tw.LegUSD, ageS, totalNetBps, tradePnlUSD, "SL_OR_DECOUPLE")
+				tw.TradeID = 0
+			}
 			if tBidOrd != nil && tBidOrd.IsClose && !tBidOrd.IsIOC {
 				cancelPairSide(tw.ThinSym, "BID")
 			}
@@ -3440,6 +3563,10 @@ func manageTwin(tw *TwinState) bool {
 
 		converged := (tPos > 0 && liveZ >= -0.10) || (tPos < 0 && liveZ <= 0.10) || execNetBps >= 5.5
 		if converged && execNetBps >= 2.20 && availExitUSD >= math.Abs(tUSD)*0.95 && takeWriteSlot(true) {
+			if tw.TradeID > 0 {
+				recordStratClose(tw.TradeID, "TWIN_EQUALIZE", tw.Name, tw.LegUSD, ageS, totalNetBps, tradePnlUSD, "CONVERGED")
+				tw.TradeID = 0
+			}
 			if tBidOrd != nil && tBidOrd.IsClose && !tBidOrd.IsIOC {
 				cancelPairSide(tw.ThinSym, "BID")
 			}
@@ -3503,12 +3630,13 @@ func manageTwin(tw *TwinState) bool {
 	}
 	deepBBO := math.Min(math.Max(db*dbSz, dBidD), math.Max(da*daSz, dAskD))
 	deepBookSafe := tw.WfReady && booksFresh && now.After(tw.CoolUntil) && dSpBps <= 2.2 && tSpBps <= 4.5 && deepBBO >= 350.0 && refMean > 0
-	if !pairAllowed || otherBusy || remotePaused.Load() || breakerTripped.Load() || !deepBookSafe {
+	if !pairAllowed || otherBusy || isOpenOrCarbonBusy() || remotePaused.Load() || breakerTripped.Load() || !deepBookSafe {
 		cancelThinEntries()
 		return pairAllowed
 	}
 
-	legUSD := math.Min(tw.MaxCapUSD, math.Max(250.0, curEq*3.0))
+	mult, _ := calcCapMult()
+	legUSD := math.Min(tw.MaxCapUSD, math.Min(curEq*3.5, math.Max(160.0, curEq*2.4*mult)))
 	legUSD = math.Min(legUSD, 0.35*deepBBO)
 	if legUSD < 100.0 {
 		cancelThinEntries()
@@ -3524,6 +3652,9 @@ func manageTwin(tw *TwinState) bool {
 		liqLong := math.Min(math.Max(ta*taSz, tAskD), math.Max(db*dbSz, dBidD))
 		if iocLongEdge >= tw.MinGapBps-2.0 && liqLong >= legUSD*1.15 && takeWriteSlot(false) {
 			tw.LastDualSendTS = now
+			tw.TradeID = coiSeq.Add(1)
+			tw.LegUSD = legUSD
+			recordStratOpen(tw.TradeID, "TWIN_EQUALIZE", tw.Name, legUSD, mult, iocLongEdge, fmt.Sprintf("z=%+.2f dev=%+.1fbp", liveZ, devBps))
 			tPx := roundTo(ta*1.00012, tM.PxDec)
 			dPx := roundTo(db*0.99988, dM.PxDec)
 			tSz := roundTo(legUSD/ta, tM.SzDec)
@@ -3535,6 +3666,9 @@ func manageTwin(tw *TwinState) bool {
 		liqShort := math.Min(math.Max(tb*tbSz, tBidD), math.Max(da*daSz, dAskD))
 		if iocShortEdge >= tw.MinGapBps-2.0 && liqShort >= legUSD*1.15 && takeWriteSlot(false) {
 			tw.LastDualSendTS = now
+			tw.TradeID = coiSeq.Add(1)
+			tw.LegUSD = legUSD
+			recordStratOpen(tw.TradeID, "TWIN_EQUALIZE", tw.Name, legUSD, mult, iocShortEdge, fmt.Sprintf("z=%+.2f dev=%+.1fbp", liveZ, devBps))
 			tPx := roundTo(tb*0.99988, tM.PxDec)
 			dPx := roundTo(da*1.00012, dM.PxDec)
 			tSz := roundTo(legUSD/tb, tM.SzDec)
@@ -3817,11 +3951,11 @@ func discoverCommonAssets() {
 	}
 	sort.Slice(found, func(i, j int) bool { return found[i].LtVol24h > found[j].LtVol24h })
 	for sym, m := range markets {
-		m.AllowEntry = sym == "XAU" || sym == "PAXG" || sym == "BTC" || sym == "ETH" || sym == "SOL" || sym == "SPY" || sym == "US500"
+		m.AllowEntry = sym == "XAU" || sym == "PAXG" || sym == "BTC" || sym == "ETH" || sym == "SOL" || sym == "SPY" || sym == "US500" || sym == "QQQ" || sym == "US100"
 		markets[sym] = m
 	}
 	for i, ca := range found {
-		allowWS := i < 60 || ca.Sym == "PAXG" || ca.Sym == "XAU"
+		allowWS := i < 60 || ca.Sym == "PAXG" || ca.Sym == "XAU" || ca.Sym == "SPY" || ca.Sym == "US500" || ca.Sym == "QQQ" || ca.Sym == "US100"
 		curM, exists := markets[ca.Sym]
 		if exists {
 			allowWS = allowWS || curM.AllowEntry
@@ -3887,7 +4021,23 @@ func runBnAllBookTickerWS() {
 				A  string `json:"a"`
 				AQ string `json:"A"`
 			}
-			if json.Unmarshal(msg, &ev) != nil || !strings.HasSuffix(ev.S, "USDT") {
+			if json.Unmarshal(msg, &ev) != nil {
+				continue
+			}
+			b, _ := strconv.ParseFloat(ev.B, 64)
+			a, _ := strconv.ParseFloat(ev.A, 64)
+			if b <= 0 || a <= 0 {
+				continue
+			}
+			if ev.S == "ETHBTC" {
+				bnEthBtcMu.Lock()
+				bnEthBtcBid = b
+				bnEthBtcAsk = a
+				bnEthBtcTS = time.Now()
+				bnEthBtcMu.Unlock()
+				continue
+			}
+			if !strings.HasSuffix(ev.S, "USDT") {
 				continue
 			}
 			sym := strings.TrimSuffix(ev.S, "USDT")
@@ -3895,27 +4045,48 @@ func runBnAllBookTickerWS() {
 			if st == nil {
 				continue
 			}
-			b, _ := strconv.ParseFloat(ev.B, 64)
-			a, _ := strconv.ParseFloat(ev.A, 64)
-			if b > 0 && a > 0 {
-				mid := 0.5 * (b + a)
-				now := time.Now()
-				st.mu.Lock()
-				st.bnBid = b
-				st.bnAsk = a
-				st.bnMid = mid
-				if st.emaFast == 0 || st.lastEmaTS.IsZero() {
-					st.emaUltra = mid
-					st.emaFast = mid
-					st.emaSlow = mid
-				} else {
-					dt := math.Min(5.0, math.Max(0.001, now.Sub(st.lastEmaTS).Seconds()))
-					st.emaUltra += (1.0 - math.Exp(-dt/3.0)) * (mid - st.emaUltra)
-					st.emaFast += (1.0 - math.Exp(-dt/20.0)) * (mid - st.emaFast)
-					st.emaSlow += (1.0 - math.Exp(-dt/180.0)) * (mid - st.emaSlow)
+			mid := 0.5 * (b + a)
+			now := time.Now()
+			var imp3s float64
+			st.mu.Lock()
+			st.bnBid = b
+			st.bnAsk = a
+			st.bnMid = mid
+			if st.emaFast == 0 || st.lastEmaTS.IsZero() {
+				st.emaUltra = mid
+				st.emaFast = mid
+				st.emaSlow = mid
+			} else {
+				dt := math.Min(5.0, math.Max(0.001, now.Sub(st.lastEmaTS).Seconds()))
+				st.emaUltra += (1.0 - math.Exp(-dt/3.0)) * (mid - st.emaUltra)
+				st.emaFast += (1.0 - math.Exp(-dt/20.0)) * (mid - st.emaFast)
+				st.emaSlow += (1.0 - math.Exp(-dt/180.0)) * (mid - st.emaSlow)
+				if st.emaUltra > 0 {
+					imp3s = (mid - st.emaUltra) / st.emaUltra * 10000.0
 				}
-				st.lastEmaTS = now
-				st.mu.Unlock()
+			}
+			st.lastEmaTS = now
+			if st.ltBid > 0 && st.ltAsk > st.ltBid && now.Sub(st.lastBookTS) < 10*time.Second {
+				ltMid := 0.5 * (st.ltBid + st.ltAsk)
+				ltSp := (st.ltAsk - st.ltBid) / ltMid * 10000.0
+				rawBasis := (ltMid - mid) / mid * 10000.0
+				if ltSp <= 3.5 && math.Abs(imp3s) <= 5.0 && (st.basisWarmTicks == 0 || now.Sub(st.lastBasisTS) >= 900*time.Millisecond) {
+					if st.basisWarmTicks == 0 {
+						st.basisBps = rawBasis
+					} else {
+						dtB := math.Min(10.0, math.Max(0.2, now.Sub(st.lastBasisTS).Seconds()))
+						st.basisBps += (1.0 - math.Exp(-dtB/180.0)) * (rawBasis - st.basisBps)
+					}
+					st.lastBasisTS = now
+					st.basisWarmTicks++
+				}
+			}
+			st.mu.Unlock()
+			if math.Abs(imp3s) >= 2.0 {
+				select {
+				case fastArbCh <- sym:
+				default:
+				}
 			}
 		}
 		_ = conn.Close()
@@ -3992,11 +4163,10 @@ func fetchLtBookREST(mid int64) (float64, float64, float64, float64) {
 
 func runCarbonScanner() {
 	time.Sleep(6 * time.Second)
+	scanTick := 0
 	for {
-		carbonMu.Lock()
-		busy := activeCarbon != nil
-		carbonMu.Unlock()
-		if !busy && !anyOpenAcctPos() && !remotePaused.Load() && !breakerTripped.Load() && len(commonList) > 0 {
+		scanTick++
+		if !isOpenOrCarbonBusy() && !anyOpenAcctPos() && !remotePaused.Load() && !breakerTripped.Load() && len(commonList) > 0 {
 			type candScore struct {
 				ca     *CommonAsset
 				rank   float64
@@ -4009,7 +4179,7 @@ func runCarbonScanner() {
 			now := time.Now()
 			var stage1 []candScore
 			for _, ca := range commonList {
-				if ca.LtVol24h < 500000.0 || ca.BnVol24h < 15000000.0 {
+				if ca.LtVol24h < 500000.0 || ca.BnVol24h < 15000000.0 || !isSymTradeable24hOrOpen(ca.Sym, now) {
 					continue
 				}
 				st := mktStates[ca.Sym]
@@ -4278,7 +4448,22 @@ func runCarbonScanner() {
 			}
 			if len(parts) > 0 {
 				fmt.Printf("[CARBON_SCAN seq=%d com=%d] %s\n", seq, len(commonList), strings.Join(parts, " | "))
+				topR := results[0]
+				snapMu.Lock()
+				snapMomDesc = topR.sym + " " + topR.side
+				snapMomSc = topR.score
+				lDesc, lEdge := snapLagDesc, snapLagEdge
+				tDesc, tEdge := snapTriDesc, snapTriEdge
+				snapMu.Unlock()
+				fmt.Printf("[STRAT_SCAN seq=%d] LAG_BEST=%s %+.2fbp/3.2 | TRI_BEST=%s %+.2fbp/3.8 | MOM_BEST=%s %s sc=%d/8\n",
+					seq, lDesc, lEdge, tDesc, tEdge, topR.sym, topR.side, topR.score)
+				if canOpenNewStrat() && topR.score >= 8 && topR.ltSp <= 2.0 && topR.diff <= 0.5 && topR.volR >= 1.1 && topR.depth >= 300.0 {
+					startAutoCarbonSnipe(topR.sym, topR.side, topR.slBps, topR.tpBps, topR.diff)
+				}
 			}
+		}
+		if scanTick%2 == 0 {
+			printStratBoard()
 		}
 		time.Sleep(15 * time.Second)
 	}
@@ -4388,7 +4573,24 @@ func manageCarbonBracket() {
 
 	if math.Abs(pos) < m.MinB {
 		if cpCopy.TpSent {
-			fmt.Printf("[CARBON_CLOSED id=%d sym=%s side=%s reason=TP_OR_FLAT]\n", cpCopy.ID, cpCopy.Sym, cpCopy.Side)
+			reasonOut := cpCopy.CloseReason
+			pnlOut := cpCopy.LastPnLBps
+			if reasonOut == "" {
+				reasonOut = "LIMIT_TP"
+				pnlOut = cpCopy.TpBps
+			}
+			tag := cpCopy.StratTag
+			if tag == "" {
+				tag = "BN_MOM_SNIPE"
+			}
+			holdS := now.Sub(cpCopy.SentAt).Seconds()
+			recordStratClose(cpCopy.ID, tag, cpCopy.Sym+"_"+cpCopy.Side, cpCopy.USD, holdS, pnlOut, cpCopy.USD*pnlOut/10000.0, reasonOut)
+			fmt.Printf("[CARBON_CLOSED id=%d sym=%s side=%s reason=%s]\n", cpCopy.ID, cpCopy.Sym, cpCopy.Side, reasonOut)
+			if pnlOut < 0 {
+				stratCoolUntilMS.Store(time.Now().Add(35 * time.Second).UnixMilli())
+			} else {
+				stratCoolUntilMS.Store(time.Now().Add(10 * time.Second).UnixMilli())
+			}
 			carbonMu.Lock()
 			if activeCarbon != nil && activeCarbon.ID == cpCopy.ID {
 				activeCarbon = nil
@@ -4440,6 +4642,11 @@ func manageCarbonBracket() {
 	} else {
 		pnlBps = (entry - la) / entry * 10000.0
 	}
+	carbonMu.Lock()
+	if activeCarbon != nil && activeCarbon.ID == cpCopy.ID {
+		activeCarbon.LastPnLBps = pnlBps
+	}
+	carbonMu.Unlock()
 	if !cpCopy.BeArmed && pnlBps >= cpCopy.SlBps*1.2 {
 		carbonMu.Lock()
 		if activeCarbon != nil && activeCarbon.ID == cpCopy.ID {
@@ -4475,6 +4682,8 @@ func manageCarbonBracket() {
 		carbonMu.Lock()
 		if activeCarbon != nil && activeCarbon.ID == cpCopy.ID {
 			activeCarbon.Closing = true
+			activeCarbon.CloseReason = reason
+			activeCarbon.LastPnLBps = pnlBps
 		}
 		carbonMu.Unlock()
 		placePairOrder(cpCopy.Sym, closeSide, exitPx, tMid, math.Abs(pos), true, true)
@@ -4510,10 +4719,7 @@ func runCarbonCommandLoop() {
 				continue
 			}
 			lastCarbonOrderID = co.ID
-			carbonMu.Lock()
-			busy := activeCarbon != nil
-			carbonMu.Unlock()
-			if busy || anyOpenAcctPos() || remotePaused.Load() || breakerTripped.Load() {
+			if isOpenOrCarbonBusy() || anyOpenAcctPos() || remotePaused.Load() || breakerTripped.Load() {
 				fmt.Printf("[CARBON_REJECT id=%d sym=%s reason=BUSY_OR_PAUSED]\n", co.ID, co.Sym)
 				continue
 			}
@@ -4568,12 +4774,879 @@ func runCarbonCommandLoop() {
 			carbonMu.Lock()
 			activeCarbon = &CarbonPos{
 				ID: co.ID, Sym: sym, Side: side, USD: usd, SlBps: slBps, TpBps: tpBps,
-				MaxHoldSec: maxHold, SentAt: time.Now(), EntryPx: refPx,
+				MaxHoldSec: maxHold, SentAt: time.Now(), EntryPx: refPx, StratTag: "BN_MOM_SNIPE",
 			}
 			carbonMu.Unlock()
+			recordStratOpen(co.ID, "BN_MOM_SNIPE", sym+"_"+side, usd, 1.0, -overpayBps, fmt.Sprintf("manual sl=%.0f tp=%.0f", slBps, tpBps))
 			placePairOrder(sym, ordSide, entryPx, 0.5*(lb+la), sz, false, true)
 			fmt.Printf("[CARBON_EXEC id=%d sym=%s side=%s usd=%.2f px=%.5f overpay=%+.2fbp sl=-%.0f tp=+%.0f hold=%ds]\n",
 				co.ID, sym, side, usd, refPx, overpayBps, slBps, tpBps, maxHold)
+		}
+	}
+}
+
+func appendStratJournal(ev map[string]any) {
+	b, err := json.Marshal(ev)
+	if err != nil {
+		return
+	}
+	journalMu.Lock()
+	defer journalMu.Unlock()
+	dir := "/opt/crypto-arb-bot/l2_archive"
+	if os.MkdirAll(dir, 0755) != nil {
+		dir = "/tmp/l2_archive"
+		_ = os.MkdirAll(dir, 0755)
+	}
+	f, err := os.OpenFile(filepath.Join(dir, "strategy_journal.jsonl"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		return
+	}
+	_, _ = f.Write(append(b, '\n'))
+	_ = f.Close()
+}
+
+func calcCapMult() (float64, float64) {
+	curEq := float64(eqNow.Load()) / 1e6
+	if curEq < 50.0 {
+		curEq = 93.7854
+	}
+	gain := math.Max(0.0, curEq-93.7854) + math.Max(0.0, float64(sessionRealizedMicroUSD.Load())/1e6)
+	nw := float64(sessionNetWins.Load())
+	mult := 1.00 + math.Max(0.0, nw)*0.12 + gain*0.20
+	if probationForce.Load() || nw < 0 {
+		mult = 0.70
+	}
+	mult = math.Min(2.20, math.Max(0.70, mult))
+	return mult, curEq
+}
+
+func recordStratOpen(id int64, strat, legs string, usd, mult, edgeBps float64, detail string) {
+	fmt.Printf("[STRAT_OPEN id=%d strat=%s legs=%q usd=$%.2f mult=%.2fx edge=%+.2fbp %s]\n",
+		id, strat, legs, usd, mult, edgeBps, detail)
+	appendStratJournal(map[string]any{
+		"ts":      time.Now().UTC().Format(time.RFC3339),
+		"ev":      "OPEN",
+		"id":      id,
+		"strat":   strat,
+		"legs":    legs,
+		"usd":     math.Round(usd*100) / 100,
+		"mult":    math.Round(mult*100) / 100,
+		"edgeBps": math.Round(edgeBps*100) / 100,
+		"detail":  detail,
+	})
+}
+
+func recordStratClose(id int64, strat, legs string, usd, holdSec, pnlBps, pnlUSD float64, reason string) {
+	stratMu.Lock()
+	st := stratStats[strat]
+	if st == nil {
+		st = &StratStat{}
+		stratStats[strat] = st
+	}
+	if pnlUSD > 0.0005 {
+		st.Wins++
+	} else if pnlUSD < -0.0005 {
+		st.Losses++
+	}
+	st.PnlUSD += pnlUSD
+	stratMu.Unlock()
+	fmt.Printf("[STRAT_CLOSE id=%d strat=%s legs=%q usd=$%.2f hold=%.1fs pnl=%+.2fbp($%+.4f) reason=%s]\n",
+		id, strat, legs, usd, holdSec, pnlBps, pnlUSD, reason)
+	appendStratJournal(map[string]any{
+		"ts":      time.Now().UTC().Format(time.RFC3339),
+		"ev":      "CLOSE",
+		"id":      id,
+		"strat":   strat,
+		"legs":    legs,
+		"usd":     math.Round(usd*100) / 100,
+		"holdSec": math.Round(holdSec*10) / 10,
+		"pnlBps":  math.Round(pnlBps*100) / 100,
+		"pnlUSD":  math.Round(pnlUSD*10000) / 10000,
+		"reason":  reason,
+	})
+}
+
+func printStratBoard() {
+	upM := math.Max(0.05, time.Since(bootTS).Minutes())
+	mult, curEq := calcCapMult()
+	stratMu.Lock()
+	lag := *stratStats["BN_LAG_ARB"]
+	tri := *stratStats["TRI_EQUALIZE"]
+	tw := *stratStats["TWIN_EQUALIZE"]
+	mom := *stratStats["BN_MOM_SNIPE"]
+	stratMu.Unlock()
+	totPnl := lag.PnlUSD + tri.PnlUSD + tw.PnlUSD + mom.PnlUSD
+	realPnl := float64(sessionRealizedMicroUSD.Load()) / 1e6
+	if math.Abs(realPnl) > math.Abs(totPnl) {
+		totPnl = realPnl
+	}
+	rateH := totPnl / (upM / 60.0)
+	fmt.Printf("[STRAT_BOARD up=%.1fm eq=$%.4f mult=%.2fx rate=$%+.2f/h] BN_LAG_ARB:%dW/%dL($%+.3f) | TRI_EQUALIZE:%dW/%dL($%+.3f) | TWIN_EQUALIZE:%dW/%dL($%+.3f) | BN_MOM_SNIPE:%dW/%dL($%+.3f)\n",
+		upM, curEq, mult, rateH,
+		lag.Wins, lag.Losses, lag.PnlUSD,
+		tri.Wins, tri.Losses, tri.PnlUSD,
+		tw.Wins, tw.Losses, tw.PnlUSD,
+		mom.Wins, mom.Losses, mom.PnlUSD)
+}
+
+func isOpenOrCarbonBusy() bool {
+	openMu.Lock()
+	bo := activeOpen != nil
+	openMu.Unlock()
+	carbonMu.Lock()
+	bc := activeCarbon != nil
+	carbonMu.Unlock()
+	return bo || bc
+}
+
+func isActiveOpenSym(sym string) bool {
+	openMu.Lock()
+	defer openMu.Unlock()
+	return activeOpen != nil && (activeOpen.SymA == sym || activeOpen.SymB == sym)
+}
+
+func canOpenNewStrat() bool {
+	if remotePaused.Load() || breakerTripped.Load() || pairMarketActive.Load() || anyOpenAcctPos() || isOpenOrCarbonBusy() {
+		return false
+	}
+	if time.Now().UnixMilli() < stratCoolUntilMS.Load() {
+		return false
+	}
+	pairMu.Lock()
+	now := time.Now()
+	for _, tw := range twins {
+		if now.Sub(tw.LastDualSendTS) < 2*time.Second || tw.WasHedged {
+			pairMu.Unlock()
+			return false
+		}
+	}
+	pairMu.Unlock()
+	return true
+}
+
+func fireDualIOC(tag, symA, sideA string, pxA, midA, szA float64, symB, sideB string, pxB, midB, szB float64, isClose bool) {
+	stA, stB := mktStates[symA], mktStates[symB]
+	mA, okA := markets[symA]
+	mB, okB := markets[symB]
+	if stA == nil || stB == nil || !okA || !okB || pxA <= 0 || pxB <= 0 || szA <= 0 || szB <= 0 {
+		return
+	}
+	if !isClose {
+		szA = math.Max(mA.MinB, szA)
+		szB = math.Max(mB.MinB, szB)
+	}
+	aBaseInt := int64(math.Round(szA * math.Pow10(mA.SzDec)))
+	bBaseInt := int64(math.Round(szB * math.Pow10(mB.SzDec)))
+	if aBaseInt <= 0 || bBaseInt <= 0 {
+		return
+	}
+	aPxInt := uint32(math.Round(pxA * math.Pow10(mA.PxDec)))
+	bPxInt := uint32(math.Round(pxB * math.Pow10(mB.PxDec)))
+	var askA, askB, redOnly uint8
+	if sideA == "ASK" {
+		askA = 1
+	}
+	if sideB == "ASK" {
+		askB = 1
+	}
+	if isClose {
+		redOnly = 1
+	}
+	coiA := coiSeq.Add(1)
+	coiB := coiSeq.Add(1)
+	now := time.Now()
+
+	stA.mu.Lock()
+	stA.lastOrdTS[sideA] = now
+	stA.activeOrds[sideA] = &ActiveOrder{COI: coiA, Px: pxA, BaseInt: aBaseInt, RefMid: midA, IsClose: isClose, IsIOC: true, TS: now}
+	stA.mu.Unlock()
+
+	stB.mu.Lock()
+	stB.lastOrdTS[sideB] = now
+	stB.activeOrds[sideB] = &ActiveOrder{COI: coiB, Px: pxB, BaseInt: bBaseInt, RefMid: midB, IsClose: isClose, IsIOC: true, TS: now}
+	stB.mu.Unlock()
+
+	enqueueTx(func() {
+		txMu.Lock()
+		defer txMu.Unlock()
+		t0 := time.Now()
+		tiA, errA := txCli.GetCreateOrderTransaction(&types.CreateOrderTxReq{
+			MarketIndex:      mA.ID,
+			ClientOrderIndex: coiA,
+			BaseAmount:       aBaseInt,
+			Price:            aPxInt,
+			IsAsk:            askA,
+			Type:             1,
+			TimeInForce:      0,
+			ReduceOnly:       redOnly,
+			OrderExpiry:      0,
+		}, nextOpts())
+		if errA != nil {
+			fmt.Printf("[%s_SIGN_ERR_A] %v\n", tag, errA)
+			return
+		}
+		infoA, errA := tiA.GetTxInfo()
+		if errA != nil {
+			fmt.Printf("[%s_INFO_ERR_A] %v\n", tag, errA)
+			return
+		}
+		tiB, errB := txCli.GetCreateOrderTransaction(&types.CreateOrderTxReq{
+			MarketIndex:      mB.ID,
+			ClientOrderIndex: coiB,
+			BaseAmount:       bBaseInt,
+			Price:            bPxInt,
+			IsAsk:            askB,
+			Type:             1,
+			TimeInForce:      0,
+			ReduceOnly:       redOnly,
+			OrderExpiry:      0,
+		}, nextOpts())
+		if errB != nil {
+			fmt.Printf("[%s_SIGN_ERR_B] %v\n", tag, errB)
+			return
+		}
+		infoB, errB := tiB.GetTxInfo()
+		if errB != nil {
+			fmt.Printf("[%s_INFO_ERR_B] %v\n", tag, errB)
+			return
+		}
+
+		idA := fmt.Sprintf("da_%d", coiA)
+		idB := fmt.Sprintf("db_%d", coiB)
+		if useWsSend {
+			txWsMu.Lock()
+			tc := txConn
+			var wsErrA, wsErrB error
+			if tc != nil {
+				wsErrA = tc.WriteJSON(map[string]any{
+					"type": "jsonapi/sendtx",
+					"data": map[string]any{"id": idA, "tx_type": tiA.GetTxType(), "tx_info": json.RawMessage(infoA)},
+				})
+				if wsErrA == nil {
+					wsErrB = tc.WriteJSON(map[string]any{
+						"type": "jsonapi/sendtx",
+						"data": map[string]any{"id": idB, "tx_type": tiB.GetTxType(), "tx_info": json.RawMessage(infoB)},
+					})
+				}
+			}
+			txWsMu.Unlock()
+			if tc != nil && wsErrA == nil && wsErrB == nil {
+				fmt.Printf("[WS_%s %s_%s/%s_%s px=%.4f/%.4f sz=%.5f/%.5f ro=%d] %dus\n",
+					tag, symA, sideA, symB, sideB, pxA, pxB, szA, szB, redOnly, time.Since(t0).Microseconds())
+				return
+			}
+		}
+
+		var wg sync.WaitGroup
+		wg.Add(2)
+		postLeg := func(lid string, tt uint8, tiStr string) {
+			defer wg.Done()
+			form := url.Values{}
+			form.Set("tx_type", strconv.Itoa(int(tt)))
+			form.Set("tx_info", tiStr)
+			if resp, e := txHTTP.PostForm(BaseURL+"/api/v1/sendTx", form); e == nil {
+				b, _ := io.ReadAll(resp.Body)
+				resp.Body.Close()
+				if resp.StatusCode != 200 || !strings.Contains(string(b), `"code":200`) {
+					fmt.Printf("[HTTP_%s_ERR %s] %d %s\n", tag, lid, resp.StatusCode, string(b))
+				}
+			}
+		}
+		go postLeg(idA, tiA.GetTxType(), infoA)
+		go postLeg(idB, tiB.GetTxType(), infoB)
+		wg.Wait()
+		fmt.Printf("[HTTP_%s %s/%s ro=%d] %dms\n", tag, symA, symB, redOnly, time.Since(t0).Milliseconds())
+	})
+}
+
+func startAutoCarbonSnipe(sym, side string, slBps, tpBps, diffBps float64) {
+	m, ok := markets[sym]
+	st := mktStates[sym]
+	if !ok || st == nil || !canOpenNewStrat() {
+		return
+	}
+	ensureLtSubscribed(m.ID)
+	st.mu.Lock()
+	lb, la := st.ltBid, st.ltAsk
+	st.mu.Unlock()
+	if lb <= 0 || la <= lb {
+		return
+	}
+	if (la-lb)/(0.5*(lb+la))*10000.0 > 2.2 {
+		return
+	}
+	if !takeWriteSlot(false) {
+		return
+	}
+	mult, _ := calcCapMult()
+	usd := math.Min(85.0, math.Max(14.0, 18.0*mult))
+	sl := math.Min(45.0, math.Max(18.0, slBps))
+	tp := math.Round(sl * 2.5)
+	if tpBps >= sl*2.0 {
+		tp = tpBps
+	}
+	ordSide := "BID"
+	entryPx := roundTo(la*1.0002, m.PxDec)
+	refPx := la
+	if side == "SHORT" {
+		ordSide = "ASK"
+		entryPx = roundTo(lb*0.9998, m.PxDec)
+		refPx = lb
+	}
+	sz := math.Max(m.MinB, roundTo(usd/refPx, m.SzDec))
+	coID := coiSeq.Add(1)
+	carbonMu.Lock()
+	activeCarbon = &CarbonPos{
+		ID: coID, Sym: sym, Side: side, USD: usd, SlBps: sl, TpBps: tp,
+		MaxHoldSec: 900, SentAt: time.Now(), EntryPx: refPx, StratTag: "BN_MOM_SNIPE",
+	}
+	carbonMu.Unlock()
+	recordStratOpen(coID, "BN_MOM_SNIPE", sym+"_"+side, usd, mult, -diffBps, fmt.Sprintf("auto sl=%.0f tp=%.0f", sl, tp))
+	placePairOrder(sym, ordSide, entryPx, 0.5*(lb+la), sz, false, true)
+}
+
+func evaluateFastStrategies() {
+	if remotePaused.Load() || breakerTripped.Load() || len(commonList) == 0 {
+		return
+	}
+	now := time.Now()
+	bnEthBtcMu.Lock()
+	ebBid, ebAsk, ebTS := bnEthBtcBid, bnEthBtcAsk, bnEthBtcTS
+	bnEthBtcMu.Unlock()
+	ethBtcFresh := ebBid > 0 && ebAsk >= ebBid && now.Sub(ebTS) < 8*time.Second
+
+	type fastCand struct {
+		ca         *CommonAsset
+		lb, la     float64
+		ltSp       float64
+		depth      float64
+		longAlpha  float64
+		shortAlpha float64
+		imp3s      float64
+		imp20s     float64
+	}
+	var cands []fastCand
+	bestLagDesc := "none"
+	bestLagSym := ""
+	bestLagSide := ""
+	bestLagEdge := -999.0
+	var bestLagCand *fastCand
+
+	for _, ca := range commonList {
+		if ca.LtVol24h < 500000.0 || ca.BnVol24h < 15000000.0 || !isSymTradeable24hOrOpen(ca.Sym, now) {
+			continue
+		}
+		st := mktStates[ca.Sym]
+		if st == nil {
+			continue
+		}
+		st.mu.Lock()
+		lb, la, ldep := st.ltBid, st.ltAsk, math.Min(st.ltBidDepthUSD, st.ltAskDepthUSD)
+		bb, ba, bm, eu, ef, bas := st.bnBid, st.bnAsk, st.bnMid, st.emaUltra, st.emaFast, st.basisBps
+		ltAge, bnAge, wTicks := now.Sub(st.lastBookTS), now.Sub(st.lastEmaTS), st.basisWarmTicks
+		st.mu.Unlock()
+
+		if wTicks < 25 || ltAge > 8*time.Second || bnAge > 5*time.Second || lb <= 0 || la <= lb || bb <= 0 || ba <= bb || bm <= 0 || eu <= 0 || ef <= 0 {
+			continue
+		}
+		ltMid := 0.5 * (lb + la)
+		ltSp := (la - lb) / ltMid * 10000.0
+		if ltSp > 2.2 || ldep < 180.0 {
+			continue
+		}
+		fairBid := bb * (1.0 + bas/10000.0)
+		fairAsk := ba * (1.0 + bas/10000.0)
+		laEdge := (fairBid - la) / la * 10000.0
+		saEdge := (lb - fairAsk) / lb * 10000.0
+		i3 := (bm - eu) / eu * 10000.0
+		i20 := (bm - ef) / ef * 10000.0
+		fc := fastCand{
+			ca: ca, lb: lb, la: la, ltSp: ltSp, depth: ldep,
+			longAlpha: laEdge, shortAlpha: saEdge, imp3s: i3, imp20s: i20,
+		}
+		cands = append(cands, fc)
+		idx := len(cands) - 1
+		if laEdge > bestLagEdge {
+			bestLagEdge = laEdge
+			bestLagSym = ca.Sym
+			bestLagSide = "LONG"
+			bestLagDesc = ca.Sym + "_LONG"
+			bestLagCand = &cands[idx]
+		}
+		if saEdge > bestLagEdge {
+			bestLagEdge = saEdge
+			bestLagSym = ca.Sym
+			bestLagSide = "SHORT"
+			bestLagDesc = ca.Sym + "_SHORT"
+			bestLagCand = &cands[idx]
+		}
+	}
+
+	bestTriDesc := "none"
+	bestTriEdge := -999.0
+	var triL, triS *fastCand
+	bestActTriEdge := -999.0
+	var actTriL, actTriS *fastCand
+
+	for i := range cands {
+		ci := &cands[i]
+		if ci.ca.LtVol24h < 1200000.0 || ci.ltSp > 1.8 {
+			continue
+		}
+		for j := range cands {
+			if i == j {
+				continue
+			}
+			cj := &cands[j]
+			if cj.ca.LtVol24h < 1200000.0 || cj.ltSp > 1.8 {
+				continue
+			}
+			edge := ci.longAlpha + cj.shortAlpha
+			if ethBtcFresh {
+				if ci.ca.Sym == "ETH" && cj.ca.Sym == "BTC" {
+					ebEdge := (ebBid - ci.la/cj.lb) / ebBid * 10000.0
+					if ebEdge < -1.5 {
+						continue
+					}
+					if ebEdge > 0 {
+						edge += math.Min(1.5, 0.5*ebEdge)
+					}
+				} else if ci.ca.Sym == "BTC" && cj.ca.Sym == "ETH" {
+					fairBE := 1.0 / ebAsk
+					beEdge := (fairBE - ci.la/cj.lb) / fairBE * 10000.0
+					if beEdge < -1.5 {
+						continue
+					}
+					if beEdge > 0 {
+						edge += math.Min(1.5, 0.5*beEdge)
+					}
+				}
+			}
+			if edge > bestTriEdge {
+				bestTriEdge = edge
+				bestTriDesc = ci.ca.Sym + "/" + cj.ca.Sym
+				triL, triS = ci, cj
+			}
+			if edge >= 3.8 && (ci.imp3s-cj.imp3s) >= 1.8 && edge > bestActTriEdge {
+				bestActTriEdge = edge
+				actTriL, actTriS = ci, cj
+			}
+		}
+	}
+	_ = triL
+	_ = triS
+	if bestLagEdge < -900 {
+		bestLagEdge = 0
+	}
+	if bestTriEdge < -900 {
+		bestTriEdge = 0
+	}
+
+	snapMu.Lock()
+	snapLagDesc = bestLagDesc
+	snapLagEdge = bestLagEdge
+	snapTriDesc = bestTriDesc
+	snapTriEdge = bestTriEdge
+	snapMu.Unlock()
+
+	if !canOpenNewStrat() {
+		return
+	}
+	mult, curEq := calcCapMult()
+
+	if actTriL != nil && actTriS != nil && bestActTriEdge >= 3.8 {
+		minDepth := math.Min(actTriL.depth, actTriS.depth)
+		legUSD := math.Min(math.Min(280.0, curEq*3.0), math.Max(120.0, curEq*1.55*mult))
+		legUSD = math.Min(legUSD, 0.35*minDepth)
+		if legUSD >= 95.0 && takeWriteSlot(false) {
+			mL, okL := markets[actTriL.ca.Sym]
+			mS, okS := markets[actTriS.ca.Sym]
+			if okL && okS {
+				ensureLtSubscribed(mL.ID)
+				ensureLtSubscribed(mS.ID)
+				pxL := roundTo(actTriL.la*1.00015, mL.PxDec)
+				pxS := roundTo(actTriS.lb*0.99985, mS.PxDec)
+				szL := math.Max(mL.MinB, roundTo(legUSD/actTriL.la, mL.SzDec))
+				szS := math.Max(mS.MinB, roundTo(legUSD/actTriS.lb, mS.SzDec))
+				oid := coiSeq.Add(1)
+				legs := actTriL.ca.Sym + "_L/" + actTriS.ca.Sym + "_S"
+				openMu.Lock()
+				activeOpen = &ActiveOpenPos{
+					ID: oid, Mode: "TRI_EQUALIZE", SymA: actTriL.ca.Sym, SideA: "LONG", SymB: actTriS.ca.Sym,
+					LegUSD: legUSD, EdgeBps: bestActTriEdge, Mult: mult, TpBps: 5.2, SlBps: 14.0,
+					SentAt: now, EntryPxA: actTriL.la, EntryPxB: actTriS.lb,
+				}
+				openMu.Unlock()
+				recordStratOpen(oid, "TRI_EQUALIZE", legs, legUSD, mult, bestActTriEdge,
+					fmt.Sprintf("lEdge=%+.2f sEdge=%+.2f impDiff=%+.2f", actTriL.longAlpha, actTriS.shortAlpha, actTriL.imp3s-actTriS.imp3s))
+				fireDualIOC("TRI", actTriL.ca.Sym, "BID", pxL, 0.5*(actTriL.lb+actTriL.la), szL,
+					actTriS.ca.Sym, "ASK", pxS, 0.5*(actTriS.lb+actTriS.la), szS, false)
+				return
+			}
+		}
+	}
+
+	if bestLagCand != nil && bestLagEdge >= 3.2 {
+		dirOK := (bestLagSide == "LONG" && bestLagCand.imp3s >= 2.2 && bestLagCand.imp20s >= 2.5) ||
+			(bestLagSide == "SHORT" && bestLagCand.imp3s <= -2.2 && bestLagCand.imp20s <= -2.5)
+		usd := math.Min(math.Min(240.0, curEq*2.5), math.Max(45.0, curEq*0.85*mult))
+		usd = math.Min(usd, 0.35*bestLagCand.depth)
+		if dirOK && usd >= 35.0 && bestLagCand.depth >= usd*1.4 && takeWriteSlot(false) {
+			m, ok := markets[bestLagSym]
+			if ok {
+				ensureLtSubscribed(m.ID)
+				ordSide := "BID"
+				entryPx := roundTo(bestLagCand.la*1.0002, m.PxDec)
+				refPx := bestLagCand.la
+				if bestLagSide == "SHORT" {
+					ordSide = "ASK"
+					entryPx = roundTo(bestLagCand.lb*0.9998, m.PxDec)
+					refPx = bestLagCand.lb
+				}
+				sz := math.Max(m.MinB, roundTo(usd/refPx, m.SzDec))
+				tpBps := math.Min(14.0, math.Max(5.5, bestLagEdge+3.0))
+				oid := coiSeq.Add(1)
+				openMu.Lock()
+				activeOpen = &ActiveOpenPos{
+					ID: oid, Mode: "BN_LAG_ARB", SymA: bestLagSym, SideA: bestLagSide,
+					LegUSD: usd, EdgeBps: bestLagEdge, Mult: mult, TpBps: tpBps, SlBps: 11.0,
+					SentAt: now, EntryPxA: refPx,
+				}
+				openMu.Unlock()
+				recordStratOpen(oid, "BN_LAG_ARB", bestLagSym+"_"+bestLagSide, usd, mult, bestLagEdge,
+					fmt.Sprintf("imp3s=%+.2f imp20s=%+.2f tp=+%.1f", bestLagCand.imp3s, bestLagCand.imp20s, tpBps))
+				placePairOrder(bestLagSym, ordSide, entryPx, 0.5*(bestLagCand.lb+bestLagCand.la), sz, false, true)
+			}
+		}
+	}
+}
+
+func manageActiveOpenStrat() {
+	openMu.Lock()
+	if activeOpen == nil {
+		openMu.Unlock()
+		return
+	}
+	ap := *activeOpen
+	openMu.Unlock()
+
+	now := time.Now()
+	age := now.Sub(ap.SentAt)
+
+	if ap.Mode == "TRI_EQUALIZE" {
+		stA, stB := mktStates[ap.SymA], mktStates[ap.SymB]
+		mA, okA := markets[ap.SymA]
+		mB, okB := markets[ap.SymB]
+		if stA == nil || stB == nil || !okA || !okB {
+			return
+		}
+		stA.mu.Lock()
+		lbA, laA, posA, aeA, bbA, baA, basA := stA.ltBid, stA.ltAsk, stA.pos, stA.avgEntry, stA.bnBid, stA.bnAsk, stA.basisBps
+		stA.mu.Unlock()
+		stB.mu.Lock()
+		lbB, laB, posB, aeB, bbB, baB, basB := stB.ltBid, stB.ltAsk, stB.pos, stB.avgEntry, stB.bnBid, stB.bnAsk, stB.basisBps
+		stB.mu.Unlock()
+		if lbA <= 0 || laA <= lbA || lbB <= 0 || laB <= lbB {
+			return
+		}
+		midA, midB := 0.5*(lbA+laA), 0.5*(lbB+laB)
+		flatA := math.Abs(posA) < mA.MinB
+		flatB := math.Abs(posB) < mB.MinB
+		usdA := math.Abs(posA) * midA
+		usdB := math.Abs(posB) * midB
+		legs := ap.SymA + "_L/" + ap.SymB + "_S"
+
+		if flatA && flatB {
+			if ap.Closing {
+				recordStratClose(ap.ID, "TRI_EQUALIZE", legs, ap.LegUSD, age.Seconds(), ap.CloseBps, ap.CloseUSD, ap.CloseReason)
+				cool := ap.CoolSec
+				if cool <= 0 {
+					cool = 10
+				}
+				stratCoolUntilMS.Store(now.Add(time.Duration(cool) * time.Second).UnixMilli())
+				openMu.Lock()
+				if activeOpen != nil && activeOpen.ID == ap.ID {
+					activeOpen = nil
+				}
+				openMu.Unlock()
+			} else if age >= 2500*time.Millisecond {
+				fmt.Printf("[STRAT_MISS id=%d strat=TRI_EQUALIZE legs=%q reason=BOTH_IOC_NO_FILL]\n", ap.ID, legs)
+				stratCoolUntilMS.Store(now.Add(15 * time.Second).UnixMilli())
+				openMu.Lock()
+				if activeOpen != nil && activeOpen.ID == ap.ID {
+					activeOpen = nil
+				}
+				openMu.Unlock()
+			}
+			return
+		}
+
+		// <=550ms Asymmetric Fill Guard: never hold 1 naked leg!
+		if !ap.Closing && age >= 550*time.Millisecond && ((usdA >= 8.0 && usdB < 5.0) || (usdB >= 8.0 && usdA < 5.0) || math.Abs(posA*midA+posB*midB) >= math.Max(20.0, ap.LegUSD*0.45)) {
+			if takeWriteSlotTier(2) {
+				if !flatA {
+					if posA > 0 {
+						placePairOrder(ap.SymA, "ASK", roundTo(lbA*0.996, mA.PxDec), midA, math.Abs(posA), true, true)
+					} else {
+						placePairOrder(ap.SymA, "BID", roundTo(laA*1.004, mA.PxDec), midA, math.Abs(posA), true, true)
+					}
+				}
+				if !flatB {
+					if posB > 0 {
+						placePairOrder(ap.SymB, "ASK", roundTo(lbB*0.996, mB.PxDec), midB, math.Abs(posB), true, true)
+					} else {
+						placePairOrder(ap.SymB, "BID", roundTo(laB*1.004, mB.PxDec), midB, math.Abs(posB), true, true)
+					}
+				}
+				openMu.Lock()
+				if activeOpen != nil && activeOpen.ID == ap.ID {
+					activeOpen.Closing = true
+					activeOpen.CloseReason = "ASYM_LEG_GUARD"
+					activeOpen.CloseBps = -2.0
+					activeOpen.CloseUSD = -math.Max(usdA, usdB) * 0.0002
+					activeOpen.CoolSec = 45
+				}
+				openMu.Unlock()
+			}
+			return
+		}
+
+		if usdA < 5.0 || usdB < 5.0 {
+			return
+		}
+		if aeA <= 0 {
+			aeA = ap.EntryPxA
+		}
+		if aeB <= 0 {
+			aeB = ap.EntryPxB
+		}
+		if aeA <= 0 || aeB <= 0 {
+			return
+		}
+		retA := (lbA - aeA) / aeA * 10000.0
+		retB := (aeB - laB) / aeB * 10000.0
+		execNetBps := retA + retB
+		pnlUSD := (retA/10000.0)*(math.Abs(posA)*aeA) + (retB/10000.0)*(math.Abs(posB)*aeB)
+
+		remGap := 2.0
+		if bbA > 0 && baA > bbA && bbB > 0 && baB > bbB {
+			fMidA := 0.5 * (bbA + baA) * (1.0 + basA/10000.0)
+			fMidB := 0.5 * (bbB + baB) * (1.0 + basB/10000.0)
+			remGap = (fMidA-midA)/fMidA*10000.0 + (midB-fMidB)/fMidB*10000.0
+		}
+
+		openMu.Lock()
+		if activeOpen != nil && activeOpen.ID == ap.ID {
+			activeOpen.LastPnlBps = execNetBps
+			activeOpen.LastPnlUSD = pnlUSD
+		}
+		openMu.Unlock()
+
+		reason := ""
+		cool := int64(10)
+		if (execNetBps >= 2.8 && remGap <= 1.0) || execNetBps >= 5.2 {
+			reason = "EQUALIZED_TP"
+		} else if execNetBps <= -ap.SlBps {
+			reason = "SL"
+			cool = 35
+		} else if age >= 240*time.Second && execNetBps >= 0.8 {
+			reason = "TIME_PROFIT"
+		} else if age >= 420*time.Second {
+			reason = "MAX_HOLD"
+		}
+
+		if reason != "" && (!ap.Closing || age >= 2*time.Second) && takeWriteSlotTier(2) {
+			openMu.Lock()
+			if activeOpen != nil && activeOpen.ID == ap.ID {
+				activeOpen.Closing = true
+				activeOpen.CloseReason = reason
+				activeOpen.CloseBps = execNetBps
+				activeOpen.CloseUSD = pnlUSD
+				activeOpen.CoolSec = cool
+			}
+			openMu.Unlock()
+			fireDualIOC("TRI_CLOSE", ap.SymA, "ASK", roundTo(lbA*0.996, mA.PxDec), midA, math.Abs(posA),
+				ap.SymB, "BID", roundTo(laB*1.004, mB.PxDec), midB, math.Abs(posB), true)
+		}
+		return
+	}
+
+	// BN_LAG_ARB (1-leg management)
+	st := mktStates[ap.SymA]
+	m, ok := markets[ap.SymA]
+	if st == nil || !ok {
+		return
+	}
+	st.mu.Lock()
+	lb, la, pos, ae, bb, ba, bas := st.ltBid, st.ltAsk, st.pos, st.avgEntry, st.bnBid, st.bnAsk, st.basisBps
+	closeSide := "ASK"
+	if ap.SideA == "SHORT" {
+		closeSide = "BID"
+	}
+	closeOrd := st.activeOrds[closeSide]
+	st.mu.Unlock()
+	legs := ap.SymA + "_" + ap.SideA
+
+	if math.Abs(pos) < m.MinB {
+		if ap.TpSent || ap.Closing {
+			reasonOut := ap.CloseReason
+			bpsOut := ap.LastPnlBps
+			usdOut := ap.LastPnlUSD
+			cool := ap.CoolSec
+			if reasonOut == "" {
+				reasonOut = "LIMIT_TP"
+				bpsOut = ap.TpBps
+				usdOut = ap.LegUSD * ap.TpBps / 10000.0
+				cool = 10
+			} else if ap.CloseUSD != 0 {
+				bpsOut = ap.CloseBps
+				usdOut = ap.CloseUSD
+			}
+			recordStratClose(ap.ID, "BN_LAG_ARB", legs, ap.LegUSD, age.Seconds(), bpsOut, usdOut, reasonOut)
+			if cool <= 0 {
+				cool = 10
+			}
+			stratCoolUntilMS.Store(now.Add(time.Duration(cool) * time.Second).UnixMilli())
+			openMu.Lock()
+			if activeOpen != nil && activeOpen.ID == ap.ID {
+				activeOpen = nil
+			}
+			openMu.Unlock()
+		} else if age >= 2500*time.Millisecond {
+			fmt.Printf("[STRAT_MISS id=%d strat=BN_LAG_ARB legs=%q reason=IOC_NO_FILL]\n", ap.ID, legs)
+			stratCoolUntilMS.Store(now.Add(8 * time.Second).UnixMilli())
+			openMu.Lock()
+			if activeOpen != nil && activeOpen.ID == ap.ID {
+				activeOpen = nil
+			}
+			openMu.Unlock()
+		}
+		return
+	}
+
+	entry := ap.EntryPxA
+	if ae > 0 {
+		entry = ae
+	}
+	if entry <= 0 || lb <= 0 || la <= lb {
+		return
+	}
+	tMid := 0.5 * (lb + la)
+
+	if !ap.TpSent && !ap.Closing {
+		tpPx := entry * (1.0 + ap.TpBps/10000.0)
+		if ap.SideA == "SHORT" {
+			tpPx = entry * (1.0 - ap.TpBps/10000.0)
+		}
+		tpPx = roundTo(tpPx, m.PxDec)
+		openMu.Lock()
+		if activeOpen != nil && activeOpen.ID == ap.ID && !activeOpen.TpSent {
+			activeOpen.EntryPxA = entry
+			activeOpen.TpSent = true
+		}
+		openMu.Unlock()
+		if takeWriteSlot(true) {
+			placePairOrder(ap.SymA, closeSide, tpPx, tMid, math.Abs(pos), true, false)
+			fmt.Printf("[STRAT_TP_RESTED id=%d sym=%s tp=%.5f(+%.1fbp)]\n", ap.ID, ap.SymA, tpPx, ap.TpBps)
+		}
+		return
+	}
+
+	var pnlBps float64
+	if ap.SideA == "LONG" {
+		pnlBps = (lb - entry) / entry * 10000.0
+	} else {
+		pnlBps = (entry - la) / entry * 10000.0
+	}
+	posUSD := math.Abs(pos) * entry
+	pnlUSD := posUSD * pnlBps / 10000.0
+
+	remStale := 2.0
+	if bb > 0 && ba > bb {
+		if ap.SideA == "LONG" {
+			fairBid := bb * (1.0 + bas/10000.0)
+			remStale = (fairBid - lb) / lb * 10000.0
+		} else {
+			fairAsk := ba * (1.0 + bas/10000.0)
+			remStale = (la - fairAsk) / la * 10000.0
+		}
+	}
+
+	openMu.Lock()
+	if activeOpen != nil && activeOpen.ID == ap.ID {
+		activeOpen.LastPnlBps = pnlBps
+		activeOpen.LastPnlUSD = pnlUSD
+		if !ap.BeArmed && pnlBps >= 3.8 {
+			activeOpen.BeArmed = true
+			ap.BeArmed = true
+		}
+	}
+	openMu.Unlock()
+
+	slThresh := -ap.SlBps
+	if ap.BeArmed {
+		slThresh = 1.8
+	}
+	reason := ""
+	cool := int64(10)
+	if pnlBps >= 3.4 && remStale <= 0.6 {
+		reason = "EQUALIZED_TP"
+	} else if pnlBps <= slThresh {
+		if ap.BeArmed {
+			reason = "BE_STOP"
+		} else {
+			reason = "SL"
+			cool = 35
+		}
+	} else if age >= 90*time.Second {
+		reason = "MAX_HOLD"
+	}
+
+	if reason != "" && (!ap.Closing || age >= 2*time.Second) && takeWriteSlotTier(2) {
+		if closeOrd != nil && !closeOrd.IsIOC {
+			cancelPairSide(ap.SymA, closeSide)
+		}
+		exitPx := roundTo(lb*0.996, m.PxDec)
+		if ap.SideA == "SHORT" {
+			exitPx = roundTo(la*1.004, m.PxDec)
+		}
+		openMu.Lock()
+		if activeOpen != nil && activeOpen.ID == ap.ID {
+			activeOpen.Closing = true
+			activeOpen.CloseReason = reason
+			activeOpen.CloseBps = pnlBps
+			activeOpen.CloseUSD = pnlUSD
+			activeOpen.CoolSec = cool
+		}
+		openMu.Unlock()
+		placePairOrder(ap.SymA, closeSide, exitPx, tMid, math.Abs(pos), true, true)
+	}
+}
+
+func runOpenStratLoop() {
+	time.Sleep(8 * time.Second)
+	evalTick := time.NewTicker(450 * time.Millisecond)
+	mgrTick := time.NewTicker(100 * time.Millisecond)
+	defer evalTick.Stop()
+	defer mgrTick.Stop()
+	lastEval := time.Time{}
+	for {
+		select {
+		case <-fastArbCh:
+			for len(fastArbCh) > 0 {
+				<-fastArbCh
+			}
+			if time.Since(lastEval) >= 120*time.Millisecond {
+				lastEval = time.Now()
+				evaluateFastStrategies()
+			}
+		case <-evalTick.C:
+			if time.Since(lastEval) >= 400*time.Millisecond {
+				lastEval = time.Now()
+				evaluateFastStrategies()
+			}
+		case <-mgrTick.C:
+			manageActiveOpenStrat()
 		}
 	}
 }
@@ -4619,9 +5692,12 @@ func main() {
 			rebalanceFromTrades(tb)
 		}
 	}
+	go runTwinWalkForwardLoop()
+	go runPairHeartbeat()
+	go runOpenStratLoop()
 	go runCarbonScanner()
 	go runCarbonCommandLoop()
-	fmt.Printf("GO-TOKYO v89.1 LIVE | Carbon Sniper (1:2-1:3 RR, $12 test, %d Common Assets) + L2 Recorder | Stop=$%.2f\n", len(commonList), StopEqUSD)
+	fmt.Printf("GO-TOKYO v90.0 LIVE | Open Multi-Strategy (BN_LAG_ARB + TRI_EQUALIZE + TWIN_EQUALIZE + BN_MOM_SNIPE) + CapMult + Journal | Stop=$%.2f\n", StopEqUSD)
 	go syncAccountLoop()
 	select {}
 }
