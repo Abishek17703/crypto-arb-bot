@@ -49,6 +49,26 @@ enum Cmd {
     WaitClose {
         order_id: i64,
     },
+    WaitTrade {
+        #[arg(default_value_t = 0)]
+        after_id: i64,
+    },
+    Arm {
+        #[arg(default_value_t = 0.30)]
+        risk_usd: f64,
+        #[arg(default_value_t = 8)]
+        min_score: i64,
+        #[arg(default_value_t = 3.5)]
+        min_lag_bps: f64,
+        #[arg(default_value_t = 0.85)]
+        be_at_r: f64,
+        #[arg(default_value_t = true)]
+        allow_lag: bool,
+        #[arg(default_value_t = true)]
+        allow_mom: bool,
+        #[arg(default_value = "session_ok")]
+        note: String,
+    },
 }
 
 fn now_ms() -> i64 {
@@ -236,8 +256,8 @@ fn parse_scan_seq(log: &str) -> (i64, i64) {
     for line in log.lines().rev() {
         if let Some(idx) = line.find("[CARBON_SCAN seq=") {
             let rest = &line[idx + "[CARBON_SCAN seq=".len()..];
-            if let Some(end) = rest.find(']') {
-                max_seq = rest[..end].parse::<i64>().unwrap_or(0);
+            if let Some(num_s) = rest.split(|c: char| !c.is_ascii_digit()).next() {
+                max_seq = num_s.parse::<i64>().unwrap_or(0);
             }
             for part in line.split("sc=") {
                 if let Some(sp) = part.split(|c: char| !c.is_ascii_digit()).next() {
@@ -268,7 +288,12 @@ fn sync_journal(log: &str) {
             if l.contains("[STRAT_BOARD") {
                 board_latest = Some(l);
             }
-            if (l.contains("[STRAT_OPEN") || l.contains("[STRAT_CLOSE")) && !seen.contains(l) {
+            if (l.contains("[STRAT_OPEN")
+                || l.contains("[STRAT_CLOSE")
+                || l.contains("[STRAT_SESSION")
+                || l.contains("[STRAT_REVIEW_DUE"))
+                && !seen.contains(l)
+            {
                 let _ = writeln!(f, "{l}");
                 seen.insert(l);
             }
@@ -509,6 +534,81 @@ async fn main() {
                 tokio::time::sleep(Duration::from_secs(5)).await;
             }
             rc
+        }
+        Cmd::WaitTrade { after_id } => {
+            let mut rc = 1;
+            for _ in 0..450 {
+                if let (Ok(tel), Ok((eq, open))) = tokio::join!(fetch_json(S3_TEL_URL), acct_snapshot()) {
+                    let paused = tel["hftTest"]["userPaused"].as_bool().unwrap_or(false);
+                    let log = tel["lighterLog"].as_str().unwrap_or("");
+                    let mut hit_id = 0i64;
+                    for l in log.lines().rev() {
+                        if let Some(pos) = l.find("[STRAT_REVIEW_DUE id=") {
+                            let rest = &l[pos + "[STRAT_REVIEW_DUE id=".len()..];
+                            if let Some(ns) = rest.split(|c: char| !c.is_ascii_digit()).next() {
+                                hit_id = ns.parse::<i64>().unwrap_or(0);
+                            }
+                            break;
+                        }
+                    }
+                    if hit_id > after_id || paused {
+                        sync_journal(log);
+                        println!("REVIEW_DUE review_id={hit_id} Eq=${eq:.4} userPaused={paused} Open={open:?}");
+                        let matched: Vec<&str> = log
+                            .lines()
+                            .filter(|l| {
+                                l.contains("[STRAT_") || l.contains("[CARBON_") || l.contains("AUTO-BREAKER")
+                            })
+                            .collect();
+                        let start = matched.len().saturating_sub(8);
+                        for l in &matched[start..] {
+                            println!("{l}");
+                        }
+                        rc = 0;
+                        break;
+                    }
+                }
+                tokio::time::sleep(Duration::from_secs(6)).await;
+            }
+            rc
+        }
+        Cmd::Arm {
+            risk_usd,
+            min_score,
+            min_lag_bps,
+            be_at_r,
+            allow_lag,
+            allow_mom,
+            note,
+        } => {
+            let tid = now_ms();
+            let payload = json!({
+                "paused": false,
+                "ts": tid,
+                "carbonTune": {
+                    "id": tid,
+                    "riskUsd": risk_usd.clamp(0.10, 0.60),
+                    "minScore": min_score.clamp(6, 10),
+                    "minLagBps": min_lag_bps.clamp(2.5, 8.0),
+                    "beAtR": be_at_r.clamp(0.50, 1.50),
+                    "allowLag": allow_lag,
+                    "allowMom": allow_mom,
+                    "note": note
+                }
+            });
+            match put_pause_control(payload).await {
+                Ok(_) => {
+                    println!(
+                        "ARMED id={tid} risk=${:.2} minSc={min_score} minLag={min_lag_bps:.1}bp be={be_at_r:.2}R lag={allow_lag} mom={allow_mom}",
+                        risk_usd.clamp(0.10, 0.60)
+                    );
+                    0
+                }
+                Err(e) => {
+                    eprintln!("ARM_ERR: {e}");
+                    1
+                }
+            }
         }
     };
     std::process::exit(code);
