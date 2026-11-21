@@ -54,20 +54,21 @@ var markets = map[string]Market{
 	"BTC":   {Sym: "BTC", ID: 1, SzDec: 5, PxDec: 1, MinB: 0.00007, AllowEntry: false, ClipUSD: -1.0, EdgeBps: 5.0},
 	"SOL":   {Sym: "SOL", ID: 2, SzDec: 3, PxDec: 3, MinB: 0.055, AllowEntry: false, ClipUSD: -1.0, EdgeBps: 5.4},
 	"XRP":   {Sym: "XRP", ID: 7, SzDec: 0, PxDec: 6, MinB: 4.0, AllowEntry: false, ClipUSD: -1.0, EdgeBps: 5.4},
-	"HYPE":  {Sym: "HYPE", ID: 24, SzDec: 2, PxDec: 4, MinB: 0.07, AllowEntry: false, ClipUSD: -1.0, EdgeBps: 5.8},
+	"HYPE":  {Sym: "HYPE", ID: 24, SzDec: 2, PxDec: 4, MinB: 0.07, AllowEntry: true, ClipUSD: 240.0, EdgeBps: 4.5},
 	"BNB":   {Sym: "BNB", ID: 25, SzDec: 2, PxDec: 4, MinB: 0.01, AllowEntry: false, ClipUSD: -1.0, EdgeBps: 5.4},
-	"ZEC":   {Sym: "ZEC", ID: 90, SzDec: 3, PxDec: 3, MinB: 0.004, AllowEntry: false, ClipUSD: -1.0, EdgeBps: 5.4},
+	"ZEC":   {Sym: "ZEC", ID: 90, SzDec: 3, PxDec: 3, MinB: 0.004, AllowEntry: true, ClipUSD: 240.0, EdgeBps: 6.0},
 	"XAU":   {Sym: "XAU", ID: 92, SzDec: 4, PxDec: 2, MinB: 0.0015, AllowEntry: false, ClipUSD: -1.0, EdgeBps: 5.0},
 	"NVDA":  {Sym: "NVDA", ID: 110, SzDec: 3, PxDec: 3, MinB: 0.025, AllowEntry: false, ClipUSD: -1.0, EdgeBps: 5.0},
 	"SPY":   {Sym: "SPY", ID: 128, SzDec: 4, PxDec: 2, MinB: 0.0070, AllowEntry: true, ClipUSD: 240.0, EdgeBps: 4.0},
 	"QQQ":   {Sym: "QQQ", ID: 129, SzDec: 4, PxDec: 2, MinB: 0.0075, AllowEntry: true, ClipUSD: 240.0, EdgeBps: 4.0},
+	"MU":    {Sym: "MU", ID: 164, SzDec: 4, PxDec: 2, MinB: 0.0060, AllowEntry: true, ClipUSD: 240.0, EdgeBps: 4.5},
 	"US500": {Sym: "US500", ID: 180, SzDec: 5, PxDec: 1, MinB: 0.00070, AllowEntry: true, ClipUSD: 240.0, EdgeBps: 4.0},
 	"US100": {Sym: "US100", ID: 181, SzDec: 6, PxDec: 0, MinB: 0.00020, AllowEntry: true, ClipUSD: 240.0, EdgeBps: 4.0},
-	"SOXL":  {Sym: "SOXL", ID: 197, SzDec: 4, PxDec: 2, MinB: 0.0500, AllowEntry: true, ClipUSD: 240.0, EdgeBps: 11.5},
+	"SOXL":  {Sym: "SOXL", ID: 197, SzDec: 4, PxDec: 2, MinB: 0.0500, AllowEntry: true, ClipUSD: 240.0, EdgeBps: 8.5},
 }
-var evergreenSyms = []string{"SOXL"}
+var evergreenSyms = []string{"SOXL", "MU", "ZEC", "HYPE"}
 var bootTS = time.Now()
-var idToSym = map[int64]string{0: "ETH", 1: "BTC", 2: "SOL", 7: "XRP", 24: "HYPE", 25: "BNB", 90: "ZEC", 92: "XAU", 110: "NVDA", 128: "SPY", 129: "QQQ", 180: "US500", 181: "US100", 197: "SOXL"}
+var idToSym = map[int64]string{0: "ETH", 1: "BTC", 2: "SOL", 7: "XRP", 24: "HYPE", 25: "BNB", 90: "ZEC", 92: "XAU", 110: "NVDA", 128: "SPY", 129: "QQQ", 164: "MU", 180: "US500", 181: "US100", 197: "SOXL"}
 
 func isOffHoursUTC(t time.Time) bool {
 	u := t.UTC()
@@ -199,10 +200,10 @@ type TwinState struct {
 var (
 	mktStates = map[string]*MarketState{
 		"BTC": newMarketState(-1.0), "ETH": newMarketState(-1.0),
-		"SOL": newMarketState(-1.0), "XRP": newMarketState(-1.0), "HYPE": newMarketState(-1.0),
-		"BNB": newMarketState(-1.0), "ZEC": newMarketState(-1.0), "XAU": newMarketState(-1.0), "NVDA": newMarketState(-1.0),
+		"SOL": newMarketState(-1.0), "XRP": newMarketState(-1.0), "HYPE": newMarketState(160.0),
+		"BNB": newMarketState(-1.0), "ZEC": newMarketState(160.0), "XAU": newMarketState(-1.0), "NVDA": newMarketState(-1.0),
 		"SPY": newMarketState(240.0), "US500": newMarketState(240.0), "QQQ": newMarketState(240.0), "US100": newMarketState(240.0),
-		"SOXL": newMarketState(160.0),
+		"MU": newMarketState(160.0), "SOXL": newMarketState(160.0),
 	}
 	twins = []*TwinState{
 		{Name: "US500/SPY", ThinSym: "US500", DeepSym: "SPY", AlwaysActive: false, BidEdgeBps: 3.6, AskEdgeBps: 4.4, FallbackRatio: 10.002},
@@ -268,11 +269,7 @@ func enqueueTx(fn func()) {
 var quotaCoolUntil atomic.Int64
 
 func globalDirCapUSD() float64 {
-	eq := float64(eqNow.Load()) / 1e6
-	if eq < 50.0 {
-		eq = 100.0
-	}
-	return math.Min(1500.0, eq*12.2)
+	return 1600.0
 }
 
 func houseMoneyClipUSD() float64 {
@@ -644,7 +641,7 @@ func placeSide(sym, side string, pxF, midF, customSz float64, isClose, isIOC boo
 		if eq < 50.0 {
 			eq = 100.0
 		}
-		if !isClose && (sym == "BTC" || sym == "ETH" || sym == "SOXL") {
+		if !isClose && (sym == "SOXL" || sym == "MU" || sym == "ZEC" || sym == "HYPE") {
 			clip = houseMoneyClipUSD()
 		}
 		if !isClose && isIOC {
@@ -798,10 +795,26 @@ func recomputeBBO(st *MarketState) {
 	st.ltAskDepthUSD = askDepth
 }
 
+func dislocParams(sym string, now time.Time) (bool, float64, float64, float64, float64, float64, float64) {
+	switch sym {
+	case "SOXL":
+		return isOffHoursUTC(now), 8.5, 5.5, 14.0, 28.0, 2.2, 5.5
+	case "MU":
+		return isOffHoursUTC(now), 4.5, 3.2, 10.0, 18.0, 1.5, 3.5
+	case "ZEC":
+		return true, 6.0, 4.2, 12.0, 22.0, 1.8, 3.8
+	case "HYPE":
+		return true, 4.5, 3.2, 10.0, 18.0, 1.5, 3.5
+	default:
+		return false, 11.5, 6.8, 15.5, 0.0, 3.0, 1.25
+	}
+}
+
 func closeStepBps(sym string, st *MarketState) float64 {
 	_ = st
-	if sym == "SOXL" {
-		return 6.8
+	if sym == "SOXL" || sym == "MU" || sym == "ZEC" || sym == "HYPE" {
+		_, _, tp, _, _, _, _ := dislocParams(sym, time.Now())
+		return tp
 	}
 	return 80.0
 }
@@ -1038,10 +1051,12 @@ func manageCoin(sym string) {
 	ltMid := 0.5 * (lb + la)
 	spBps := (la - lb) / ltMid * 10000.0
 	instBasis := (ltMid - mid) / mid * 10000.0
+	isDisloc := sym == "SOXL" || sym == "MU" || sym == "ZEC" || sym == "HYPE"
+	dActive, dEdge, dTP, dSL, dMaxRng, dPickoff, dMaxSp := dislocParams(sym, now)
 	basisMaxSp := 1.25
-	if sym == "SOXL" {
-		basisMaxSp = 5.50
-	} else if sym == "SOL" || sym == "XRP" || sym == "HYPE" || sym == "BNB" || sym == "ZEC" || sym == "NVDA" {
+	if isDisloc {
+		basisMaxSp = dMaxSp
+	} else if sym == "SOL" || sym == "XRP" || sym == "BNB" || sym == "NVDA" {
 		basisMaxSp = 2.20
 	}
 	if st.lastBasisTS.IsZero() {
@@ -1068,7 +1083,7 @@ func manageCoin(sym string) {
 		st.emaSpreadBps += (1.0 - math.Exp(-bdt/45.0)) * (spBps - st.emaSpreadBps)
 	}
 	refFair := micro
-	if sym == "SOXL" || sym == "SOL" || sym == "XRP" || sym == "HYPE" || sym == "BNB" || sym == "ZEC" || sym == "NVDA" {
+	if isDisloc || sym == "SOL" || sym == "XRP" || sym == "BNB" || sym == "NVDA" {
 		refFair = mid
 	}
 	fairLt := refFair * (1.0 + st.basisBps/10000.0)
@@ -1213,19 +1228,20 @@ func manageCoin(sym string) {
 		}
 	}
 	rng5mBps := (hi5 - lo5) / mid * 10000.0
-	soxlCalmOk := sym == "SOXL" && isOffHoursUTC(now) && coinActive && !inCool && spBps <= 5.5 && rng5mBps <= 42.0 && st.range60sBps <= 28.0 && math.Abs(ret15mBps) <= 55.0 && math.Abs(vel3sBps) < 4.0 && math.Abs(obi) <= 0.65
-	bidSafe := makerAllowed && soxlCalmOk && (dirCap-otherPendBid) >= 12.0
-	askSafe := makerAllowed && soxlCalmOk && (dirCap-otherPendAsk) >= 12.0
-	if sym == "SOXL" {
-		edge = 11.5
+	calmOk := isDisloc && dActive && coinActive && !inCool && spBps <= dMaxSp && rng5mBps <= dMaxRng && st.range60sBps <= dMaxRng*0.85 && math.Abs(ret15mBps) <= dMaxRng*2.0 && math.Abs(vel3sBps) < 3.8 && math.Abs(obi) <= 0.65
+	bidSafe := false
+	askSafe := false
+	if isDisloc {
+		edge = dEdge
 		bidAnchor = fairLt
 		askAnchor = fairLt
-		bidSafe = soxlCalmOk && (dirCap-otherPendBid) >= 12.0
-		askSafe = soxlCalmOk && (dirCap-otherPendAsk) >= 12.0
+		bidSafe = calmOk && (dirCap-otherPendBid) >= 12.0
+		askSafe = calmOk && (dirCap-otherPendAsk) >= 12.0
 	}
-	keepBid := sym == "SOXL" && isOffHoursUTC(now) && !holdOneLocked && !remotePaused.Load() && !inCool && rng5mBps <= 48.0 && math.Abs(vel3sBps) < 5.5
+	keepBid := isDisloc && dActive && !holdOneLocked && !remotePaused.Load() && !inCool && rng5mBps <= dMaxRng*1.20 && math.Abs(vel3sBps) < 5.0
 	keepAsk := keepBid
 
+	_ = makerAllowed
 	_ = fObi
 	_ = impBps
 	_ = minEdgeGuarantee
@@ -1258,9 +1274,9 @@ func manageCoin(sym string) {
 	btcTrendSell := false
 
 	// 1. Manage resting orders: ModifyOrder (1 write) or Quota-Free 0ms L2CancelOrder!
-	pickoffBuf := 3.0
-	modWait := 4000 * time.Millisecond
-	modMove := 3.0
+	pickoffBuf := dPickoff
+	modWait := 11000 * time.Millisecond
+	modMove := 2.8
 	for _, side := range []string{"BID", "ASK"} {
 		ao := st.activeOrds[side]
 		if ao == nil {
@@ -1309,9 +1325,9 @@ func manageCoin(sym string) {
 		holdS = now.Sub(st.posOpenTS).Seconds()
 	}
 
-	slInit, lockPeak, lockFloor := 15.5, 5.5, 2.8
+	slInit, lockPeak, lockFloor := dSL, dTP*0.85, dTP*0.45
 
-	// 2. Closing orders: v80 SOXL Dislocation Convergence (+6.8bps), 5m Stalled Cut (-8bps), 8m Scratch, -15.5bps Stop
+	// 2. Closing orders: v82 Multi-Book Dislocation Convergence (+dTP), 5m Stalled Cut, 8m Scratch, -dSL Stop
 	if pos <= -m.MinB && ae > 0 {
 		curTkShort := (ae - la) / ae * 10000.0
 		if curTkShort > st.peakFavBps {
@@ -1320,7 +1336,7 @@ func manageCoin(sym string) {
 		trailFloor := stepRatchetFloor(st.peakFavBps, lockFloor)
 		greenShortPx := roundTo(math.Min(ae-tick, ae*(1.0-math.Max(0.25, trailFloor-0.15)/10000.0)), m.PxDec)
 		greenLockShort := st.peakFavBps >= lockPeak && ((curTkShort <= trailFloor && spBps <= 6.0) || curTkShort <= trailFloor-0.8)
-		earlyCutShort := st.peakFavBps < 3.0 && holdS >= 300.0 && curTkShort <= -8.0 && spBps <= 5.5
+		earlyCutShort := st.peakFavBps < dTP*0.45 && holdS >= 300.0 && curTkShort <= -(dSL*0.60) && spBps <= 5.5
 		hardSlShort := (curTkShort <= -slInit && spBps <= 6.0) || curTkShort <= -(slInit+1.5)
 		slHitShort := hardSlShort || earlyCutShort || greenLockShort
 		defBailShort := false
@@ -1409,7 +1425,7 @@ func manageCoin(sym string) {
 		trailFloorL := stepRatchetFloor(st.peakFavBps, lockFloor)
 		greenLongPx := roundTo(math.Max(ae+tick, ae*(1.0+math.Max(0.25, trailFloorL-0.15)/10000.0)), m.PxDec)
 		greenLockLong := st.peakFavBps >= lockPeak && ((curTkLong <= trailFloorL && spBps <= 6.0) || curTkLong <= trailFloorL-0.8)
-		earlyCutLong := st.peakFavBps < 3.0 && holdS >= 300.0 && curTkLong <= -8.0 && spBps <= 5.5
+		earlyCutLong := st.peakFavBps < dTP*0.45 && holdS >= 300.0 && curTkLong <= -(dSL*0.60) && spBps <= 5.5
 		hardSlLong := (curTkLong <= -slInit && spBps <= 6.0) || curTkLong <= -(slInit+1.5)
 		slHitLong := hardSlLong || earlyCutLong || greenLockLong
 		defBailLong := false
@@ -1497,7 +1513,7 @@ func manageCoin(sym string) {
 	}
 	logMu.Unlock()
 	if shouldLog {
-		fmt.Printf("[%s] GO-TOKYO v80 LIVE | SOXL OffHrs Maker | Eq=$%.4f | %s Pos=%.5f | Net=$%.2f | Rng60s=%.1fbps | Sp=%.2fbps | Strk=%d | Prob=%v | OBI=%.2f\n",
+		fmt.Printf("[%s] GO-TOKYO v82 LIVE | Quote-4 Hold-1 Disloc Maker (SOXL+MU+ZEC+HYPE) | Eq=$%.4f | %s Pos=%.5f | Net=$%.2f | Rng60s=%.1fbps | Sp=%.2fbps | Strk=%d | Prob=%v | OBI=%.2f\n",
 			now.Format("15:04:05"), float64(eqNow.Load())/1e6, sym, pos, netUSD, st.range60sBps, spBps, streakWins.Load(), probationForce.Load(), obi)
 	}
 }
@@ -1517,9 +1533,9 @@ func rebalanceFromTrades(tb []byte) {
 		return
 	}
 	nowMS := time.Now().UnixMilli()
-	pnl := map[string]float64{"BTC": 0, "XAU": 0, "ETH": 0, "SOL": 0, "XRP": 0, "HYPE": 0, "BNB": 0, "ZEC": 0, "NVDA": 0, "SOXL": 0}
-	wins := map[string]float64{"BTC": 0, "XAU": 0, "ETH": 0, "SOL": 0, "XRP": 0, "HYPE": 0, "BNB": 0, "ZEC": 0, "NVDA": 0, "SOXL": 0}
-	closes := map[string]float64{"BTC": 0, "XAU": 0, "ETH": 0, "SOL": 0, "XRP": 0, "HYPE": 0, "BNB": 0, "ZEC": 0, "NVDA": 0, "SOXL": 0}
+	pnl := map[string]float64{"BTC": 0, "XAU": 0, "ETH": 0, "SOL": 0, "XRP": 0, "HYPE": 0, "BNB": 0, "ZEC": 0, "NVDA": 0, "MU": 0, "SOXL": 0}
+	wins := map[string]float64{"BTC": 0, "XAU": 0, "ETH": 0, "SOL": 0, "XRP": 0, "HYPE": 0, "BNB": 0, "ZEC": 0, "NVDA": 0, "MU": 0, "SOXL": 0}
+	closes := map[string]float64{"BTC": 0, "XAU": 0, "ETH": 0, "SOL": 0, "XRP": 0, "HYPE": 0, "BNB": 0, "ZEC": 0, "NVDA": 0, "MU": 0, "SOXL": 0}
 	latestDecided := false
 	inCaution := probationForce.Load()
 	streak := 0
@@ -1613,17 +1629,18 @@ func rebalanceFromTrades(tb []byte) {
 	// v74 Trend-Aligned Trailing Runner: BTC 7x (~$680) & SOL/XRP/HYPE 5x (~$480, 45% L1 depth capped), max ~$0.13 stop!
 	_ = inCaution
 	_ = bestSym
-	offHrs := isOffHoursUTC(time.Now())
-	for _, sym := range []string{"BTC", "XAU", "ETH", "SOL", "XRP", "HYPE", "BNB", "ZEC", "NVDA", "SOXL"} {
+	now := time.Now()
+	for _, sym := range []string{"BTC", "XAU", "ETH", "SOL", "XRP", "HYPE", "BNB", "ZEC", "NVDA", "MU", "SOXL"} {
 		st := mktStates[sym]
+		dAct, dEdg, _, _, _, _, _ := dislocParams(sym, now)
 		clip := -1.0
-		if sym == "SOXL" && offHrs {
+		if (sym == "SOXL" || sym == "MU" || sym == "ZEC" || sym == "HYPE") && dAct {
 			clip = houseMoneyClipUSD()
 		}
 		st.mu.Lock()
 		st.dynClipUSD = clip
-		st.makerActive = sym == "SOXL" && offHrs
-		st.dynEdgeBps = 11.5
+		st.makerActive = dAct && clip > 0
+		st.dynEdgeBps = dEdg
 		st.entryCool = 2000 * time.Millisecond
 		st.rollPnl = pnl[sym]
 		st.mu.Unlock()
@@ -2105,7 +2122,7 @@ func runLtWS() {
 }
 
 func runBnWS() {
-	url := "wss://fstream.binance.com/stream?streams=soxlusdt@bookTicker/soxlusdt@kline_1m"
+	url := "wss://fstream.binance.com/stream?streams=soxlusdt@bookTicker/soxlusdt@kline_1m/muusdt@bookTicker/muusdt@kline_1m/zecusdt@bookTicker/zecusdt@kline_1m/hypeusdt@bookTicker/hypeusdt@kline_1m"
 	for {
 		conn, _, err := websocket.DefaultDialer.Dial(url, nil)
 		if err != nil {
@@ -2254,7 +2271,7 @@ func seedBinanceHistory() {
 	now := time.Now()
 	slot := now.Unix() / 10
 	idx := int(slot % 6)
-	for _, sym := range []string{"SOXL"} {
+	for _, sym := range []string{"SOXL", "MU", "ZEC", "HYPE"} {
 		st := mktStates[sym]
 		if st == nil {
 			continue
@@ -3058,14 +3075,16 @@ func main() {
 	mktStates["BNB"].dynClipUSD = -1.0
 	mktStates["ZEC"].dynClipUSD = -1.0
 	mktStates["NVDA"].dynClipUSD = -1.0
-	mktStates["SOXL"].dynClipUSD = 160.0
-	if !isOffHoursUTC(time.Now()) {
-		mktStates["SOXL"].dynClipUSD = -1.0
-	}
-	for _, s := range []string{"BTC", "XAU", "ETH", "SOL", "XRP", "HYPE", "BNB", "ZEC"} {
+	nowBoot := time.Now()
+	for _, s := range []string{"BTC", "XAU", "ETH", "SOL", "XRP", "HYPE", "BNB", "ZEC", "NVDA", "MU", "SOXL"} {
+		dAct, _, _, _, _, _, _ := dislocParams(s, nowBoot)
+		mktStates[s].dynClipUSD = -1.0
 		mktStates[s].makerActive = false
+		if (s == "SOXL" || s == "MU" || s == "ZEC" || s == "HYPE") && dAct {
+			mktStates[s].dynClipUSD = 160.0
+			mktStates[s].makerActive = true
+		}
 	}
-	mktStates["SOXL"].makerActive = mktStates["SOXL"].dynClipUSD > 0
 
 	go runTxWorker()
 	go runTxWS()
@@ -3076,7 +3095,7 @@ func main() {
 	seedBinanceHistory()
 	seedPairHistory()
 	go runPairHeartbeat()
-	fmt.Printf("GO-TOKYO v81 LIVE | Wknd/OffHrs SOXL-Only Maker | Mon-Fri US500/SPY+US100/QQQ Twin Arb | Stop=$%.2f\n", StopEqUSD)
+	fmt.Printf("GO-TOKYO v82 LIVE | Quote-4 Hold-1 Disloc Maker (SOXL+MU+ZEC+HYPE) + Mon-Fri Twins | Stop=$%.2f\n", StopEqUSD)
 	go syncAccountLoop()
 	runBnWS()
 }
