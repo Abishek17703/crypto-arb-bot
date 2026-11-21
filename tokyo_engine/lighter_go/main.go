@@ -59,6 +59,9 @@ var markets = map[string]Market{
 	"ZEC":   {Sym: "ZEC", ID: 90, SzDec: 3, PxDec: 3, MinB: 0.004, AllowEntry: true, ClipUSD: 22.0, EdgeBps: 7.5},
 	"XAU":   {Sym: "XAU", ID: 92, SzDec: 4, PxDec: 2, MinB: 0.0015, AllowEntry: false, ClipUSD: -1.0, EdgeBps: 6.0},
 	"NVDA":  {Sym: "NVDA", ID: 110, SzDec: 3, PxDec: 3, MinB: 0.025, AllowEntry: false, ClipUSD: -1.0, EdgeBps: 5.0},
+	"AMZN":  {Sym: "AMZN", ID: 114, SzDec: 3, PxDec: 3, MinB: 0.0200, AllowEntry: true, ClipUSD: 40.0, EdgeBps: 4.0},
+	"GOOGL": {Sym: "GOOGL", ID: 116, SzDec: 4, PxDec: 2, MinB: 0.0150, AllowEntry: true, ClipUSD: 40.0, EdgeBps: 4.0},
+	"META":  {Sym: "META", ID: 117, SzDec: 4, PxDec: 2, MinB: 0.0080, AllowEntry: true, ClipUSD: 40.0, EdgeBps: 4.2},
 	"SPY":   {Sym: "SPY", ID: 128, SzDec: 4, PxDec: 2, MinB: 0.0070, AllowEntry: true, ClipUSD: 240.0, EdgeBps: 4.0},
 	"QQQ":   {Sym: "QQQ", ID: 129, SzDec: 4, PxDec: 2, MinB: 0.0075, AllowEntry: true, ClipUSD: 240.0, EdgeBps: 4.0},
 	"MU":    {Sym: "MU", ID: 164, SzDec: 4, PxDec: 2, MinB: 0.0060, AllowEntry: true, ClipUSD: 22.0, EdgeBps: 6.5},
@@ -66,9 +69,9 @@ var markets = map[string]Market{
 	"US100": {Sym: "US100", ID: 181, SzDec: 6, PxDec: 0, MinB: 0.00020, AllowEntry: true, ClipUSD: 240.0, EdgeBps: 4.0},
 	"SOXL":  {Sym: "SOXL", ID: 197, SzDec: 4, PxDec: 2, MinB: 0.0500, AllowEntry: true, ClipUSD: 22.0, EdgeBps: 9.5},
 }
-var evergreenSyms = []string{"SOXL", "MU", "ZEC", "HYPE"}
+var evergreenSyms = []string{"GOOGL", "AMZN", "META", "SOXL", "MU", "ZEC", "HYPE"}
 var bootTS = time.Now()
-var idToSym = map[int64]string{0: "ETH", 1: "BTC", 2: "SOL", 7: "XRP", 24: "HYPE", 25: "BNB", 90: "ZEC", 92: "XAU", 110: "NVDA", 128: "SPY", 129: "QQQ", 164: "MU", 180: "US500", 181: "US100", 197: "SOXL"}
+var idToSym = map[int64]string{0: "ETH", 1: "BTC", 2: "SOL", 7: "XRP", 24: "HYPE", 25: "BNB", 90: "ZEC", 92: "XAU", 110: "NVDA", 114: "AMZN", 116: "GOOGL", 117: "META", 128: "SPY", 129: "QQQ", 164: "MU", 180: "US500", 181: "US100", 197: "SOXL"}
 
 func isOffHoursUTC(t time.Time) bool {
 	u := t.UTC()
@@ -202,6 +205,7 @@ var (
 		"BTC": newMarketState(-1.0), "ETH": newMarketState(-1.0),
 		"SOL": newMarketState(-1.0), "XRP": newMarketState(-1.0), "HYPE": newMarketState(22.0),
 		"BNB": newMarketState(-1.0), "ZEC": newMarketState(22.0), "XAU": newMarketState(-1.0), "NVDA": newMarketState(-1.0),
+		"AMZN": newMarketState(40.0), "GOOGL": newMarketState(40.0), "META": newMarketState(40.0),
 		"SPY": newMarketState(220.0), "US500": newMarketState(220.0), "QQQ": newMarketState(220.0), "US100": newMarketState(220.0),
 		"MU": newMarketState(22.0), "SOXL": newMarketState(22.0),
 	}
@@ -808,11 +812,17 @@ func recomputeBBO(st *MarketState) {
 }
 
 func isDislocSym(sym string) bool {
-	return sym == "SOXL" || sym == "MU" || sym == "ZEC" || sym == "HYPE"
+	return sym == "GOOGL" || sym == "AMZN" || sym == "META" || sym == "SOXL" || sym == "MU" || sym == "ZEC" || sym == "HYPE"
 }
 
 func dislocParams(sym string, now time.Time) (bool, float64, float64, float64, float64, float64, float64) {
 	switch sym {
+	case "GOOGL":
+		return isOffHoursUTC(now), 4.0, 3.0, 5.2, 16.0, 1.5, 2.8
+	case "AMZN":
+		return isOffHoursUTC(now), 4.0, 3.0, 5.2, 16.0, 1.5, 2.8
+	case "META":
+		return isOffHoursUTC(now), 4.2, 3.2, 5.5, 20.0, 1.6, 2.8
 	case "SOXL":
 		return isOffHoursUTC(now), 9.5, 6.8, 9.0, 26.0, 2.5, 5.5
 	case "MU":
@@ -988,7 +998,7 @@ func updateShadowPaper(st *MarketState, now time.Time, lb, la, fairLt, dEdge, dT
 		if la >= st.shEntry*(1.0+dTP/10000.0) {
 			st.shadowBps += dTP
 			st.shDir = 0
-		} else if (age >= 15.0 && pnlBps <= -curSL) || pnlBps <= -24.0 || age >= 480.0 {
+		} else if (age >= 35.0 && pnlBps <= -curSL) || pnlBps <= -24.0 || age >= 480.0 {
 			st.shadowBps += pnlBps
 			st.shDir = 0
 		}
@@ -997,7 +1007,7 @@ func updateShadowPaper(st *MarketState, now time.Time, lb, la, fairLt, dEdge, dT
 		if lb <= st.shEntry*(1.0-dTP/10000.0) {
 			st.shadowBps += dTP
 			st.shDir = 0
-		} else if (age >= 15.0 && pnlBps <= -curSL) || pnlBps <= -24.0 || age >= 480.0 {
+		} else if (age >= 35.0 && pnlBps <= -curSL) || pnlBps <= -24.0 || age >= 480.0 {
 			st.shadowBps += pnlBps
 			st.shDir = 0
 		}
@@ -1091,7 +1101,7 @@ func manageCoin(sym string) {
 				st.basisBps += (1.0 - math.Exp(-bdt/5.0)) * (instBasis - st.basisBps)
 				st.basisWarmTicks++
 			} else {
-				st.basisBps += (1.0 - math.Exp(-bdt/300.0)) * (instBasis - st.basisBps) // Slow 5m basis anchor!
+				st.basisBps += (1.0 - math.Exp(-bdt/45.0)) * (instBasis - st.basisBps) // Tight 45s basis anchor!
 			}
 		}
 		st.emaSpreadBps += (1.0 - math.Exp(-bdt/45.0)) * (spBps - st.emaSpreadBps)
@@ -1246,7 +1256,7 @@ func manageCoin(sym string) {
 	if st.dynClipUSD <= 25.0 {
 		effMaxRng = dMaxRng * 0.90 // Probation trades CALMER books, never 1.45x choppier!
 	}
-	calmOk := isDisloc && dActive && coinActive && !inCool && spBps <= dMaxSp && rng5mBps <= effMaxRng && st.range60sBps <= effMaxRng*0.80 && math.Abs(ret15mBps) <= effMaxRng*1.8 && math.Abs(vel3sBps) < 3.8 && math.Abs(obi) <= 0.60
+	calmOk := isDisloc && dActive && coinActive && !inCool && spBps <= dMaxSp && rng5mBps <= effMaxRng && st.range60sBps <= effMaxRng && math.Abs(ret15mBps) <= effMaxRng*1.8 && math.Abs(vel3sBps) < 3.8 && math.Abs(obi) <= 0.60
 	bidSafe := false
 	askSafe := false
 	if isDisloc {
@@ -1356,7 +1366,7 @@ func manageCoin(sym string) {
 		trailFloor := stepRatchetFloor(st.peakFavBps, lockFloor)
 		greenLockShort := st.peakFavBps >= lockPeak && ((curTkShort <= trailFloor && spBps <= 6.0) || curTkShort <= trailFloor-0.8)
 		earlyCutShort := st.peakFavBps < dTP*0.50 && holdS >= 180.0 && curTkShort <= -(dSL*0.72) && spBps <= 5.5
-		hardSlShort := (holdS >= 15.0 && ((curTkShort <= -slInit && spBps <= 6.0) || curTkShort <= -(slInit+1.5))) || curTkShort <= -24.0
+		hardSlShort := (holdS >= 35.0 && ((curTkShort <= -slInit && spBps <= 6.0) || curTkShort <= -(slInit+1.5))) || curTkShort <= -24.0
 		slHitShort := hardSlShort || earlyCutShort || greenLockShort
 		defBailShort := false
 		timeScratchShort := holdS >= 480.0
@@ -1441,7 +1451,7 @@ func manageCoin(sym string) {
 		trailFloorL := stepRatchetFloor(st.peakFavBps, lockFloor)
 		greenLockLong := st.peakFavBps >= lockPeak && ((curTkLong <= trailFloorL && spBps <= 6.0) || curTkLong <= trailFloorL-0.8)
 		earlyCutLong := st.peakFavBps < dTP*0.50 && holdS >= 180.0 && curTkLong <= -(dSL*0.72) && spBps <= 5.5
-		hardSlLong := (holdS >= 15.0 && ((curTkLong <= -slInit && spBps <= 6.0) || curTkLong <= -(slInit+1.5))) || curTkLong <= -24.0
+		hardSlLong := (holdS >= 35.0 && ((curTkLong <= -slInit && spBps <= 6.0) || curTkLong <= -(slInit+1.5))) || curTkLong <= -24.0
 		slHitLong := hardSlLong || earlyCutLong || greenLockLong
 		defBailLong := false
 		timeScratchLong := holdS >= 480.0
@@ -1525,7 +1535,7 @@ func manageCoin(sym string) {
 	}
 	logMu.Unlock()
 	if shouldLog {
-		fmt.Printf("[%s] GO-TOKYO v85 LIVE | PriorityCancel + 90sEqClamp + StrictScale ($22->$40->$95->$180->$260) | Eq=$%.4f | %s Pos=%.5f | Clip=$%.0f | Net=$%.2f | Rng60s=%.1f | Sp=%.2f | Strk=%d | OBI=%.2f\n",
+		fmt.Printf("[%s] GO-TOKYO v86 LIVE | Calm RWA Stocks (GOOGL/AMZN/META) + 35s Wick Shield + 45s Basis | Eq=$%.4f | %s Pos=%.5f | Clip=$%.0f | Net=$%.2f | Rng60s=%.1f | Sp=%.2f | Strk=%d | OBI=%.2f\n",
 			now.Format("15:04:05"), float64(eqNow.Load())/1e6, sym, pos, st.dynClipUSD, netUSD, st.range60sBps, spBps, streakWins.Load(), obi)
 	}
 }
@@ -1546,7 +1556,7 @@ func rebalanceFromTrades(tb []byte) {
 		return
 	}
 	nowMS := time.Now().UnixMilli()
-	allSyms := []string{"BTC", "XAU", "ETH", "SOL", "XRP", "HYPE", "BNB", "ZEC", "NVDA", "MU", "SOXL", "SPY", "US500", "QQQ", "US100"}
+	allSyms := []string{"BTC", "XAU", "ETH", "SOL", "XRP", "HYPE", "BNB", "ZEC", "NVDA", "AMZN", "GOOGL", "META", "MU", "SOXL", "SPY", "US500", "QQQ", "US100"}
 	pnl := map[string]float64{}
 	wins := map[string]float64{}
 	closes := map[string]float64{}
@@ -1662,7 +1672,7 @@ func rebalanceFromTrades(tb []byte) {
 		}
 	}
 	now := time.Now()
-	for _, sym := range []string{"BTC", "XAU", "ETH", "SOL", "XRP", "HYPE", "BNB", "ZEC", "NVDA", "MU", "SOXL"} {
+	for _, sym := range []string{"BTC", "XAU", "ETH", "SOL", "XRP", "HYPE", "BNB", "ZEC", "NVDA", "AMZN", "GOOGL", "META", "MU", "SOXL"} {
 		st := mktStates[sym]
 		dAct, dEdg, _, _, _, _, _ := dislocParams(sym, now)
 		clip := -1.0
@@ -2183,7 +2193,7 @@ func runLtWS() {
 }
 
 func runBnWS() {
-	url := "wss://fstream.binance.com/stream?streams=soxlusdt@bookTicker/soxlusdt@kline_1m/muusdt@bookTicker/muusdt@kline_1m/zecusdt@bookTicker/zecusdt@kline_1m/hypeusdt@bookTicker/hypeusdt@kline_1m/solusdt@bookTicker/solusdt@kline_1m/xauusdt@bookTicker/xauusdt@kline_1m"
+	url := "wss://fstream.binance.com/stream?streams=googlusdt@bookTicker/googlusdt@kline_1m/amznusdt@bookTicker/amznusdt@kline_1m/metausdt@bookTicker/metausdt@kline_1m/soxlusdt@bookTicker/soxlusdt@kline_1m/muusdt@bookTicker/muusdt@kline_1m/zecusdt@bookTicker/zecusdt@kline_1m/hypeusdt@bookTicker/hypeusdt@kline_1m"
 	for {
 		conn, _, err := websocket.DefaultDialer.Dial(url, nil)
 		if err != nil {
@@ -2332,7 +2342,7 @@ func seedBinanceHistory() {
 	now := time.Now()
 	slot := now.Unix() / 10
 	idx := int(slot % 6)
-	for _, sym := range []string{"SOXL", "MU", "ZEC", "HYPE", "SOL", "XAU"} {
+	for _, sym := range []string{"GOOGL", "AMZN", "META", "SOXL", "MU", "ZEC", "HYPE"} {
 		st := mktStates[sym]
 		if st == nil {
 			continue
@@ -3139,12 +3149,16 @@ func main() {
 	mktStates["ZEC"].dynClipUSD = -1.0
 	mktStates["NVDA"].dynClipUSD = -1.0
 	nowBoot := time.Now()
-	for _, s := range []string{"BTC", "XAU", "ETH", "SOL", "XRP", "HYPE", "BNB", "ZEC", "NVDA", "MU", "SOXL"} {
+	for _, s := range []string{"BTC", "XAU", "ETH", "SOL", "XRP", "HYPE", "BNB", "ZEC", "NVDA", "AMZN", "GOOGL", "META", "MU", "SOXL"} {
 		dAct, _, _, _, _, _, _ := dislocParams(s, nowBoot)
 		mktStates[s].dynClipUSD = -1.0
 		mktStates[s].makerActive = false
 		if isDislocSym(s) && dAct {
-			mktStates[s].dynClipUSD = 22.0
+			initC := 22.0
+			if s == "GOOGL" || s == "AMZN" || s == "META" {
+				initC = 40.0
+			}
+			mktStates[s].dynClipUSD = initC
 			mktStates[s].makerActive = true
 		}
 	}
@@ -3165,7 +3179,7 @@ func main() {
 	seedBinanceHistory()
 	seedPairHistory()
 	go runPairHeartbeat()
-	fmt.Printf("GO-TOKYO v85 LIVE | PriorityCancel + 90sEqClamp + StrictScale ($22->$40->$95->$180->$260) | Stop=$%.2f\n", StopEqUSD)
+	fmt.Printf("GO-TOKYO v86 LIVE | Calm RWA Stocks (GOOGL/AMZN/META) + 35s Wick Shield + 45s Basis | Stop=$%.2f\n", StopEqUSD)
 	go syncAccountLoop()
 	runBnWS()
 }
