@@ -2340,9 +2340,11 @@ func runBnGuardWS() {
 			}
 			var env struct {
 				Data struct {
-					S string `json:"s"`
-					B string `json:"b"`
-					A string `json:"a"`
+					S  string `json:"s"`
+					B  string `json:"b"`
+					BQ string `json:"B"`
+					A  string `json:"a"`
+					AQ string `json:"A"`
 				} `json:"data"`
 			}
 			if json.Unmarshal(msg, &env) != nil || env.Data.S == "" {
