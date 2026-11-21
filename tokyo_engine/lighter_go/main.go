@@ -3,7 +3,10 @@ package main
 import (
 	"bytes"
 	"compress/gzip"
+	"crypto/hmac"
+	"crypto/sha256"
 	"crypto/tls"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -12,6 +15,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -120,6 +124,8 @@ type RangeBucket struct {
 type MarketState struct {
 	mu          sync.Mutex
 	bnMid       float64
+	bnBid       float64
+	bnAsk       float64
 	bnMicro     float64
 	bnObi       float64
 	fastObi     float64
@@ -229,6 +235,42 @@ type TwinState struct {
 	LastLog          time.Time
 }
 
+type CommonAsset struct {
+	Sym      string
+	BnSym    string
+	MarketID int64
+	SzDec    int
+	PxDec    int
+	MinB     float64
+	LtVol24h float64
+	BnVol24h float64
+}
+
+type CarbonOrder struct {
+	ID         int64   `json:"id"`
+	Sym        string  `json:"sym"`
+	Side       string  `json:"side"`
+	USD        float64 `json:"usd"`
+	SlBps      float64 `json:"slBps"`
+	TpBps      float64 `json:"tpBps"`
+	MaxHoldSec int64   `json:"maxHoldSec"`
+}
+
+type CarbonPos struct {
+	ID         int64
+	Sym        string
+	Side       string
+	USD        float64
+	SlBps      float64
+	TpBps      float64
+	MaxHoldSec int64
+	SentAt     time.Time
+	EntryPx    float64
+	TpSent     bool
+	BeArmed    bool
+	Closing    bool
+}
+
 var (
 	mktStates = map[string]*MarketState{
 		"BTC": newMarketState(-1.0), "ETH": newMarketState(-1.0),
@@ -249,6 +291,12 @@ var (
 	breakerTripped       atomic.Bool
 	l2TicksRecorded      atomic.Int64
 	l2RecCh              = make(chan string, 4096)
+	enableAutoTwins      = false
+	commonList           []*CommonAsset
+	carbonMu             sync.Mutex
+	activeCarbon         *CarbonPos
+	lastCarbonOrderID    int64
+	carbonScanSeq        atomic.Int64
 	lastStopMS           atomic.Int64
 	streakWins           atomic.Int64
 	globalEntryLockUntil atomic.Int64
@@ -263,9 +311,10 @@ var (
 	coiSeq   atomic.Int64
 	txMu     sync.Mutex
 
-	wsMu      sync.Mutex
-	ltConn    *websocket.Conn
-	txWsMu      sync.Mutex
+	wsMu       sync.Mutex
+	ltConn     *websocket.Conn
+	subbedMids = map[int64]bool{}
+	txWsMu     sync.Mutex
 	txConn      *websocket.Conn
 	cancelQueue = make(chan func(), 256)
 	txQueue     = make(chan func(), 256)
@@ -1633,7 +1682,7 @@ func rebalanceFromTrades(tb []byte) {
 		if s == "" {
 			s = idToSym[t.MarketID]
 		}
-		if _, ok := pnl[s]; !ok {
+		if _, ok := mktStates[s]; !ok {
 			continue
 		}
 		pStr := ""
@@ -1649,9 +1698,15 @@ func rebalanceFromTrades(tb []byte) {
 		if err != nil || math.Abs(realized) < 0.0001 {
 			continue
 		}
-		fills = append(fills, closedFill{sym: s, tsMS: tsMS, pnl: realized})
-		if tsMS >= v87BootMS-30000 && twinGroup(s) != "" {
-			bootPairFills = append(bootPairFills, closedFill{sym: twinGroup(s), tsMS: tsMS, pnl: realized})
+		if _, ok := pnl[s]; ok {
+			fills = append(fills, closedFill{sym: s, tsMS: tsMS, pnl: realized})
+		}
+		if tsMS >= v87BootMS-30000 {
+			grp := twinGroup(s)
+			if grp == "" {
+				grp = s
+			}
+			bootPairFills = append(bootPairFills, closedFill{sym: grp, tsMS: tsMS, pnl: realized})
 		}
 	}
 	sort.Slice(bootPairFills, func(i, j int) bool { return bootPairFills[i].tsMS < bootPairFills[j].tsMS })
@@ -1672,6 +1727,9 @@ func rebalanceFromTrades(tb []byte) {
 		if grp == "US500/SPY" {
 			return math.Abs(float64(mktStates["US500"].netMicroUSD.Load()))/1e6 < 5.0 && math.Abs(float64(mktStates["SPY"].netMicroUSD.Load()))/1e6 < 5.0
 		}
+		if st := mktStates[grp]; st != nil {
+			return math.Abs(float64(st.netMicroUSD.Load()))/1e6 < 5.0
+		}
 		return true
 	}
 	consecPairLosses := 0
@@ -1687,7 +1745,7 @@ func rebalanceFromTrades(tb []byte) {
 			consecPairLosses = 0
 		}
 	}
-	if !breakerTripped.Load() && (consecPairLosses >= 2 || sessionPairPnl <= -1.20) {
+	if !breakerTripped.Load() && (consecPairLosses >= 2 || sessionPairPnl <= -0.45) {
 		breakerTripped.Store(true)
 		_ = os.WriteFile("/tmp/lighter_pause.flag", []byte("1"), 0644)
 		reason := fmt.Sprintf("AUTO-BREAKER losses=%d pnl=$%.4f", consecPairLosses, sessionPairPnl)
@@ -2061,6 +2119,14 @@ func runLtWS() {
 		setConnNoDelay(conn)
 		wsMu.Lock()
 		ltConn = conn
+		subbedMids = map[int64]bool{}
+		for _, m := range markets {
+			if m.AllowEntry {
+				_ = conn.WriteJSON(map[string]any{"type": "subscribe", "channel": fmt.Sprintf("order_book/%d", m.ID)})
+				_ = conn.WriteJSON(map[string]any{"type": "subscribe", "channel": fmt.Sprintf("trade/%d", m.ID)})
+				subbedMids[m.ID] = true
+			}
+		}
 		wsMu.Unlock()
 		for _, st := range mktStates {
 			st.mu.Lock()
@@ -2069,13 +2135,6 @@ func runLtWS() {
 			st.ltBid = 0
 			st.ltAsk = 0
 			st.mu.Unlock()
-		}
-
-		for _, m := range markets {
-			if m.AllowEntry {
-				_ = conn.WriteJSON(map[string]any{"type": "subscribe", "channel": fmt.Sprintf("order_book/%d", m.ID)})
-				_ = conn.WriteJSON(map[string]any{"type": "subscribe", "channel": fmt.Sprintf("trade/%d", m.ID)})
-			}
 		}
 		if tok, err := txCli.GetAuthToken(time.Now().Add(6 * time.Hour)); err == nil {
 			_ = conn.WriteJSON(map[string]any{"type": "subscribe", "channel": fmt.Sprintf("account_all/%d", AcctIdx), "auth": tok})
@@ -2222,8 +2281,11 @@ func runLtWS() {
 						}
 					}
 					for _, sym := range touched {
-						if isTwinSym(sym) {
+						if enableAutoTwins && isTwinSym(sym) {
 							manageAllTwins()
+						}
+						if isActiveCarbonSym(sym) {
+							manageCarbonBracket()
 						}
 					}
 				}
@@ -2310,8 +2372,11 @@ func runLtWS() {
 							nowMS, sym, st.ltBid, st.ltBidSz, st.ltAsk, st.ltAskSz, st.ltBidDepthUSD, st.ltAskDepthUSD))
 					}
 					st.mu.Unlock()
-					if isTwinSym(sym) && bboChanged {
+					if enableAutoTwins && isTwinSym(sym) && bboChanged {
 						manageAllTwins()
+					}
+					if bboChanged && isActiveCarbonSym(sym) {
+						manageCarbonBracket()
 					}
 				}
 			}
@@ -3165,6 +3230,9 @@ func fireTwinIOC(tw *TwinState, thinSide string, thinPx, thinMid, thinSz float64
 }
 
 func manageAllTwins() {
+	if !enableAutoTwins {
+		return
+	}
 	pairMu.Lock()
 	defer pairMu.Unlock()
 	anyActive := false
@@ -3670,6 +3738,832 @@ func runPauseWatchdog() {
 	}
 }
 
+func parseAnyFloat(raw json.RawMessage) float64 {
+	s := strings.TrimSpace(string(raw))
+	s = strings.Trim(s, `"`)
+	v, _ := strconv.ParseFloat(s, 64)
+	return v
+}
+
+func discoverCommonAssets() {
+	hc := &http.Client{Timeout: 8 * time.Second}
+	fetchURL := func(u string) ([]byte, error) {
+		req, err := http.NewRequest("GET", u, nil)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("User-Agent", "Mozilla/5.0")
+		resp, err := hc.Do(req)
+		if err != nil {
+			return nil, err
+		}
+		defer resp.Body.Close()
+		return io.ReadAll(resp.Body)
+	}
+	ltB, err1 := fetchURL(BaseURL + "/api/v1/orderBookDetails")
+	bnB, err2 := fetchURL("https://fapi.binance.com/fapi/v1/ticker/24hr")
+	if err1 != nil || err2 != nil {
+		fmt.Printf("[DISCOVER_ERR] lt=%v bn=%v\n", err1, err2)
+		return
+	}
+	var ltRes struct {
+		Details []struct {
+			Symbol   string          `json:"symbol"`
+			MarketID int64           `json:"market_id"`
+			Status   string          `json:"status"`
+			SzDec    int             `json:"size_decimals"`
+			PxDec    int             `json:"price_decimals"`
+			MinB     json.RawMessage `json:"min_base_amount"`
+			DailyVol json.RawMessage `json:"daily_quote_token_volume"`
+		} `json:"order_book_details"`
+	}
+	var bnArr []struct {
+		Symbol      string `json:"symbol"`
+		QuoteVolume string `json:"quoteVolume"`
+	}
+	if json.Unmarshal(ltB, &ltRes) != nil || json.Unmarshal(bnB, &bnArr) != nil {
+		fmt.Println("[DISCOVER_PARSE_ERR]")
+		return
+	}
+	bnVol := map[string]float64{}
+	for _, x := range bnArr {
+		if strings.HasSuffix(x.Symbol, "USDT") {
+			bnVol[x.Symbol], _ = strconv.ParseFloat(x.QuoteVolume, 64)
+		}
+	}
+	var found []*CommonAsset
+	for _, m := range ltRes.Details {
+		if m.Status != "active" {
+			continue
+		}
+		ltV := parseAnyFloat(m.DailyVol)
+		bsym := m.Symbol + "USDT"
+		bnV := bnVol[bsym]
+		if ltV >= 25000.0 && bnV >= 1000000.0 {
+			minB := math.Max(1e-6, parseAnyFloat(m.MinB))
+			found = append(found, &CommonAsset{
+				Sym:      m.Symbol,
+				BnSym:    bsym,
+				MarketID: m.MarketID,
+				SzDec:    m.SzDec,
+				PxDec:    m.PxDec,
+				MinB:     minB,
+				LtVol24h: ltV,
+				BnVol24h: bnV,
+			})
+		}
+	}
+	sort.Slice(found, func(i, j int) bool { return found[i].LtVol24h > found[j].LtVol24h })
+	for sym, m := range markets {
+		m.AllowEntry = sym == "XAU" || sym == "PAXG" || sym == "BTC" || sym == "ETH" || sym == "SOL" || sym == "SPY" || sym == "US500"
+		markets[sym] = m
+	}
+	for i, ca := range found {
+		allowWS := i < 45 || ca.Sym == "PAXG" || ca.Sym == "XAU"
+		curM, exists := markets[ca.Sym]
+		if exists {
+			allowWS = allowWS || curM.AllowEntry
+		}
+		markets[ca.Sym] = Market{
+			Sym:        ca.Sym,
+			ID:         ca.MarketID,
+			SzDec:      ca.SzDec,
+			PxDec:      ca.PxDec,
+			MinB:       ca.MinB,
+			AllowEntry: allowWS,
+			ClipUSD:    -1.0,
+			EdgeBps:    5.0,
+		}
+		idToSym[ca.MarketID] = ca.Sym
+		if mktStates[ca.Sym] == nil {
+			mktStates[ca.Sym] = newMarketState(-1.0)
+		}
+	}
+	commonList = found
+	topSym := "none"
+	var top45Min float64
+	if len(found) > 0 {
+		topSym = found[0].Sym
+		idx := len(found) - 1
+		if idx > 44 {
+			idx = 44
+		}
+		top45Min = found[idx].LtVol24h
+	}
+	fmt.Printf("[DISCOVER] common=%d top1=%s top45_minVol=$%.0f\n", len(commonList), topSym, top45Min)
+}
+
+func ensureLtSubscribed(mid int64) {
+	wsMu.Lock()
+	defer wsMu.Unlock()
+	if subbedMids[mid] || ltConn == nil {
+		return
+	}
+	if err := ltConn.WriteJSON(map[string]any{"type": "subscribe", "channel": fmt.Sprintf("order_book/%d", mid)}); err == nil {
+		subbedMids[mid] = true
+	}
+}
+
+func runBnAllBookTickerWS() {
+	wsURL := "wss://fstream.binance.com/ws/!bookTicker"
+	for {
+		conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+		if err != nil {
+			time.Sleep(1 * time.Second)
+			continue
+		}
+		setConnNoDelay(conn)
+		for {
+			_, msg, err := conn.ReadMessage()
+			if err != nil {
+				break
+			}
+			var ev struct {
+				S string `json:"s"`
+				B string `json:"b"`
+				A string `json:"a"`
+			}
+			if json.Unmarshal(msg, &ev) != nil || !strings.HasSuffix(ev.S, "USDT") {
+				continue
+			}
+			sym := strings.TrimSuffix(ev.S, "USDT")
+			st := mktStates[sym]
+			if st == nil {
+				continue
+			}
+			b, _ := strconv.ParseFloat(ev.B, 64)
+			a, _ := strconv.ParseFloat(ev.A, 64)
+			if b > 0 && a > 0 {
+				mid := 0.5 * (b + a)
+				now := time.Now()
+				st.mu.Lock()
+				st.bnBid = b
+				st.bnAsk = a
+				st.bnMid = mid
+				if st.emaFast == 0 || st.lastEmaTS.IsZero() {
+					st.emaUltra = mid
+					st.emaFast = mid
+					st.emaSlow = mid
+				} else {
+					dt := math.Min(5.0, math.Max(0.001, now.Sub(st.lastEmaTS).Seconds()))
+					st.emaUltra += (1.0 - math.Exp(-dt/3.0)) * (mid - st.emaUltra)
+					st.emaFast += (1.0 - math.Exp(-dt/20.0)) * (mid - st.emaFast)
+					st.emaSlow += (1.0 - math.Exp(-dt/180.0)) * (mid - st.emaSlow)
+				}
+				st.lastEmaTS = now
+				st.mu.Unlock()
+			}
+		}
+		_ = conn.Close()
+		time.Sleep(1 * time.Second)
+	}
+}
+
+func anyOpenAcctPos() bool {
+	for _, st := range mktStates {
+		if math.Abs(float64(st.netMicroUSD.Load()))/1e6 >= 4.0 {
+			return true
+		}
+	}
+	return false
+}
+
+func isActiveCarbonSym(sym string) bool {
+	carbonMu.Lock()
+	defer carbonMu.Unlock()
+	return activeCarbon != nil && activeCarbon.Sym == sym
+}
+
+func fetchLtBookREST(mid int64) (float64, float64, float64, float64) {
+	hc := &http.Client{Timeout: 4 * time.Second}
+	u := fmt.Sprintf("%s/api/v1/orderBookOrders?market_id=%d&limit=10", BaseURL, mid)
+	req, err := http.NewRequest("GET", u, nil)
+	if err != nil {
+		return 0, 0, 0, 0
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0")
+	resp, err := hc.Do(req)
+	if err != nil {
+		return 0, 0, 0, 0
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	var ob struct {
+		Bids []struct {
+			Price string `json:"price"`
+			Rem   string `json:"remaining_base_amount"`
+		} `json:"bids"`
+		Asks []struct {
+			Price string `json:"price"`
+			Rem   string `json:"remaining_base_amount"`
+		} `json:"asks"`
+	}
+	if json.Unmarshal(body, &ob) != nil || len(ob.Bids) == 0 || len(ob.Asks) == 0 {
+		return 0, 0, 0, 0
+	}
+	bb, _ := strconv.ParseFloat(ob.Bids[0].Price, 64)
+	ba, _ := strconv.ParseFloat(ob.Asks[0].Price, 64)
+	if bb <= 0 || ba <= bb {
+		return 0, 0, 0, 0
+	}
+	midPx := 0.5 * (bb + ba)
+	sp := (ba - bb) / midPx * 10000.0
+	var bd, ad float64
+	for _, x := range ob.Bids {
+		p, _ := strconv.ParseFloat(x.Price, 64)
+		sz, _ := strconv.ParseFloat(x.Rem, 64)
+		if p > 0 && sz > 0 && (bb-p)/bb*10000.0 <= 2.0 {
+			bd += p * sz
+		}
+	}
+	for _, x := range ob.Asks {
+		p, _ := strconv.ParseFloat(x.Price, 64)
+		sz, _ := strconv.ParseFloat(x.Rem, 64)
+		if p > 0 && sz > 0 && (p-ba)/ba*10000.0 <= 2.0 {
+			ad += p * sz
+		}
+	}
+	return bb, ba, sp, math.Min(bd, ad)
+}
+
+func runCarbonScanner() {
+	time.Sleep(6 * time.Second)
+	for {
+		carbonMu.Lock()
+		busy := activeCarbon != nil
+		carbonMu.Unlock()
+		if !busy && !anyOpenAcctPos() && !remotePaused.Load() && !breakerTripped.Load() && len(commonList) > 0 {
+			type candScore struct {
+				ca     *CommonAsset
+				rank   float64
+				bnBid  float64
+				bnAsk  float64
+				bnMid  float64
+				imp20s float64
+				imp3m  float64
+			}
+			now := time.Now()
+			var stage1 []candScore
+			for _, ca := range commonList {
+				st := mktStates[ca.Sym]
+				if st == nil {
+					continue
+				}
+				st.mu.Lock()
+				bm, bb, ba, ef, es, ts := st.bnMid, st.bnBid, st.bnAsk, st.emaFast, st.emaSlow, st.lastEmaTS
+				st.mu.Unlock()
+				if bm <= 0 || ef <= 0 || es <= 0 || now.Sub(ts) > 25*time.Second {
+					continue
+				}
+				i20 := (bm - ef) / ef * 10000.0
+				i3m := (bm - es) / es * 10000.0
+				rk := math.Abs(i20) + 0.5*math.Abs(i3m)
+				if ca.LtVol24h >= 1000000.0 {
+					rk += 2.0
+				}
+				stage1 = append(stage1, candScore{ca: ca, rank: rk, bnBid: bb, bnAsk: ba, bnMid: bm, imp20s: i20, imp3m: i3m})
+			}
+			sort.Slice(stage1, func(i, j int) bool { return stage1[i].rank > stage1[j].rank })
+			if len(stage1) > 5 {
+				stage1 = stage1[:5]
+			}
+			type scanRes struct {
+				sym    string
+				side   string
+				score  int
+				slBps  float64
+				tpBps  float64
+				ltSp   float64
+				diff   float64
+				r5m    float64
+				r15m   float64
+				r1h    float64
+				atr    float64
+				cvd    float64
+				volR   float64
+				oi15m  float64
+				topLS  float64
+				globLS float64
+				fund   float64
+				obi    float64
+				depth  float64
+			}
+			results := make([]scanRes, len(stage1))
+			var wg sync.WaitGroup
+			for idx, c := range stage1 {
+				wg.Add(1)
+				go func(ix int, cs candScore) {
+					defer wg.Done()
+					hc := &http.Client{Timeout: 5 * time.Second}
+					gJSON := func(u string, out any) bool {
+						req, err := http.NewRequest("GET", u, nil)
+						if err != nil {
+							return false
+						}
+						req.Header.Set("User-Agent", "Mozilla/5.0")
+						resp, err := hc.Do(req)
+						if err != nil {
+							return false
+						}
+						b, _ := io.ReadAll(resp.Body)
+						resp.Body.Close()
+						return json.Unmarshal(b, out) == nil
+					}
+					var lb, la, lsp, ldep float64
+					if st := mktStates[cs.ca.Sym]; st != nil {
+						st.mu.Lock()
+						if !st.lastBookTS.IsZero() && time.Since(st.lastBookTS) < 10*time.Second && st.ltBid > 0 && st.ltAsk > st.ltBid {
+							lb, la = st.ltBid, st.ltAsk
+							lsp = (la - lb) / (0.5 * (lb + la)) * 10000.0
+							ldep = math.Min(st.ltBidDepthUSD, st.ltAskDepthUSD)
+						}
+						st.mu.Unlock()
+					}
+					if lb <= 0 || ldep < 100 {
+						lb, la, lsp, ldep = fetchLtBookREST(cs.ca.MarketID)
+					}
+
+					var kl [][]json.RawMessage
+					var r5m, r15m, r1h, atr5m, cvdPct, volR float64
+					if gJSON(fmt.Sprintf("https://fapi.binance.com/fapi/v1/klines?symbol=%s&interval=5m&limit=21", cs.ca.BnSym), &kl) && len(kl) >= 14 {
+						n := len(kl)
+						cLast := parseAnyFloat(kl[n-1][4])
+						c1 := parseAnyFloat(kl[n-2][4])
+						c3 := parseAnyFloat(kl[n-4][4])
+						c12 := parseAnyFloat(kl[n-13][4])
+						if c1 > 0 {
+							r5m = (cLast - c1) / c1 * 10000.0
+						}
+						if c3 > 0 {
+							r15m = (cLast - c3) / c3 * 10000.0
+						}
+						if c12 > 0 {
+							r1h = (cLast - c12) / c12 * 10000.0
+						}
+						var sumRng float64
+						for k := n - 12; k < n; k++ {
+							hi := parseAnyFloat(kl[k][2])
+							lo := parseAnyFloat(kl[k][3])
+							cl := parseAnyFloat(kl[k][4])
+							if cl > 0 {
+								sumRng += (hi - lo) / cl * 10000.0
+							}
+						}
+						atr5m = sumRng / 12.0
+						qv := parseAnyFloat(kl[n-1][7])
+						tbq := parseAnyFloat(kl[n-1][10])
+						if qv > 0 {
+							cvdPct = (2.0*tbq - qv) / qv * 100.0
+						}
+						var sumQ float64
+						cntQ := 0
+						for k := 0; k < n-1; k++ {
+							sumQ += parseAnyFloat(kl[k][7])
+							cntQ++
+						}
+						if cntQ > 0 && sumQ > 0 {
+							volR = qv / (sumQ / float64(cntQ))
+						}
+					}
+
+					var oi []struct {
+						Val string `json:"sumOpenInterestValue"`
+					}
+					var oi15m float64
+					if gJSON(fmt.Sprintf("https://fapi.binance.com/futures/data/openInterestHist?symbol=%s&period=5m&limit=4", cs.ca.BnSym), &oi) && len(oi) >= 2 {
+						v0, _ := strconv.ParseFloat(oi[0].Val, 64)
+						vN, _ := strconv.ParseFloat(oi[len(oi)-1].Val, 64)
+						if v0 > 0 {
+							oi15m = (vN - v0) / v0 * 100.0
+						}
+					}
+
+					var topArr, glbArr []struct {
+						Ratio string `json:"longShortRatio"`
+					}
+					var topLS, globLS float64
+					if gJSON(fmt.Sprintf("https://fapi.binance.com/futures/data/topLongShortPositionRatio?symbol=%s&period=5m&limit=1", cs.ca.BnSym), &topArr) && len(topArr) > 0 {
+						topLS, _ = strconv.ParseFloat(topArr[0].Ratio, 64)
+					}
+					if gJSON(fmt.Sprintf("https://fapi.binance.com/futures/data/globalLongShortAccountRatio?symbol=%s&period=5m&limit=1", cs.ca.BnSym), &glbArr) && len(glbArr) > 0 {
+						globLS, _ = strconv.ParseFloat(glbArr[0].Ratio, 64)
+					}
+
+					var prm struct {
+						LastFundingRate string `json:"lastFundingRate"`
+					}
+					var fundBps float64
+					if gJSON(fmt.Sprintf("https://fapi.binance.com/fapi/v1/premiumIndex?symbol=%s", cs.ca.BnSym), &prm) {
+						fr, _ := strconv.ParseFloat(prm.LastFundingRate, 64)
+						fundBps = fr * 10000.0
+					}
+
+					var dep struct {
+						Bids [][]string `json:"bids"`
+						Asks [][]string `json:"asks"`
+					}
+					var bnObi float64
+					if gJSON(fmt.Sprintf("https://fapi.binance.com/fapi/v1/depth?symbol=%s&limit=10", cs.ca.BnSym), &dep) {
+						var sb, sa float64
+						for _, b := range dep.Bids {
+							if len(b) >= 2 {
+								q, _ := strconv.ParseFloat(b[1], 64)
+								sb += q
+							}
+						}
+						for _, a := range dep.Asks {
+							if len(a) >= 2 {
+								q, _ := strconv.ParseFloat(a[1], 64)
+								sa += q
+							}
+						}
+						if sb+sa > 0 {
+							bnObi = (sb - sa) / (sb + sa)
+						}
+					}
+
+					scL, scS := 0, 0
+					if r15m > 8.0 && r1h > 5.0 {
+						scL += 2
+					}
+					if r15m < -8.0 && r1h < -5.0 {
+						scS += 2
+					}
+					if cvdPct > 12.0 {
+						scL += 2
+					} else if cvdPct < -12.0 {
+						scS += 2
+					}
+					if volR >= 1.3 {
+						scL++
+						scS++
+					}
+					if oi15m > 0.15 {
+						if r15m > 0 {
+							scL += 2
+						} else if r15m < 0 {
+							scS += 2
+						}
+					}
+					if topLS > globLS*1.05 || topLS > 1.25 {
+						scL++
+					}
+					if globLS > topLS*1.05 && topLS < 1.15 {
+						scS++
+					}
+					if fundBps <= 1.2 {
+						scL++
+					}
+					if fundBps >= -1.2 {
+						scS++
+					}
+					if bnObi > 0.10 {
+						scL++
+					} else if bnObi < -0.10 {
+						scS++
+					}
+
+					diffL := (la - cs.bnAsk) / cs.bnAsk * 10000.0
+					diffS := (cs.bnBid - lb) / cs.bnBid * 10000.0
+					if lb <= 0 || la <= lb || lsp > 3.0 || ldep < 200.0 {
+						scL, scS = 0, 0
+					}
+					if diffL > 2.5 {
+						scL = 0
+					}
+					if diffS > 2.5 {
+						scS = 0
+					}
+
+					side := "LONG"
+					sc := scL
+					overpayDiff := diffL
+					if scS > scL {
+						side = "SHORT"
+						sc = scS
+						overpayDiff = diffS
+					}
+					slB := math.Min(45.0, math.Max(18.0, atr5m*0.75))
+					tpB := math.Round(slB * 2.5)
+					results[ix] = scanRes{
+						sym: cs.ca.Sym, side: side, score: sc, slBps: math.Round(slB), tpBps: tpB,
+						ltSp: lsp, diff: overpayDiff, r5m: r5m, r15m: r15m, r1h: r1h, atr: atr5m,
+						cvd: cvdPct, volR: volR, oi15m: oi15m, topLS: topLS, globLS: globLS,
+						fund: fundBps, obi: bnObi, depth: ldep,
+					}
+				}(idx, c)
+			}
+			wg.Wait()
+			sort.Slice(results, func(i, j int) bool { return results[i].score > results[j].score })
+			seq := carbonScanSeq.Add(1)
+			var parts []string
+			for k := 0; k < len(results) && k < 3; k++ {
+				r := results[k]
+				parts = append(parts, fmt.Sprintf("%d) %s %s sc=%d (1R=%.0f/TP=%.0f ltSp=%.2fbp diff=%+.2fbp r5=%.0f r15=%.0f r1h=%.0f atr=%.0f cvd=%+.0f%% v=%.1fx oi=%+.2f%% top=%.2f glb=%.2f f=%.2fbp obi=%.2f)",
+					k+1, r.sym, r.side, r.score, r.slBps, r.tpBps, r.ltSp, r.diff, r.r5m, r.r15m, r.r1h, r.atr, r.cvd, r.volR, r.oi15m, r.topLS, r.globLS, r.fund, r.obi))
+			}
+			if len(parts) > 0 {
+				fmt.Printf("[CARBON_SCAN seq=%d com=%d] %s\n", seq, len(commonList), strings.Join(parts, " | "))
+			}
+		}
+		time.Sleep(15 * time.Second)
+	}
+}
+
+func hmacSHA256Raw(key []byte, data string) []byte {
+	mac := hmac.New(sha256.New, key)
+	_, _ = mac.Write([]byte(data))
+	return mac.Sum(nil)
+}
+
+func sha256HexStr(s string) string {
+	h := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(h[:])
+}
+
+func readPauseControlJSON() ([]byte, error) {
+	hc := &http.Client{Timeout: 2500 * time.Millisecond}
+	tokReq, _ := http.NewRequest("PUT", "http://169.254.169.254/latest/api/token", nil)
+	tokReq.Header.Set("X-aws-ec2-metadata-token-ttl-seconds", "21600")
+	if tokResp, err := hc.Do(tokReq); err == nil {
+		tokB, _ := io.ReadAll(tokResp.Body)
+		tokResp.Body.Close()
+		tok := strings.TrimSpace(string(tokB))
+		if tok != "" {
+			roleReq, _ := http.NewRequest("GET", "http://169.254.169.254/latest/meta-data/iam/security-credentials/", nil)
+			roleReq.Header.Set("X-aws-ec2-metadata-token", tok)
+			if rResp, e2 := hc.Do(roleReq); e2 == nil {
+				rB, _ := io.ReadAll(rResp.Body)
+				rResp.Body.Close()
+				role := strings.TrimSpace(strings.Split(string(rB), "\n")[0])
+				if role != "" {
+					cReq, _ := http.NewRequest("GET", "http://169.254.169.254/latest/meta-data/iam/security-credentials/"+role, nil)
+					cReq.Header.Set("X-aws-ec2-metadata-token", tok)
+					if cResp, e3 := hc.Do(cReq); e3 == nil {
+						cb, _ := io.ReadAll(cResp.Body)
+						cResp.Body.Close()
+						var creds struct {
+							AccessKeyId     string `json:"AccessKeyId"`
+							SecretAccessKey string `json:"SecretAccessKey"`
+							Token           string `json:"Token"`
+						}
+						if json.Unmarshal(cb, &creds) == nil && creds.AccessKeyId != "" {
+							host := "crypto-arb-bot-tokyo-bin-767579108352.s3.ap-northeast-1.amazonaws.com"
+							nowU := time.Now().UTC()
+							amzDate := nowU.Format("20060102T150405Z")
+							dateStamp := amzDate[:8]
+							payloadHash := sha256HexStr("")
+							canonHdrs := fmt.Sprintf("host:%s\nx-amz-content-sha256:%s\nx-amz-date:%s\nx-amz-security-token:%s\n",
+								host, payloadHash, amzDate, creds.Token)
+							signedHdrs := "host;x-amz-content-sha256;x-amz-date;x-amz-security-token"
+							canonReq := "GET\n/pause-control.json\n\n" + canonHdrs + "\n" + signedHdrs + "\n" + payloadHash
+							scope := dateStamp + "/ap-northeast-1/s3/aws4_request"
+							strToSign := "AWS4-HMAC-SHA256\n" + amzDate + "\n" + scope + "\n" + sha256HexStr(canonReq)
+							kDate := hmacSHA256Raw([]byte("AWS4"+creds.SecretAccessKey), dateStamp)
+							kReg := hmacSHA256Raw(kDate, "ap-northeast-1")
+							kSvc := hmacSHA256Raw(kReg, "s3")
+							kSig := hmacSHA256Raw(kSvc, "aws4_request")
+							sig := hex.EncodeToString(hmacSHA256Raw(kSig, strToSign))
+							auth := fmt.Sprintf("AWS4-HMAC-SHA256 Credential=%s/%s, SignedHeaders=%s, Signature=%s",
+								creds.AccessKeyId, scope, signedHdrs, sig)
+							s3Req, _ := http.NewRequest("GET", "https://"+host+"/pause-control.json", nil)
+							s3Req.Header.Set("x-amz-date", amzDate)
+							s3Req.Header.Set("x-amz-content-sha256", payloadHash)
+							s3Req.Header.Set("x-amz-security-token", creds.Token)
+							s3Req.Header.Set("Authorization", auth)
+							if s3Resp, e4 := hc.Do(s3Req); e4 == nil {
+								body, _ := io.ReadAll(s3Resp.Body)
+								s3Resp.Body.Close()
+								if s3Resp.StatusCode == 200 {
+									return body, nil
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	return exec.Command("aws", "s3", "cp", "s3://crypto-arb-bot-tokyo-bin-767579108352/pause-control.json", "-").Output()
+}
+
+func manageCarbonBracket() {
+	carbonMu.Lock()
+	cp := activeCarbon
+	if cp == nil {
+		carbonMu.Unlock()
+		return
+	}
+	cpCopy := *cp
+	carbonMu.Unlock()
+
+	st := mktStates[cpCopy.Sym]
+	m, ok := markets[cpCopy.Sym]
+	if st == nil || !ok {
+		return
+	}
+	now := time.Now()
+	st.mu.Lock()
+	lb, la, pos, ae := st.ltBid, st.ltAsk, st.pos, st.avgEntry
+	closeSide := "ASK"
+	if cpCopy.Side == "SHORT" {
+		closeSide = "BID"
+	}
+	closeOrd := st.activeOrds[closeSide]
+	st.mu.Unlock()
+
+	if math.Abs(pos) < m.MinB {
+		if cpCopy.TpSent {
+			fmt.Printf("[CARBON_CLOSED id=%d sym=%s side=%s reason=TP_OR_FLAT]\n", cpCopy.ID, cpCopy.Sym, cpCopy.Side)
+			carbonMu.Lock()
+			if activeCarbon != nil && activeCarbon.ID == cpCopy.ID {
+				activeCarbon = nil
+			}
+			carbonMu.Unlock()
+		} else if now.Sub(cpCopy.SentAt) >= 3*time.Second {
+			fmt.Printf("[CARBON_MISSED id=%d sym=%s reason=ENTRY_IOC_NO_FILL]\n", cpCopy.ID, cpCopy.Sym)
+			carbonMu.Lock()
+			if activeCarbon != nil && activeCarbon.ID == cpCopy.ID {
+				activeCarbon = nil
+			}
+			carbonMu.Unlock()
+		}
+		return
+	}
+
+	entry := cpCopy.EntryPx
+	if ae > 0 {
+		entry = ae
+	}
+	if entry <= 0 || lb <= 0 || la <= lb {
+		return
+	}
+	tMid := 0.5 * (lb + la)
+
+	if !cpCopy.TpSent && !cpCopy.Closing {
+		tpPx := entry * (1.0 + cpCopy.TpBps/10000.0)
+		if cpCopy.Side == "SHORT" {
+			tpPx = entry * (1.0 - cpCopy.TpBps/10000.0)
+		}
+		tpPx = roundTo(tpPx, m.PxDec)
+		carbonMu.Lock()
+		if activeCarbon != nil && activeCarbon.ID == cpCopy.ID && !activeCarbon.TpSent {
+			activeCarbon.EntryPx = entry
+			activeCarbon.TpSent = true
+		}
+		carbonMu.Unlock()
+		if takeWriteSlot(true) {
+			placePairOrder(cpCopy.Sym, closeSide, tpPx, tMid, math.Abs(pos), true, false)
+			fmt.Printf("[CARBON_OPEN id=%d sym=%s side=%s entry=%.5f tp=%.5f(+%.0fbps) sl=-%.0fbps]\n",
+				cpCopy.ID, cpCopy.Sym, cpCopy.Side, entry, tpPx, cpCopy.TpBps, cpCopy.SlBps)
+		}
+		return
+	}
+
+	var pnlBps float64
+	if cpCopy.Side == "LONG" {
+		pnlBps = (lb - entry) / entry * 10000.0
+	} else {
+		pnlBps = (entry - la) / entry * 10000.0
+	}
+	if !cpCopy.BeArmed && pnlBps >= cpCopy.SlBps*1.2 {
+		carbonMu.Lock()
+		if activeCarbon != nil && activeCarbon.ID == cpCopy.ID {
+			activeCarbon.BeArmed = true
+		}
+		carbonMu.Unlock()
+		cpCopy.BeArmed = true
+		fmt.Printf("[CARBON_BE id=%d sym=%s pnlBps=%.1f armed=+2.5bps]\n", cpCopy.ID, cpCopy.Sym, pnlBps)
+	}
+	slThresh := -cpCopy.SlBps
+	if cpCopy.BeArmed {
+		slThresh = 2.5
+	}
+	ageS := int64(now.Sub(cpCopy.SentAt).Seconds())
+	reason := ""
+	if pnlBps <= slThresh {
+		if cpCopy.BeArmed {
+			reason = "BE_STOP"
+		} else {
+			reason = "SL"
+		}
+	} else if cpCopy.MaxHoldSec > 0 && ageS >= cpCopy.MaxHoldSec {
+		reason = "MAX_HOLD"
+	}
+	if reason != "" && (!cpCopy.Closing || now.Sub(cpCopy.SentAt) >= 2*time.Second) && takeWriteSlotTier(2) {
+		if closeOrd != nil && !closeOrd.IsIOC {
+			cancelPairSide(cpCopy.Sym, closeSide)
+		}
+		exitPx := roundTo(lb*0.996, m.PxDec)
+		if cpCopy.Side == "SHORT" {
+			exitPx = roundTo(la*1.004, m.PxDec)
+		}
+		carbonMu.Lock()
+		if activeCarbon != nil && activeCarbon.ID == cpCopy.ID {
+			activeCarbon.Closing = true
+		}
+		carbonMu.Unlock()
+		placePairOrder(cpCopy.Sym, closeSide, exitPx, tMid, math.Abs(pos), true, true)
+		fmt.Printf("[CARBON_CLOSED id=%d sym=%s side=%s reason=%s pnlBps=%.1f]\n",
+			cpCopy.ID, cpCopy.Sym, cpCopy.Side, reason, pnlBps)
+	}
+}
+
+func runCarbonCommandLoop() {
+	cmdTick := time.NewTicker(800 * time.Millisecond)
+	brkTick := time.NewTicker(150 * time.Millisecond)
+	defer cmdTick.Stop()
+	defer brkTick.Stop()
+	for {
+		select {
+		case <-brkTick.C:
+			manageCarbonBracket()
+		case <-cmdTick.C:
+			raw, err := readPauseControlJSON()
+			if err != nil || len(raw) == 0 {
+				continue
+			}
+			var pc struct {
+				Paused      bool         `json:"paused"`
+				CarbonOrder *CarbonOrder `json:"carbonOrder"`
+			}
+			if json.Unmarshal(raw, &pc) != nil || pc.Paused || pc.CarbonOrder == nil {
+				continue
+			}
+			co := pc.CarbonOrder
+			nowMS := time.Now().UnixMilli()
+			if co.ID <= lastCarbonOrderID || nowMS-co.ID > 90000 {
+				continue
+			}
+			lastCarbonOrderID = co.ID
+			carbonMu.Lock()
+			busy := activeCarbon != nil
+			carbonMu.Unlock()
+			if busy || anyOpenAcctPos() || remotePaused.Load() || breakerTripped.Load() {
+				fmt.Printf("[CARBON_REJECT id=%d sym=%s reason=BUSY_OR_PAUSED]\n", co.ID, co.Sym)
+				continue
+			}
+			sym := strings.ToUpper(strings.TrimSpace(co.Sym))
+			side := strings.ToUpper(strings.TrimSpace(co.Side))
+			m, ok := markets[sym]
+			st := mktStates[sym]
+			if !ok || st == nil || (side != "LONG" && side != "SHORT") {
+				fmt.Printf("[CARBON_REJECT id=%d sym=%s reason=UNKNOWN_MKT]\n", co.ID, sym)
+				continue
+			}
+			ensureLtSubscribed(m.ID)
+			st.mu.Lock()
+			lb, la, bnB, bnA, bnM, bnTS := st.ltBid, st.ltAsk, st.bnBid, st.bnAsk, st.bnMid, st.lastEmaTS
+			st.mu.Unlock()
+			if lb <= 0 || la <= lb {
+				lb, la, _, _ = fetchLtBookREST(m.ID)
+			}
+			if lb <= 0 || la <= lb || bnM <= 0 || time.Since(bnTS) > 15*time.Second {
+				fmt.Printf("[CARBON_REJECT id=%d sym=%s reason=STALE_OR_MISSING_BBO]\n", co.ID, sym)
+				continue
+			}
+			spBps := (la - lb) / (0.5 * (lb + la)) * 10000.0
+			if spBps > 3.5 {
+				fmt.Printf("[CARBON_REJECT id=%d sym=%s reason=WIDE_SPREAD_%.2fbps]\n", co.ID, sym, spBps)
+				continue
+			}
+			overpayBps := (la - bnA) / bnA * 10000.0
+			if side == "SHORT" {
+				overpayBps = (bnB - lb) / bnB * 10000.0
+			}
+			if overpayBps > 2.5 {
+				fmt.Printf("[CARBON_REJECT id=%d sym=%s side=%s reason=OVERPAY_%.2fbps]\n", co.ID, sym, side, overpayBps)
+				continue
+			}
+			usd := math.Min(15.0, math.Max(11.5, co.USD))
+			slBps := math.Min(50.0, math.Max(12.0, co.SlBps))
+			tpBps := math.Max(slBps*2.0, co.TpBps)
+			maxHold := co.MaxHoldSec
+			if maxHold <= 0 {
+				maxHold = 900
+			}
+			ordSide := "BID"
+			entryPx := roundTo(la*1.0002, m.PxDec)
+			refPx := la
+			if side == "SHORT" {
+				ordSide = "ASK"
+				entryPx = roundTo(lb*0.9998, m.PxDec)
+				refPx = lb
+			}
+			sz := math.Max(m.MinB, roundTo(usd/refPx, m.SzDec))
+			carbonMu.Lock()
+			activeCarbon = &CarbonPos{
+				ID: co.ID, Sym: sym, Side: side, USD: usd, SlBps: slBps, TpBps: tpBps,
+				MaxHoldSec: maxHold, SentAt: time.Now(), EntryPx: refPx,
+			}
+			carbonMu.Unlock()
+			placePairOrder(sym, ordSide, entryPx, 0.5*(lb+la), sz, false, true)
+			fmt.Printf("[CARBON_EXEC id=%d sym=%s side=%s usd=%.2f px=%.5f overpay=%+.2fbp sl=-%.0f tp=+%.0f hold=%ds]\n",
+				co.ID, sym, side, usd, refPx, overpayBps, slBps, tpBps, maxHold)
+		}
+	}
+}
+
 func main() {
 	if _, err := os.Stat("/tmp/lighter_pause.flag"); err == nil {
 		fmt.Println("[PAUSED] /tmp/lighter_pause.flag active; exiting.")
@@ -3690,6 +4584,7 @@ func main() {
 	nonceSeq.Store(n)
 	coiSeq.Store(time.Now().UnixMilli() % 10000000)
 	probationForce.Store(false)
+	discoverCommonAssets()
 	for _, st := range mktStates {
 		st.dynClipUSD = -1.0
 		st.makerActive = false
@@ -3698,7 +4593,7 @@ func main() {
 	go runTxWorker()
 	go runTxWS()
 	go runL2TickRecorder()
-	go runBnGuardWS()
+	go runBnAllBookTickerWS()
 	go runLtWS()
 	go runPauseWatchdog()
 	time.Sleep(1500 * time.Millisecond)
@@ -3710,10 +4605,9 @@ func main() {
 			rebalanceFromTrades(tb)
 		}
 	}
-	syncTwinWalkForward()
-	go runTwinWalkForwardLoop()
-	go runPairHeartbeat()
-	fmt.Printf("GO-TOKYO v88.2 LIVE | 1:1 Twins ($250-$300/leg 3x) + Directional BN Anti-Overpay + L2 Depth + L2 Recorder | Stop=$%.2f\n", StopEqUSD)
+	go runCarbonScanner()
+	go runCarbonCommandLoop()
+	fmt.Printf("GO-TOKYO v89 LIVE | Carbon Sniper (1:2-1:3 RR, $12 test, %d Common Assets) + L2 Recorder | Stop=$%.2f\n", len(commonList), StopEqUSD)
 	go syncAccountLoop()
 	select {}
 }
