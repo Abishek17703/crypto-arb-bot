@@ -795,17 +795,17 @@ func isDislocSym(sym string) bool {
 func dislocParams(sym string, now time.Time) (bool, float64, float64, float64, float64, float64, float64) {
 	switch sym {
 	case "SOXL":
-		return isOffHoursUTC(now), 8.5, 5.5, 14.0, 28.0, 2.2, 5.5
+		return isOffHoursUTC(now), 9.5, 6.8, 9.0, 26.0, 2.2, 5.5
 	case "MU":
-		return isOffHoursUTC(now), 4.5, 3.2, 10.0, 18.0, 1.5, 3.5
+		return isOffHoursUTC(now), 6.5, 5.2, 6.8, 18.0, 1.8, 3.5
 	case "ZEC":
-		return true, 6.0, 4.2, 12.0, 22.0, 1.8, 3.8
+		return true, 7.0, 5.4, 7.5, 22.0, 2.0, 3.8
 	case "HYPE":
-		return true, 4.5, 3.2, 10.0, 18.0, 1.5, 3.5
+		return true, 6.0, 4.8, 7.0, 18.0, 1.8, 3.5
 	case "SOL":
-		return true, 6.0, 4.2, 12.0, 22.0, 1.8, 2.5
+		return true, 7.0, 5.4, 7.5, 22.0, 1.8, 2.5
 	case "XAU":
-		return true, 5.0, 3.4, 10.5, 16.0, 1.5, 2.5
+		return true, 6.0, 4.6, 6.8, 15.0, 1.6, 2.2
 	default:
 		return false, 11.5, 6.8, 15.5, 0.0, 3.0, 1.25
 	}
@@ -821,8 +821,8 @@ func closeStepBps(sym string, st *MarketState) float64 {
 }
 
 func stepRatchetFloor(peakFavBps, lockFloor float64) float64 {
-	if peakFavBps >= 5.5 {
-		return math.Max(lockFloor, peakFavBps*0.55)
+	if peakFavBps >= 8.5 {
+		return math.Max(lockFloor, peakFavBps*0.65)
 	}
 	return lockFloor
 }
@@ -964,12 +964,16 @@ func updateShadowPaper(st *MarketState, now time.Time, lb, la, fairLt, dEdge, dT
 		return
 	}
 	age := now.Sub(st.shOpenTS).Seconds()
+	curSL := dSL
+	if age >= 180.0 {
+		curSL = dSL * 0.72
+	}
 	if st.shDir == 1 {
 		pnlBps := (lb - st.shEntry) / st.shEntry * 10000.0
 		if la >= st.shEntry*(1.0+dTP/10000.0) {
 			st.shadowBps += dTP
 			st.shDir = 0
-		} else if (age >= 15.0 && pnlBps <= -dSL) || pnlBps <= -24.0 || age >= 480.0 {
+		} else if (age >= 15.0 && pnlBps <= -curSL) || pnlBps <= -24.0 || age >= 480.0 {
 			st.shadowBps += pnlBps
 			st.shDir = 0
 		}
@@ -978,7 +982,7 @@ func updateShadowPaper(st *MarketState, now time.Time, lb, la, fairLt, dEdge, dT
 		if lb <= st.shEntry*(1.0-dTP/10000.0) {
 			st.shadowBps += dTP
 			st.shDir = 0
-		} else if (age >= 15.0 && pnlBps <= -dSL) || pnlBps <= -24.0 || age >= 480.0 {
+		} else if (age >= 15.0 && pnlBps <= -curSL) || pnlBps <= -24.0 || age >= 480.0 {
 			st.shadowBps += pnlBps
 			st.shDir = 0
 		}
@@ -1326,18 +1330,17 @@ func manageCoin(sym string) {
 		holdS = now.Sub(st.posOpenTS).Seconds()
 	}
 
-	slInit, lockPeak, lockFloor := dSL, dTP*0.85, dTP*0.45
+	slInit, lockPeak, lockFloor := dSL, math.Max(8.5, dTP*1.45), math.Max(5.5, dTP*1.05)
 
-	// 2. Closing orders: v82 Multi-Book Dislocation Convergence (+dTP), 5m Stalled Cut, 8m Scratch, -dSL Stop
+	// 2. Closing orders: v84 1:1 Payoff Convergence (+dTP), 3m Stalled Cut, 8m Scratch, -dSL Stop
 	if pos <= -m.MinB && ae > 0 {
 		curTkShort := (ae - la) / ae * 10000.0
 		if curTkShort > st.peakFavBps {
 			st.peakFavBps = curTkShort
 		}
 		trailFloor := stepRatchetFloor(st.peakFavBps, lockFloor)
-		greenShortPx := roundTo(math.Min(ae-tick, ae*(1.0-math.Max(0.25, trailFloor-0.15)/10000.0)), m.PxDec)
 		greenLockShort := st.peakFavBps >= lockPeak && ((curTkShort <= trailFloor && spBps <= 6.0) || curTkShort <= trailFloor-0.8)
-		earlyCutShort := st.peakFavBps < dTP*0.45 && holdS >= 300.0 && curTkShort <= -(dSL*0.60) && spBps <= 5.5
+		earlyCutShort := st.peakFavBps < dTP*0.50 && holdS >= 180.0 && curTkShort <= -(dSL*0.72) && spBps <= 5.5
 		hardSlShort := (holdS >= 15.0 && ((curTkShort <= -slInit && spBps <= 6.0) || curTkShort <= -(slInit+1.5))) || curTkShort <= -24.0
 		slHitShort := hardSlShort || earlyCutShort || greenLockShort
 		defBailShort := false
@@ -1377,9 +1380,6 @@ func manageCoin(sym string) {
 			}
 		} else {
 			wantBid := roundTo(ae*(1.0-stepBps/10000.0), m.PxDec)
-			if st.peakFavBps >= lockPeak && curTkShort < 0.20 {
-				wantBid = greenShortPx // Only tighten to green scratch if curTk pulled back after real peak!
-			}
 			if ao := st.activeOrds["BID"]; ao != nil && ao.IsClose && !ao.IsIOC && math.Abs(ao.Px-wantBid)/ae*10000.0 >= 0.45 && now.Sub(st.lastOrdTS["BID"]) >= 1500*time.Millisecond && takeWriteSlot(true) {
 				st.lastOrdTS["BID"] = now
 				modifySide(sym, "BID", wantBid, mid)
@@ -1424,9 +1424,8 @@ func manageCoin(sym string) {
 			st.peakFavBps = curTkLong
 		}
 		trailFloorL := stepRatchetFloor(st.peakFavBps, lockFloor)
-		greenLongPx := roundTo(math.Max(ae+tick, ae*(1.0+math.Max(0.25, trailFloorL-0.15)/10000.0)), m.PxDec)
 		greenLockLong := st.peakFavBps >= lockPeak && ((curTkLong <= trailFloorL && spBps <= 6.0) || curTkLong <= trailFloorL-0.8)
-		earlyCutLong := st.peakFavBps < dTP*0.45 && holdS >= 300.0 && curTkLong <= -(dSL*0.60) && spBps <= 5.5
+		earlyCutLong := st.peakFavBps < dTP*0.50 && holdS >= 180.0 && curTkLong <= -(dSL*0.72) && spBps <= 5.5
 		hardSlLong := (holdS >= 15.0 && ((curTkLong <= -slInit && spBps <= 6.0) || curTkLong <= -(slInit+1.5))) || curTkLong <= -24.0
 		slHitLong := hardSlLong || earlyCutLong || greenLockLong
 		defBailLong := false
@@ -1466,9 +1465,6 @@ func manageCoin(sym string) {
 			}
 		} else {
 			wantAsk := roundTo(ae*(1.0+stepBps/10000.0), m.PxDec)
-			if st.peakFavBps >= lockPeak && curTkLong < 0.20 {
-				wantAsk = greenLongPx // Only tighten to green scratch if curTk pulled back after real peak!
-			}
 			if ao := st.activeOrds["ASK"]; ao != nil && ao.IsClose && !ao.IsIOC && math.Abs(ao.Px-wantAsk)/ae*10000.0 >= 0.45 && now.Sub(st.lastOrdTS["ASK"]) >= 1500*time.Millisecond && takeWriteSlot(true) {
 				st.lastOrdTS["ASK"] = now
 				modifySide(sym, "ASK", wantAsk, mid)
@@ -3112,7 +3108,7 @@ func main() {
 	seedBinanceHistory()
 	seedPairHistory()
 	go runPairHeartbeat()
-	fmt.Printf("GO-TOKYO v83 LIVE | Auto-Rebalanced 6-Book Maker ($22->$95->$220->$360) + 15s Wick Shield | Stop=$%.2f\n", StopEqUSD)
+	fmt.Printf("GO-TOKYO v84 LIVE | 1.4x Payoff Dislocation Maker (No Early Scratch + 15s Shield + Auto-Rebalance) | Stop=$%.2f\n", StopEqUSD)
 	go syncAccountLoop()
 	runBnWS()
 }
