@@ -357,6 +357,7 @@ async fn main() {
                             || l.contains("[STRAT_OPEN")
                             || l.contains("[STRAT_CLOSE")
                             || l.contains("[DN_")
+                            || l.contains("[TRADFI_CHECK")
                     })
                     .collect();
                 if shown.len() > 20 {
