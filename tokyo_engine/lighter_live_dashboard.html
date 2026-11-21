@@ -56,28 +56,18 @@
     /* Full-Width Giant P&L Hero */
     .pnl-hero {
       background: linear-gradient(145deg, #101015 0%, #070709 100%);
-      border: 1px solid #2e2e36; border-radius: 1.25rem; padding: 1.6rem 1.8rem;
+      border: 1px solid #2e2e36; border-radius: 1.25rem; padding: 1.65rem 1.9rem;
       margin-bottom: 1.15rem; width: 100%;
     }
     .pnl-top {
-      display: flex; justify-content: space-between; align-items: flex-start; gap: 1.5rem; flex-wrap: wrap;
-      padding-bottom: 1.35rem; border-bottom: 1px solid var(--border);
+      display: flex; justify-content: space-between; align-items: center; gap: 1.5rem; flex-wrap: wrap;
     }
-    .lbl { font-size: 0.9rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); font-weight: 700; }
-    .giant-pnl { font-size: 3.8rem; font-weight: 800; line-height: 1.05; margin-top: 0.3rem; letter-spacing: -0.02em; }
-    .sub-line { font-size: 1.05rem; color: var(--muted); margin-top: 0.45rem; }
+    .lbl { font-size: 0.92rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); font-weight: 700; }
+    .giant-pnl { font-size: 4.35rem; font-weight: 800; line-height: 1.04; margin-top: 0.3rem; letter-spacing: -0.02em; }
+    .bracket-line { font-size: 1.12rem; color: var(--text); margin-top: 0.55rem; line-height: 1.45; }
+    .sub-line { font-size: 1.02rem; color: var(--muted); margin-top: 0.35rem; }
     .rate-box { text-align: right; }
-    .giant-rate { font-size: 2.35rem; font-weight: 800; line-height: 1.1; margin-top: 0.3rem; }
-
-    /* Side-by-Side Venue Breakdown (Lighter + Binance Losses/Fees) */
-    .venue-strip {
-      display: grid; grid-template-columns: repeat(3, 1fr); gap: 1.1rem; margin-top: 1.3rem;
-    }
-    .venue-box {
-      background: var(--card-2); border: 1px solid var(--border); border-radius: 0.95rem; padding: 1.05rem 1.2rem;
-    }
-    .venue-val { font-size: 1.85rem; font-weight: 800; margin-top: 0.3rem; }
-    .venue-detail { font-size: 0.95rem; color: var(--muted); margin-top: 0.35rem; line-height: 1.4; }
+    .giant-rate { font-size: 2.5rem; font-weight: 800; line-height: 1.1; margin-top: 0.3rem; }
 
     /* Recent Windows + Scanner Bar */
     .sec-grid {
@@ -141,13 +131,14 @@
       </div>
     </div>
 
-    <!-- Tier 1: Full-Width Giant Combined Net P&L + Side-by-Side Lighter & Binance Breakdown -->
+    <!-- Tier 1: Full-Width Giant Combined Net P&L with Bracketed Breakdown Underneath -->
     <div class="pnl-hero">
       <div class="pnl-top">
         <div>
           <div class="lbl">Combined Net P&amp;L (Lighter + Binance After All Fees)</div>
           <div class="giant-pnl mono" id="combPnlVal">$0.0000</div>
-          <div class="sub-line mono" id="combSubLine">Combined Capital: $--.-- (Lighter $--.-- + Binance $--.-- )</div>
+          <div class="bracket-line mono" id="bracketBreakdown">(Lighter: $0.0000 • Binance: $0.0000 incl. $0.0000 fees)</div>
+          <div class="sub-line mono" id="combSubLine">Combined Balance: $--.-- (Lighter $--.-- + Binance $--.-- )</div>
         </div>
         <div class="rate-box">
           <div class="lbl" style="display:inline-flex;align-items:center;gap:0.5rem;">
@@ -156,24 +147,6 @@
           </div>
           <div class="giant-rate mono" id="hrRate">$0.0000/hr</div>
           <div class="sub-line mono" id="dayRate">$0.00/day</div>
-        </div>
-      </div>
-
-      <div class="venue-strip">
-        <div class="venue-box">
-          <div class="lbl">1. Lighter P&amp;L (0% Fee Venue)</div>
-          <div class="venue-val mono" id="ltPnlVal">$0.0000</div>
-          <div class="venue-detail mono" id="ltDetail">Equity: $--.-- • Fees Paid: $0.0000</div>
-        </div>
-        <div class="venue-box">
-          <div class="lbl">2. Binance Futures Net P&amp;L (After Fees)</div>
-          <div class="venue-val mono" id="bnNetVal">$0.0000</div>
-          <div class="venue-detail mono" id="bnDetail">Trade PnL: $0.0000 • Fees Paid: $0.0000</div>
-        </div>
-        <div class="venue-box">
-          <div class="lbl">3. Binance Fees &amp; Losses Breakdown</div>
-          <div class="venue-val mono" id="bnFeesVal">$0.0000</div>
-          <div class="venue-detail mono" id="bnWalletDetail">Binance Total Wallet: $--.-- (Today Δ $--.-- )</div>
         </div>
       </div>
     </div>
@@ -459,30 +432,14 @@
         }
       }
 
-      // Giant Hero P&L
+      // Giant Hero P&L + Bracketed Platform Breakdown Underneath
       const combEl = document.getElementById("combPnlVal");
       combEl.textContent = fmtSigned(combPnl, 4);
       combEl.className = "giant-pnl mono " + colorCls(combPnl);
+      document.getElementById("bracketBreakdown").innerHTML =
+        `(Lighter: <b class="${colorCls(ltPnl)}">${fmtSigned(ltPnl, 4)}</b> &bull; Binance: <b class="${colorCls(bnNet)}">${fmtSigned(bnNet, 4)}</b> [Price ${fmtSigned(bnReal, 4)}, Fees <span class="${colorCls(bnFees)}">${fmtSigned(bnFees, 4)}</span>])`;
       document.getElementById("combSubLine").textContent =
-        `Combined Capital: $${combCap.toFixed(2)} (Lighter $${ltEq.toFixed(4)} + Binance $${bnWallet.toFixed(2)})`;
-
-      // Venue Breakdown Boxes
-      const ltEl = document.getElementById("ltPnlVal");
-      ltEl.textContent = fmtSigned(ltPnl, 4);
-      ltEl.className = "venue-val mono " + colorCls(ltPnl);
-      document.getElementById("ltDetail").textContent = `Lighter Equity: $${ltEq.toFixed(4)} • Fees Paid: $0.0000 (0%)`;
-
-      const bnEl = document.getElementById("bnNetVal");
-      bnEl.textContent = fmtSigned(bnNet, 4);
-      bnEl.className = "venue-val mono " + colorCls(bnNet);
-      document.getElementById("bnDetail").textContent =
-        `Realized Price PnL: ${fmtSigned(bnReal, 4)} • Open uPnL: ${fmtSigned(lastBnAudit ? lastBnAudit.upnl : 0, 4)}`;
-
-      const feeEl = document.getElementById("bnFeesVal");
-      feeEl.textContent = fmtSigned(bnFees, 4);
-      feeEl.className = "venue-val mono " + (bnFees < -0.0001 ? "neg" : "pos");
-      document.getElementById("bnWalletDetail").textContent =
-        `Binance Total Wallet: $${bnWallet.toFixed(3)} (Today Wallet Δ ${fmtSigned(bnTodayDelta, 4)})`;
+        `Combined Balance: $${combCap.toFixed(2)} (Lighter $${ltEq.toFixed(4)} + Binance $${bnWallet.toFixed(2)})`;
 
       // Run Rate
       const d5m = windowDelta(5 * 60e3, nowTs, combPnl);
