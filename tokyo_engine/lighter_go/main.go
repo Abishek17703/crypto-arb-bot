@@ -325,6 +325,7 @@ type CarbonPos struct {
 	StratTag    string
 	CloseReason string
 	LastPnLBps  float64
+	PeakFavBps  float64
 	LastCloseAt time.Time
 }
 
@@ -396,7 +397,7 @@ var (
 	awaitingReview          atomic.Bool
 	lastCarbonTuneID        int64
 	tuneMu                  sync.Mutex
-	curTune                 = CarbonTune{RiskUSD: 0.30, MinScore: 8, MinLagBps: 3.5, BeAtR: 0.85, AllowLag: true, AllowMom: true, Note: "v92_boot"}
+	curTune                 = CarbonTune{RiskUSD: 0.08, MinScore: 7, MinLagBps: 3.0, BeAtR: 0.45, AllowLag: true, AllowMom: true, Note: "v92_1_small_green_ramp"}
 	fastArbCh               = make(chan string, 64)
 	bnEthBtcMu              sync.Mutex
 	bnEthBtcBid             float64
@@ -1848,7 +1849,7 @@ func rebalanceFromTrades(tb []byte) {
 			continue
 		}
 		sessionPairPnl += prt.pnl
-		if prt.pnl < -0.03 {
+		if prt.pnl < -0.10 {
 			consecPairLosses++
 			netWins--
 		} else if prt.pnl > 0.005 {
@@ -1858,7 +1859,7 @@ func rebalanceFromTrades(tb []byte) {
 	}
 	sessionRealizedMicroUSD.Store(int64(sessionPairPnl * 1e6))
 	sessionNetWins.Store(netWins)
-	if !breakerTripped.Load() && (consecPairLosses >= 2 || sessionPairPnl <= -0.55) {
+	if !breakerTripped.Load() && (consecPairLosses >= 3 || sessionPairPnl <= -0.55) {
 		breakerTripped.Store(true)
 		_ = os.WriteFile("/tmp/lighter_pause.flag", []byte("1"), 0644)
 		reason := fmt.Sprintf("AUTO-BREAKER losses=%d pnl=$%.4f", consecPairLosses, sessionPairPnl)
@@ -4490,14 +4491,38 @@ func runCarbonScanner() {
 				tn := getTune()
 				fmt.Printf("[STRAT_SCAN seq=%d gate=%v] LAG_BEST=%s %+.2fbp/%.1f | MOM_BEST=%s %s sc=%d/%d\n",
 					seq, awaitingReview.Load(), lDesc, lEdge, tn.MinLagBps, topR.sym, topR.side, topR.score, tn.MinScore)
-				if tn.AllowMom && canOpenNewStrat() && topR.score >= tn.MinScore && topR.ltSp <= 1.8 && topR.diff <= 0.6 && topR.volR >= 1.10 && topR.depth >= 300.0 {
-					alignOK := (topR.side == "LONG" && topR.r5m >= 4.0 && topR.r15m >= 10.0 && topR.r15m <= 65.0 && topR.cvd >= 8.0 && topR.obi >= -0.05) ||
-						(topR.side == "SHORT" && topR.r5m <= -4.0 && topR.r15m <= -10.0 && topR.r15m >= -65.0 && topR.cvd <= -8.0 && topR.obi <= 0.05)
-					if alignOK {
-						sl := math.Min(36.0, math.Max(20.0, topR.slBps))
-						tp := math.Round(sl * 2.5)
-						usd := math.Min(165.0, math.Max(45.0, (tn.RiskUSD*10000.0)/sl))
-						startAutoCarbonSnipe(topR.sym, topR.side, usd, sl, tp, topR.diff)
+				if tn.AllowMom && canOpenNewStrat() {
+					firedMom := false
+					if topR.score >= tn.MinScore && topR.ltSp <= 1.8 && topR.diff <= 0.6 && topR.volR >= 0.85 && topR.depth >= 150.0 {
+						alignOK := (topR.side == "LONG" && topR.r5m >= 3.0 && topR.r15m >= 8.0 && topR.r15m <= 65.0 && topR.cvd >= 5.0 && topR.obi >= -0.08) ||
+							(topR.side == "SHORT" && topR.r5m <= -3.0 && topR.r15m <= -8.0 && topR.r15m >= -65.0 && topR.cvd <= -5.0 && topR.obi <= 0.08)
+						if alignOK {
+							sl := math.Min(32.0, math.Max(18.0, topR.slBps))
+							tp := math.Round(sl * 1.6)
+							usd := math.Min(165.0, math.Max(14.0, (tn.RiskUSD*10000.0)/sl))
+							startAutoCarbonSnipe(topR.sym, topR.side, "ADAPT_MOM", usd, sl, tp, topR.diff)
+							firedMom = true
+						}
+					}
+					if !firedMom {
+						for _, r := range results {
+							if math.Abs(r.r1h) > 55.0 || r.ltSp > 1.5 || r.depth < 200.0 {
+								continue
+							}
+							if r.r5m <= -16.0 && r.r5m >= -42.0 && r.obi >= 0.28 {
+								sl := math.Min(26.0, math.Max(18.0, r.slBps))
+								tp := math.Round(sl * 1.4)
+								usd := math.Min(165.0, math.Max(14.0, (tn.RiskUSD*10000.0)/sl))
+								startAutoCarbonSnipe(r.sym, "LONG", "OBI_MEAN_REV", usd, sl, tp, r.diff)
+								break
+							} else if r.r5m >= 16.0 && r.r5m <= 42.0 && r.obi <= -0.28 {
+								sl := math.Min(26.0, math.Max(18.0, r.slBps))
+								tp := math.Round(sl * 1.4)
+								usd := math.Min(165.0, math.Max(14.0, (tn.RiskUSD*10000.0)/sl))
+								startAutoCarbonSnipe(r.sym, "SHORT", "OBI_MEAN_REV", usd, sl, tp, r.diff)
+								break
+							}
+						}
 					}
 				}
 			}
@@ -4701,24 +4726,37 @@ func manageCarbonBracket() {
 	} else {
 		pnlBps = (entry - la) / entry * 10000.0
 	}
+	peak := cpCopy.PeakFavBps
+	if pnlBps > peak {
+		peak = pnlBps
+	}
 	carbonMu.Lock()
 	if activeCarbon != nil && activeCarbon.ID == cpCopy.ID {
 		activeCarbon.LastPnLBps = pnlBps
+		if peak > activeCarbon.PeakFavBps {
+			activeCarbon.PeakFavBps = peak
+		}
 	}
 	carbonMu.Unlock()
 	tn := getTune()
-	if !cpCopy.BeArmed && pnlBps >= cpCopy.SlBps*tn.BeAtR {
+	if !cpCopy.BeArmed && peak >= math.Min(10.0, cpCopy.SlBps*tn.BeAtR) {
 		carbonMu.Lock()
 		if activeCarbon != nil && activeCarbon.ID == cpCopy.ID {
 			activeCarbon.BeArmed = true
 		}
 		carbonMu.Unlock()
 		cpCopy.BeArmed = true
-		fmt.Printf("[CARBON_BE id=%d sym=%s pnlBps=%.1f armed=+3.0bps]\n", cpCopy.ID, cpCopy.Sym, pnlBps)
+		fmt.Printf("[CARBON_BE id=%d sym=%s peak=%.1fbp locked=+3.5bps]\n", cpCopy.ID, cpCopy.Sym, peak)
 	}
 	slThresh := -cpCopy.SlBps
-	if cpCopy.BeArmed {
-		slThresh = 3.0
+	if peak >= 35.0 {
+		slThresh = peak - 7.0
+	} else if peak >= 26.0 {
+		slThresh = 18.0
+	} else if peak >= 18.0 {
+		slThresh = 10.0
+	} else if cpCopy.BeArmed {
+		slThresh = 3.5
 	}
 	ageS := int64(now.Sub(cpCopy.SentAt).Seconds())
 	reason := ""
@@ -4782,10 +4820,10 @@ func runCarbonCommandLoop() {
 					lastCarbonTuneID = ct.ID
 					nt := CarbonTune{
 						ID:        ct.ID,
-						RiskUSD:   math.Min(0.60, math.Max(0.10, ct.RiskUSD)),
+						RiskUSD:   math.Min(0.60, math.Max(0.04, ct.RiskUSD)),
 						MinScore:  int(math.Min(10, math.Max(6, float64(ct.MinScore)))),
 						MinLagBps: math.Min(8.0, math.Max(2.5, ct.MinLagBps)),
-						BeAtR:     math.Min(1.50, math.Max(0.50, ct.BeAtR)),
+						BeAtR:     math.Min(1.50, math.Max(0.25, ct.BeAtR)),
 						AllowLag:  ct.AllowLag,
 						AllowMom:  ct.AllowMom,
 						Note:      strings.TrimSpace(ct.Note),
@@ -5182,7 +5220,7 @@ func fireDualIOC(tag, symA, sideA string, pxA, midA, szA float64, symB, sideB st
 	})
 }
 
-func startAutoCarbonSnipe(sym, side string, usd, slBps, tpBps, diffBps float64) {
+func startAutoCarbonSnipe(sym, side, stratTag string, usd, slBps, tpBps, diffBps float64) {
 	m, ok := markets[sym]
 	st := mktStates[sym]
 	if !ok || st == nil || !canOpenNewStrat() {
@@ -5198,7 +5236,7 @@ func startAutoCarbonSnipe(sym, side string, usd, slBps, tpBps, diffBps float64) 
 	if (la-lb)/(0.5*(lb+la))*10000.0 > 2.0 {
 		return
 	}
-	usd = math.Min(165.0, math.Max(45.0, usd))
+	usd = math.Min(165.0, math.Max(14.0, usd))
 	topBBO := la * laSz
 	ordSide := "BID"
 	entryPx := roundTo(la*1.00035, m.PxDec)
@@ -5212,20 +5250,25 @@ func startAutoCarbonSnipe(sym, side string, usd, slBps, tpBps, diffBps float64) 
 	if topBBO < usd*1.15 || !takeWriteSlot(false) {
 		return
 	}
-	sl := math.Min(36.0, math.Max(20.0, slBps))
-	tp := math.Round(sl * 2.5)
-	if tpBps >= sl*2.0 {
-		tp = tpBps
+	sl := math.Min(34.0, math.Max(16.0, slBps))
+	tp := math.Max(18.0, tpBps)
+	if stratTag == "" {
+		stratTag = "ADAPT_MOM"
 	}
+	stratMu.Lock()
+	if stratStats[stratTag] == nil {
+		stratStats[stratTag] = &StratStat{}
+	}
+	stratMu.Unlock()
 	sz := math.Max(m.MinB, roundTo(usd/refPx, m.SzDec))
 	coID := coiSeq.Add(1)
 	carbonMu.Lock()
 	activeCarbon = &CarbonPos{
 		ID: coID, Sym: sym, Side: side, USD: usd, SlBps: sl, TpBps: tp,
-		MaxHoldSec: 720, SentAt: time.Now(), EntryPx: refPx, StratTag: "BN_MOM_SNIPE",
+		MaxHoldSec: 720, SentAt: time.Now(), EntryPx: refPx, StratTag: stratTag,
 	}
 	carbonMu.Unlock()
-	recordStratOpen(coID, "BN_MOM_SNIPE", sym+"_"+side, usd, usd/83.0, -diffBps, fmt.Sprintf("auto_1leg sl=-%.0f tp=+%.0f", sl, tp))
+	recordStratOpen(coID, stratTag, sym+"_"+side, usd, usd/24.0, -diffBps, fmt.Sprintf("auto_1leg sl=-%.0f tp=+%.0f", sl, tp))
 	placePairOrder(sym, ordSide, entryPx, 0.5*(lb+la), sz, false, true)
 }
 
@@ -5378,10 +5421,10 @@ func evaluateFastStrategies() {
 		(bestLagSide == "SHORT" && lagCand.imp3s <= -2.5 && lagCand.imp20s <= -3.0 && lagCand.imp3s >= -35.0)
 	slBps := 16.0
 	tpBps := math.Min(18.0, math.Max(8.0, bestLagEdge+4.0))
-	usd := math.Min(165.0, math.Max(45.0, (tn.RiskUSD*10000.0)/slBps))
+	usd := math.Min(165.0, math.Max(14.0, (tn.RiskUSD*10000.0)/slBps))
 	usd = math.Min(usd, 0.35*lagCand.depth)
 	topOK := (bestLagSide == "LONG" && lagCand.topAskUSD >= usd*1.2) || (bestLagSide == "SHORT" && lagCand.topBidUSD >= usd*1.2)
-	if !dirOK || !topOK || usd < 35.0 || lagCand.depth < usd*1.4 || !takeWriteSlot(false) {
+	if !dirOK || !topOK || usd < 13.5 || lagCand.depth < usd*1.4 || !takeWriteSlot(false) {
 		return
 	}
 	m, ok := markets[bestLagSym]
@@ -5834,7 +5877,7 @@ func main() {
 	go runOpenStratLoop()
 	go runCarbonScanner()
 	go runCarbonCommandLoop()
-	fmt.Printf("GO-TOKYO v92.0 LIVE | <1ms 1-Leg Go Executor + Post-Trade Carbon Strategy Session | Stop=$%.2f\n", StopEqUSD)
+	fmt.Printf("GO-TOKYO v92.1 LIVE | Adaptive Small-Clip Green Ratchet ($14-$35 -> +$2 Goal) + Post-Trade Session | Stop=$%.2f\n", StopEqUSD)
 	go syncAccountLoop()
 	select {}
 }

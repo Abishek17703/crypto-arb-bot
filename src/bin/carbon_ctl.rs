@@ -54,19 +54,19 @@ enum Cmd {
         after_id: i64,
     },
     Arm {
-        #[arg(default_value_t = 0.30)]
+        #[arg(default_value_t = 0.08)]
         risk_usd: f64,
-        #[arg(default_value_t = 8)]
+        #[arg(default_value_t = 7)]
         min_score: i64,
-        #[arg(default_value_t = 3.5)]
+        #[arg(default_value_t = 3.0)]
         min_lag_bps: f64,
-        #[arg(default_value_t = 0.85)]
+        #[arg(default_value_t = 0.45)]
         be_at_r: f64,
         #[arg(default_value_t = true)]
         allow_lag: bool,
         #[arg(default_value_t = true)]
         allow_mom: bool,
-        #[arg(default_value = "session_ok")]
+        #[arg(default_value = "small_green_ramp")]
         note: String,
     },
 }
@@ -587,10 +587,10 @@ async fn main() {
                 "ts": tid,
                 "carbonTune": {
                     "id": tid,
-                    "riskUsd": risk_usd.clamp(0.10, 0.60),
+                    "riskUsd": risk_usd.clamp(0.04, 0.60),
                     "minScore": min_score.clamp(6, 10),
                     "minLagBps": min_lag_bps.clamp(2.5, 8.0),
-                    "beAtR": be_at_r.clamp(0.50, 1.50),
+                    "beAtR": be_at_r.clamp(0.25, 1.50),
                     "allowLag": allow_lag,
                     "allowMom": allow_mom,
                     "note": note
@@ -600,7 +600,7 @@ async fn main() {
                 Ok(_) => {
                     println!(
                         "ARMED id={tid} risk=${:.2} minSc={min_score} minLag={min_lag_bps:.1}bp be={be_at_r:.2}R lag={allow_lag} mom={allow_mom}",
-                        risk_usd.clamp(0.10, 0.60)
+                        risk_usd.clamp(0.04, 0.60)
                     );
                     0
                 }
