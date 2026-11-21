@@ -38,7 +38,7 @@ const (
 	EdgeBps      = 7.5  // Unused legacy constant
 	CancelBps    = 2.5
 	ObiLimit     = 0.35
-	StopEqUSD    = 92.50
+	StopEqUSD    = 83.50
 )
 
 type Market struct {
@@ -216,13 +216,17 @@ type TwinState struct {
 	FallbackRatio  float64
 	EmaRatio       float64
 	LastEmaTS      time.Time
-	WarmTicks      int
-	EntryTS        time.Time
-	WasHedged      bool
-	LastDualSendTS time.Time
-	LastHedgeTS    time.Time
-	CoolUntil      time.Time
-	LastLog        time.Time
+	WarmTicks        int
+	EntryTS          time.Time
+	EntryEqUSD       float64
+	UnhedgedSince    time.Time
+	AccruedFundBps   float64
+	LastFundAccrueTS time.Time
+	WasHedged        bool
+	LastDualSendTS   time.Time
+	LastHedgeTS      time.Time
+	CoolUntil        time.Time
+	LastLog          time.Time
 }
 
 var (
@@ -1683,7 +1687,7 @@ func rebalanceFromTrades(tb []byte) {
 			consecPairLosses = 0
 		}
 	}
-	if !breakerTripped.Load() && (consecPairLosses >= 2 || sessionPairPnl <= -0.45) {
+	if !breakerTripped.Load() && (consecPairLosses >= 2 || sessionPairPnl <= -1.20) {
 		breakerTripped.Store(true)
 		_ = os.WriteFile("/tmp/lighter_pause.flag", []byte("1"), 0644)
 		reason := fmt.Sprintf("AUTO-BREAKER losses=%d pnl=$%.4f", consecPairLosses, sessionPairPnl)
@@ -1924,10 +1928,10 @@ func syncAccountLoop() {
 					cancelAll()
 				}
 				manageAllTwins()
-				if eq >= 100.08 {
-					fmt.Printf("[GOAL-REACHED] Equity $%.4f >= $100.08, locking $100+ and halting!\n", eq)
+				if eq >= 5000.00 {
+					fmt.Printf("[GOAL-REACHED] Equity $%.4f >= $5000.00, locking profits and halting!\n", eq)
 					_ = os.WriteFile("/tmp/lighter_pause.flag", []byte("1"), 0644)
-					flattenAndExitPause("GOAL >= $100.08 REACHED")
+					flattenAndExitPause("GOAL >= $5000.00 REACHED")
 				}
 				if eq > 0 && eq <= StopEqUSD {
 					fmt.Printf("[STOP-LOSS] Equity $%.4f <= $%.2f, closing & halting!\n", eq, StopEqUSD)
@@ -2318,6 +2322,100 @@ func runLtWS() {
 		_ = conn.Close()
 		time.Sleep(1 * time.Second)
 	}
+}
+
+func runBnGuardWS() {
+	url := "wss://fstream.binance.com/stream?streams=paxgusdt@bookTicker/btcusdt@bookTicker/ethusdt@bookTicker"
+	for {
+		conn, _, err := websocket.DefaultDialer.Dial(url, nil)
+		if err != nil {
+			time.Sleep(1 * time.Second)
+			continue
+		}
+		setConnNoDelay(conn)
+		for {
+			_, msg, err := conn.ReadMessage()
+			if err != nil {
+				break
+			}
+			var env struct {
+				Data struct {
+					S string `json:"s"`
+					B string `json:"b"`
+					A string `json:"a"`
+				} `json:"data"`
+			}
+			if json.Unmarshal(msg, &env) != nil || env.Data.S == "" {
+				continue
+			}
+			sym := strings.TrimSuffix(env.Data.S, "USDT")
+			st := mktStates[sym]
+			if st == nil {
+				continue
+			}
+			b, _ := strconv.ParseFloat(env.Data.B, 64)
+			a, _ := strconv.ParseFloat(env.Data.A, 64)
+			if b > 0 && a > 0 {
+				mid := 0.5 * (b + a)
+				now := time.Now()
+				st.mu.Lock()
+				st.bnMid = mid
+				if st.emaUltra == 0 || st.lastEmaTS.IsZero() {
+					st.emaUltra = mid
+				} else {
+					dt := math.Min(5.0, math.Max(0.001, now.Sub(st.lastEmaTS).Seconds()))
+					st.emaUltra += (1.0 - math.Exp(-dt/3.0)) * (mid - st.emaUltra)
+				}
+				st.lastEmaTS = now
+				st.mu.Unlock()
+			}
+		}
+		_ = conn.Close()
+		time.Sleep(1 * time.Second)
+	}
+}
+
+func bnBasisGuardOK(tw *TwinState, tMid float64, now time.Time) (bool, float64) {
+	btcSt := mktStates["BTC"]
+	var btcBasisBps float64
+	btcFresh := false
+	btcShock := false
+	if btcSt != nil {
+		btcSt.mu.Lock()
+		bnB, euB, tsB := btcSt.bnMid, btcSt.emaUltra, btcSt.lastEmaTS
+		ltB, ltA := btcSt.ltBid, btcSt.ltAsk
+		btcSt.mu.Unlock()
+		if bnB > 0 && !tsB.IsZero() && now.Sub(tsB) < 15*time.Second {
+			btcFresh = true
+			if euB > 0 && math.Abs(bnB-euB)/euB*10000.0 >= 8.0 {
+				btcShock = true
+			}
+			if ltB > 0 && ltA > ltB {
+				btcBasisBps = (0.5*(ltB+ltA) - bnB) / bnB * 10000.0
+			}
+		}
+	}
+	if btcShock {
+		return false, btcBasisBps
+	}
+	if tw.ThinSym == "PAXG" {
+		paxgSt := mktStates["PAXG"]
+		if paxgSt == nil {
+			return false, 0.0
+		}
+		paxgSt.mu.Lock()
+		bnP, tsP := paxgSt.bnMid, paxgSt.lastEmaTS
+		paxgSt.mu.Unlock()
+		if bnP <= 0 || tsP.IsZero() || now.Sub(tsP) >= 15*time.Second || tMid <= 0 {
+			return false, 0.0
+		}
+		diffBps := (tMid - bnP) / bnP * 10000.0
+		return math.Abs(diffBps) < 2.0, diffBps
+	}
+	if !btcFresh {
+		return false, 0.0
+	}
+	return math.Abs(btcBasisBps) < 2.0, btcBasisBps
 }
 
 func runBnWS() {
@@ -2971,44 +3069,95 @@ func fireTwinIOC(tw *TwinState, thinSide string, thinPx, thinMid, thinSz float64
 	dSt.mu.Unlock()
 
 	enqueueTx(func() {
-		dbgT := fmt.Sprintf("TWIN_%s_%s px=%.2f sz=%.6f ro=%d", tw.ThinSym, thinSide, thinPx, thinSz, redOnly)
-		_ = sendSignedTx(fmt.Sprintf("dt_%d", coiT), dbgT, func(opts *types.TransactOpts) (uint8, string, error) {
-			ti, e := txCli.GetCreateOrderTransaction(&types.CreateOrderTxReq{
-				MarketIndex:      tM.ID,
-				ClientOrderIndex: coiT,
-				BaseAmount:       tBaseInt,
-				Price:            tPxInt,
-				IsAsk:            tAsk,
-				Type:             1,
-				TimeInForce:      0,
-				ReduceOnly:       redOnly,
-				OrderExpiry:      0,
-			}, opts)
-			if e != nil {
-				return 0, "", e
+		txMu.Lock()
+		defer txMu.Unlock()
+		t0 := time.Now()
+		tiT, errT := txCli.GetCreateOrderTransaction(&types.CreateOrderTxReq{
+			MarketIndex:      tM.ID,
+			ClientOrderIndex: coiT,
+			BaseAmount:       tBaseInt,
+			Price:            tPxInt,
+			IsAsk:            tAsk,
+			Type:             1,
+			TimeInForce:      0,
+			ReduceOnly:       redOnly,
+			OrderExpiry:      0,
+		}, nextOpts())
+		if errT != nil {
+			fmt.Printf("[TWIN_BATCH_SIGN_ERR_T] %v\n", errT)
+			return
+		}
+		infoT, errT := tiT.GetTxInfo()
+		if errT != nil {
+			fmt.Printf("[TWIN_BATCH_INFO_ERR_T] %v\n", errT)
+			return
+		}
+		tiD, errD := txCli.GetCreateOrderTransaction(&types.CreateOrderTxReq{
+			MarketIndex:      dM.ID,
+			ClientOrderIndex: coiD,
+			BaseAmount:       dBaseInt,
+			Price:            dPxInt,
+			IsAsk:            dAsk,
+			Type:             1,
+			TimeInForce:      0,
+			ReduceOnly:       redOnly,
+			OrderExpiry:      0,
+		}, nextOpts())
+		if errD != nil {
+			fmt.Printf("[TWIN_BATCH_SIGN_ERR_D] %v\n", errD)
+			return
+		}
+		infoD, errD := tiD.GetTxInfo()
+		if errD != nil {
+			fmt.Printf("[TWIN_BATCH_INFO_ERR_D] %v\n", errD)
+			return
+		}
+
+		idT := fmt.Sprintf("dt_%d", coiT)
+		idD := fmt.Sprintf("dd_%d", coiD)
+		if useWsSend {
+			txWsMu.Lock()
+			tc := txConn
+			var wsErrT, wsErrD error
+			if tc != nil {
+				wsErrT = tc.WriteJSON(map[string]any{
+					"type": "jsonapi/sendtx",
+					"data": map[string]any{"id": idT, "tx_type": tiT.GetTxType(), "tx_info": json.RawMessage(infoT)},
+				})
+				if wsErrT == nil {
+					wsErrD = tc.WriteJSON(map[string]any{
+						"type": "jsonapi/sendtx",
+						"data": map[string]any{"id": idD, "tx_type": tiD.GetTxType(), "tx_info": json.RawMessage(infoD)},
+					})
+				}
 			}
-			s, e := ti.GetTxInfo()
-			return ti.GetTxType(), s, e
-		})
-		dbgD := fmt.Sprintf("TWIN_%s_%s px=%.2f sz=%.6f ro=%d", tw.DeepSym, deepSide, deepPx, deepSz, redOnly)
-		_ = sendSignedTx(fmt.Sprintf("dd_%d", coiD), dbgD, func(opts *types.TransactOpts) (uint8, string, error) {
-			ti, e := txCli.GetCreateOrderTransaction(&types.CreateOrderTxReq{
-				MarketIndex:      dM.ID,
-				ClientOrderIndex: coiD,
-				BaseAmount:       dBaseInt,
-				Price:            dPxInt,
-				IsAsk:            dAsk,
-				Type:             1,
-				TimeInForce:      0,
-				ReduceOnly:       redOnly,
-				OrderExpiry:      0,
-			}, opts)
-			if e != nil {
-				return 0, "", e
+			txWsMu.Unlock()
+			if tc != nil && wsErrT == nil && wsErrD == nil {
+				fmt.Printf("[WS_TWIN_BATCH %s_%s/%s_%s px=%.2f/%.2f sz=%.5f/%.5f ro=%d] %dus\n",
+					tw.ThinSym, thinSide, tw.DeepSym, deepSide, thinPx, deepPx, thinSz, deepSz, redOnly, time.Since(t0).Microseconds())
+				return
 			}
-			s, e := ti.GetTxInfo()
-			return ti.GetTxType(), s, e
-		})
+		}
+
+		var wg sync.WaitGroup
+		wg.Add(2)
+		postLeg := func(lid string, tt uint8, tiStr string) {
+			defer wg.Done()
+			form := url.Values{}
+			form.Set("tx_type", strconv.Itoa(int(tt)))
+			form.Set("tx_info", tiStr)
+			if resp, e := txHTTP.PostForm(BaseURL+"/api/v1/sendTx", form); e == nil {
+				b, _ := io.ReadAll(resp.Body)
+				resp.Body.Close()
+				if resp.StatusCode != 200 || !strings.Contains(string(b), `"code":200`) {
+					fmt.Printf("[HTTP_TWIN_ERR %s] %d %s\n", lid, resp.StatusCode, string(b))
+				}
+			}
+		}
+		go postLeg(idT, tiT.GetTxType(), infoT)
+		go postLeg(idD, tiD.GetTxType(), infoD)
+		wg.Wait()
+		fmt.Printf("[HTTP_TWIN_BATCH %s/%s ro=%d] %dms\n", tw.ThinSym, tw.DeepSym, redOnly, time.Since(t0).Milliseconds())
 	})
 }
 
@@ -3082,76 +3231,87 @@ func manageTwin(tw *TwinState) bool {
 	liveZ := (instR - refMean) / refStd
 	devBps := (instR/refMean - 1.0) * 10000.0
 
+	curEq := float64(eqNow.Load()) / 1e6
+	if curEq < 50.0 {
+		curEq = 93.79
+	}
+
 	tUSD, dUSD := tPos*tMid, dPos*dMid
 	netDelta := tUSD + dUSD
+	if math.Abs(netDelta) < 11.5 {
+		tw.UnhedgedSince = time.Time{}
+	} else if tw.UnhedgedSince.IsZero() {
+		tw.UnhedgedSince = now
+	}
 	if math.Abs(tPos) < tM.MinB && math.Abs(dPos) < dM.MinB {
 		tw.WasHedged = false
 		tw.EntryTS = time.Time{}
+		tw.EntryEqUSD = 0
+		tw.AccruedFundBps = 0
+		tw.LastFundAccrueTS = time.Time{}
 	} else if math.Abs(tUSD) >= 11.0 && math.Abs(dUSD) >= 11.0 && tUSD*dUSD < 0 {
 		tw.WasHedged = true
 		if tw.EntryTS.IsZero() {
 			tw.EntryTS = now
+			tw.EntryEqUSD = curEq
+			tw.AccruedFundBps = 0
+			tw.LastFundAccrueTS = now
 		}
+	}
+
+	netCarryBpsHr := 0.0
+	if tPos > tM.MinB {
+		netCarryBpsHr = -tw.FundDiffBps
+	} else if tPos < -tM.MinB {
+		netCarryBpsHr = tw.FundDiffBps
+	}
+	if tw.WasHedged && !tw.LastFundAccrueTS.IsZero() {
+		dtH := math.Min(0.25, math.Max(0.0, now.Sub(tw.LastFundAccrueTS).Hours()))
+		tw.LastFundAccrueTS = now
+		tw.AccruedFundBps += netCarryBpsHr * dtH
 	}
 
 	pairAllowed := tw.AlwaysActive || isUSRthUTC(now)
+	bnOk, bnDiffBps := bnBasisGuardOK(tw, tMid, now)
 	if pairAllowed && now.Sub(tw.LastLog) >= 30*time.Second {
 		tw.LastLog = now
-		fmt.Printf("[%s] GO-TOKYO v87 LIVE | %s Eq=$%.4f | Z=%+.2f/%.1f dev=%+.1fbps fDiff=%+.2f | Pos=%.4f($%.0f)/%.4f($%.0f) | Sp=%.2f/%.2f | L2Rec=%d\n",
-			now.Format("15:04:05"), tw.Name, float64(eqNow.Load())/1e6, liveZ, tw.WfZ, devBps, tw.FundDiffBps, tPos, tUSD, dPos, dUSD, tSpBps, dSpBps, l2TicksRecorded.Load())
+		fmt.Printf("[%s] GO-TOKYO v88 LIVE | %s Eq=$%.4f | Z=%+.2f/%.1f dev=%+.1fbps bnDiff=%+.2fbps(%v) netCarry=%+.2fbps/h | Pos=%.4f($%.0f)/%.4f($%.0f) | Sp=%.2f/%.2f | L2Rec=%d\n",
+			now.Format("15:04:05"), tw.Name, float64(eqNow.Load())/1e6, liveZ, tw.WfZ, devBps, bnDiffBps, bnOk, netCarryBpsHr, tPos, tUSD, dPos, dUSD, tSpBps, dSpBps, l2TicksRecorded.Load())
 	}
 
-	if now.Sub(tw.LastDualSendTS) < 1100*time.Millisecond {
-		return pairAllowed
-	}
-
-	// STEP A: Immediate <1ms Delta Hedge on Deep Leg OR Finish 1-Leg Exit
-	if math.Abs(netDelta) >= 11.5 && dSpBps <= 4.5 && tSpBps <= 8.0 {
-		if tw.WasHedged {
-			if math.Abs(tPos) < tM.MinB && math.Abs(dPos) >= dM.MinB && now.Sub(tw.LastHedgeTS) >= 900*time.Millisecond && takeWriteSlotTier(2) {
-				tw.LastHedgeTS = now
-				tw.CoolUntil = now.Add(45 * time.Second)
-				if dPos > 0 {
-					placePairOrder(tw.DeepSym, "ASK", roundTo(db*0.9994, dM.PxDec), dMid, math.Abs(dPos), true, true)
-				} else {
-					placePairOrder(tw.DeepSym, "BID", roundTo(da*1.0006, dM.PxDec), dMid, math.Abs(dPos), true, true)
-				}
-			} else if math.Abs(dPos) < dM.MinB && math.Abs(tPos) >= tM.MinB && now.Sub(tw.LastHedgeTS) >= 900*time.Millisecond && takeWriteSlotTier(2) {
-				tw.LastHedgeTS = now
-				tw.CoolUntil = now.Add(45 * time.Second)
-				if tPos > 0 {
-					placePairOrder(tw.ThinSym, "ASK", roundTo(tb*0.9994, tM.PxDec), tMid, math.Abs(tPos), true, true)
-				} else {
-					placePairOrder(tw.ThinSym, "BID", roundTo(ta*1.0006, tM.PxDec), tMid, math.Abs(tPos), true, true)
-				}
-			}
-			return true
-		}
-		if math.Abs(tUSD) >= 11.0 && math.Abs(dPos) < dM.MinB {
+	// STEP A: <=500ms Asymmetric Fill Guard (Cancel + Immediate ReduceOnly Market Flatten on any lone open leg!)
+	if math.Abs(netDelta) >= 11.5 {
+		unhedgedMS := now.Sub(tw.UnhedgedSince).Milliseconds()
+		if unhedgedMS >= 450 && now.Sub(tw.LastHedgeTS) >= 450*time.Millisecond && takeWriteSlotTier(2) {
+			tw.LastHedgeTS = now
+			tw.LastDualSendTS = now
+			tw.CoolUntil = now.Add(45 * time.Second)
 			cancelThinEntries()
-			if now.Sub(tw.LastHedgeTS) >= 900*time.Millisecond && takeWriteSlotTier(2) {
-				tw.LastHedgeTS = now
-				hedgeSz := roundTo(math.Abs(tUSD)/dMid, dM.SzDec)
+			fmt.Printf("[%s] [TWIN-UNHEDGED-500MS] %s flattening lone leg after %dms (tPos=%.5f dPos=%.5f)\n",
+				now.Format("15:04:05"), tw.Name, unhedgedMS, tPos, dPos)
+			if math.Abs(tPos) >= tM.MinB {
 				if tPos > 0 {
-					placePairOrder(tw.DeepSym, "ASK", roundTo(db*0.9994, dM.PxDec), dMid, hedgeSz, false, true)
+					placePairOrder(tw.ThinSym, "ASK", roundTo(tb*0.9992, tM.PxDec), tMid, math.Abs(tPos), true, true)
 				} else {
-					placePairOrder(tw.DeepSym, "BID", roundTo(da*1.0006, dM.PxDec), dMid, hedgeSz, false, true)
+					placePairOrder(tw.ThinSym, "BID", roundTo(ta*1.0008, tM.PxDec), tMid, math.Abs(tPos), true, true)
 				}
 			}
-		} else if math.Abs(dUSD) >= 11.0 && math.Abs(tPos) < tM.MinB {
-			if now.Sub(tw.LastHedgeTS) >= 900*time.Millisecond && takeWriteSlotTier(2) {
-				tw.LastHedgeTS = now
+			if math.Abs(dPos) >= dM.MinB {
 				if dPos > 0 {
-					placePairOrder(tw.DeepSym, "ASK", roundTo(db*0.9994, dM.PxDec), dMid, math.Abs(dPos), true, true)
+					placePairOrder(tw.DeepSym, "ASK", roundTo(db*0.9992, dM.PxDec), dMid, math.Abs(dPos), true, true)
 				} else {
-					placePairOrder(tw.DeepSym, "BID", roundTo(da*1.0006, dM.PxDec), dMid, math.Abs(dPos), true, true)
+					placePairOrder(tw.DeepSym, "BID", roundTo(da*1.0008, dM.PxDec), dMid, math.Abs(dPos), true, true)
 				}
 			}
 		}
 		return true
 	}
 
-	// STEP B: 1h-16h Walk-Forward Convergence Exit (Dual-IOC on Z-Convergence / Patient Maker Unwind on >=50% Reversion)
+	if now.Sub(tw.LastDualSendTS) < 450*time.Millisecond {
+		return pairAllowed
+	}
+
+	// STEP B: Structural Decoupling (|Z|>=3.5 / 1.25% Equity SL), Funding Bleed Guard & 1h-16h Convergence Exit
 	if math.Abs(tUSD) >= 11.0 && math.Abs(dUSD) >= 11.0 && tUSD*dUSD < 0 {
 		cancelThinEntries()
 		if tAE <= 0 || dAE <= 0 {
@@ -3166,8 +3326,17 @@ func manageTwin(tw *TwinState) bool {
 			execNetBps = ((tAE-ta)/tAE + (db-dAE)/dAE) * 10000.0
 			availExitUSD = 0.80 * math.Min(ta*taSz, db*dbSz)
 		}
-		tightStopBook := tSpBps <= 3.5 && dSpBps <= 2.2
-		if ((execNetBps <= -20.0 && tightStopBook) || (ageS >= 57600.0 && tightStopBook)) && takeWriteSlotTier(2) {
+		totalNetBps := execNetBps + tw.AccruedFundBps
+		tradePnlUSD := (totalNetBps / 10000.0) * math.Abs(tUSD)
+		maxLossUSD := 0.0125 * math.Max(85.0, tw.EntryEqUSD)
+		zDecoupled := (tPos > 0 && liveZ <= -3.50) || (tPos < 0 && liveZ >= 3.50)
+		fundBleedExit := (netCarryBpsHr <= -1.50 && ageS >= 1800.0) || (tw.AccruedFundBps <= -4.5 && execNetBps >= -1.0)
+		tightStopBook := tSpBps <= 5.0 && dSpBps <= 3.0
+		hardEmergency := math.Abs(liveZ) >= 4.20 || tradePnlUSD <= -maxLossUSD*1.15
+		stopTrig := (tightStopBook && (zDecoupled || tradePnlUSD <= -maxLossUSD || execNetBps <= -20.0 || ageS >= 57600.0 || fundBleedExit)) || hardEmergency
+		if stopTrig && takeWriteSlotTier(2) {
+			fmt.Printf("[%s] [TWIN-SL-EXIT] %s z=%.2f pnl=$%.3f(max=-$%.2f) bps=%.1f netCarry=%.2f accFund=%.2f age=%.0fs\n",
+				now.Format("15:04:05"), tw.Name, liveZ, tradePnlUSD, maxLossUSD, execNetBps, netCarryBpsHr, tw.AccruedFundBps, ageS)
 			if tBidOrd != nil && tBidOrd.IsClose && !tBidOrd.IsIOC {
 				cancelPairSide(tw.ThinSym, "BID")
 			}
@@ -3184,14 +3353,14 @@ func manageTwin(tw *TwinState) bool {
 					dCl = roundTo(dCl*frac, dM.SzDec)
 				}
 				if tPos > 0 {
-					fireTwinIOC(tw, "ASK", roundTo(tb*0.9994, tM.PxDec), tMid, tCl, "BID", roundTo(da*1.0006, dM.PxDec), dMid, dCl, true)
+					fireTwinIOC(tw, "ASK", roundTo(tb*0.9992, tM.PxDec), tMid, tCl, "BID", roundTo(da*1.0008, dM.PxDec), dMid, dCl, true)
 				} else {
-					fireTwinIOC(tw, "BID", roundTo(ta*1.0006, tM.PxDec), tMid, tCl, "ASK", roundTo(db*0.9994, dM.PxDec), dMid, dCl, true)
+					fireTwinIOC(tw, "BID", roundTo(ta*1.0008, tM.PxDec), tMid, tCl, "ASK", roundTo(db*0.9992, dM.PxDec), dMid, dCl, true)
 				}
 			} else if tPos > 0 {
-				placePairOrder(tw.ThinSym, "ASK", roundTo(tb*0.9994, tM.PxDec), tMid, math.Abs(tPos), true, true)
+				placePairOrder(tw.ThinSym, "ASK", roundTo(tb*0.9992, tM.PxDec), tMid, math.Abs(tPos), true, true)
 			} else {
-				placePairOrder(tw.ThinSym, "BID", roundTo(ta*1.0006, tM.PxDec), tMid, math.Abs(tPos), true, true)
+				placePairOrder(tw.ThinSym, "BID", roundTo(ta*1.0008, tM.PxDec), tMid, math.Abs(tPos), true, true)
 			}
 			return true
 		}
@@ -3207,9 +3376,9 @@ func manageTwin(tw *TwinState) bool {
 			tw.LastDualSendTS = now
 			tw.CoolUntil = now.Add(45 * time.Second)
 			if tPos > 0 {
-				fireTwinIOC(tw, "ASK", tb, tMid, math.Abs(tPos), "BID", da, dMid, math.Abs(dPos), true)
+				fireTwinIOC(tw, "ASK", roundTo(tb*0.99992, tM.PxDec), tMid, math.Abs(tPos), "BID", roundTo(da*1.00008, dM.PxDec), dMid, math.Abs(dPos), true)
 			} else {
-				fireTwinIOC(tw, "BID", ta, tMid, math.Abs(tPos), "ASK", db, dMid, math.Abs(dPos), true)
+				fireTwinIOC(tw, "BID", roundTo(ta*1.00008, tM.PxDec), tMid, math.Abs(tPos), "ASK", roundTo(db*0.99992, dM.PxDec), dMid, math.Abs(dPos), true)
 			}
 			return true
 		}
@@ -3248,7 +3417,7 @@ func manageTwin(tw *TwinState) bool {
 		return true
 	}
 
-	// STEP C: Walk-Forward Z-Score + Funding-Filtered Entry
+	// STEP C: Simultaneous Dual-IOC Entry w/ Binance <2bps Basis Guard + Max 0.75bps/h Funding Filter
 	otherBusy := false
 	for sym, st := range mktStates {
 		if sym == tw.ThinSym || sym == tw.DeepSym {
@@ -3261,81 +3430,48 @@ func manageTwin(tw *TwinState) bool {
 	}
 	deepBBO := math.Min(db*dbSz, da*daSz)
 	deepBookSafe := tw.WfReady && booksFresh && now.After(tw.CoolUntil) && dSpBps <= 2.2 && tSpBps <= 4.5 && deepBBO >= 350.0 && refMean > 0
-	if !pairAllowed || otherBusy || remotePaused.Load() || breakerTripped.Load() || !deepBookSafe {
+	if !pairAllowed || !bnOk || otherBusy || remotePaused.Load() || breakerTripped.Load() || !deepBookSafe {
 		cancelThinEntries()
 		return pairAllowed
 	}
 
-	curEq := float64(eqNow.Load()) / 1e6
-	if curEq < 50.0 {
-		curEq = 93.79
-	}
-	legUSD := math.Min(tw.MaxCapUSD, math.Max(180.0, curEq*2.5))
+	legUSD := math.Min(tw.MaxCapUSD, math.Max(250.0, curEq*3.0))
 	legUSD = math.Min(legUSD, 0.35*deepBBO)
 	if legUSD < 100.0 {
 		cancelThinEntries()
 		return pairAllowed
 	}
 
-	tickThin := math.Pow10(-tM.PxDec)
-	sigLong := liveZ <= -tw.WfZ && devBps <= -tw.MinGapBps && tw.FundDiffBps <= 2.0
-	sigShort := liveZ >= tw.WfZ && devBps >= tw.MinGapBps && tw.FundDiffBps >= -2.0
-	wantBid := math.Min(roundTo(ta-tickThin, tM.PxDec), roundTo(db*refMean*(1.0-tw.MinGapBps/10000.0), tM.PxDec))
-	wantAsk := math.Max(roundTo(tb+tickThin, tM.PxDec), roundTo(da*refMean*(1.0+tw.MinGapBps/10000.0), tM.PxDec))
-
-	if tBidOrd != nil && !tBidOrd.IsClose && !tBidOrd.IsIOC {
-		liveEdge := (db*refMean - tBidOrd.Px) / tBidOrd.Px * 10000.0
-		if !sigLong || liveEdge < tw.MinGapBps-0.5 || tBidOrd.Px >= ta {
-			cancelPairSide(tw.ThinSym, "BID")
-		} else if math.Abs(tBidOrd.Px-wantBid)/wantBid*10000.0 >= 2.5 && now.Sub(tLastBid) >= 5000*time.Millisecond && takeWriteSlot(false) {
-			modifyPairSide(tw.ThinSym, "BID", wantBid, tMid)
-		}
-		return true
-	}
-	if tAskOrd != nil && !tAskOrd.IsClose && !tAskOrd.IsIOC {
-		liveEdge := (tAskOrd.Px - da*refMean) / tAskOrd.Px * 10000.0
-		if !sigShort || liveEdge < tw.MinGapBps-0.5 || tAskOrd.Px <= tb {
-			cancelPairSide(tw.ThinSym, "ASK")
-		} else if math.Abs(tAskOrd.Px-wantAsk)/wantAsk*10000.0 >= 2.5 && now.Sub(tLastAsk) >= 5000*time.Millisecond && takeWriteSlot(false) {
-			modifyPairSide(tw.ThinSym, "ASK", wantAsk, tMid)
-		}
-		return true
-	}
+	sigLong := liveZ <= -tw.WfZ && devBps <= -tw.MinGapBps && tw.FundDiffBps <= 0.75
+	sigShort := liveZ >= tw.WfZ && devBps >= tw.MinGapBps && tw.FundDiffBps >= -0.75
+	cancelThinEntries()
 
 	if sigLong {
 		iocLongEdge := (db*refMean - ta) / ta * 10000.0
-		if iocLongEdge >= tw.MinGapBps+1.5 && math.Min(ta*taSz, db*dbSz) >= legUSD*1.15 && takeWriteSlot(false) {
+		if iocLongEdge >= tw.MinGapBps && math.Min(ta*taSz, db*dbSz) >= legUSD*1.15 && takeWriteSlot(false) {
 			tw.LastDualSendTS = now
+			tPx := roundTo(ta*1.00008, tM.PxDec)
+			dPx := roundTo(db*0.99992, dM.PxDec)
 			tSz := roundTo(legUSD/ta, tM.SzDec)
 			dSz := roundTo(legUSD/db, dM.SzDec)
-			fireTwinIOC(tw, "BID", ta, tMid, tSz, "ASK", db, dMid, dSz, false)
-		} else if now.Sub(tLastBid) >= 4000*time.Millisecond && takeWriteSlot(false) {
-			bidEdge := (db*refMean - wantBid) / wantBid * 10000.0
-			if bidEdge >= tw.MinGapBps {
-				sz := roundTo(legUSD/wantBid, tM.SzDec)
-				placePairOrder(tw.ThinSym, "BID", wantBid, tMid, sz, false, false)
-			}
+			fireTwinIOC(tw, "BID", tPx, tMid, tSz, "ASK", dPx, dMid, dSz, false)
 		}
 	} else if sigShort {
 		iocShortEdge := (tb - da*refMean) / tb * 10000.0
-		if iocShortEdge >= tw.MinGapBps+1.5 && math.Min(tb*tbSz, da*daSz) >= legUSD*1.15 && takeWriteSlot(false) {
+		if iocShortEdge >= tw.MinGapBps && math.Min(tb*tbSz, da*daSz) >= legUSD*1.15 && takeWriteSlot(false) {
 			tw.LastDualSendTS = now
+			tPx := roundTo(tb*0.99992, tM.PxDec)
+			dPx := roundTo(da*1.00008, dM.PxDec)
 			tSz := roundTo(legUSD/tb, tM.SzDec)
 			dSz := roundTo(legUSD/da, dM.SzDec)
-			fireTwinIOC(tw, "ASK", tb, tMid, tSz, "BID", da, dMid, dSz, false)
-		} else if now.Sub(tLastAsk) >= 4000*time.Millisecond && takeWriteSlot(false) {
-			askEdge := (wantAsk - da*refMean) / wantAsk * 10000.0
-			if askEdge >= tw.MinGapBps {
-				sz := roundTo(legUSD/wantAsk, tM.SzDec)
-				placePairOrder(tw.ThinSym, "ASK", wantAsk, tMid, sz, false, false)
-			}
+			fireTwinIOC(tw, "ASK", tPx, tMid, tSz, "BID", dPx, dMid, dSz, false)
 		}
 	}
 	return true
 }
 
 func runPairHeartbeat() {
-	t := time.NewTicker(350 * time.Millisecond)
+	t := time.NewTicker(100 * time.Millisecond)
 	defer t.Stop()
 	for range t.C {
 		manageAllTwins()
@@ -3552,6 +3688,7 @@ func main() {
 	go runTxWorker()
 	go runTxWS()
 	go runL2TickRecorder()
+	go runBnGuardWS()
 	go runLtWS()
 	go runPauseWatchdog()
 	time.Sleep(1500 * time.Millisecond)
@@ -3566,7 +3703,7 @@ func main() {
 	syncTwinWalkForward()
 	go runTwinWalkForwardLoop()
 	go runPairHeartbeat()
-	fmt.Printf("GO-TOKYO v87 LIVE | Path A: 1h-8h WF Twins (PAXG/XAU + US500/SPY) + Path B: L2/Trade Recorder | Stop=$%.2f\n", StopEqUSD)
+	fmt.Printf("GO-TOKYO v88 LIVE | 1:1 Twins ($250-$300/leg 3x) + Binance <2bps Basis Guard + L2 Recorder | Stop=$%.2f\n", StopEqUSD)
 	go syncAccountLoop()
 	select {}
 }
