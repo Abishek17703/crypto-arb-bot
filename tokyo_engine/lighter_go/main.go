@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"compress/gzip"
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
@@ -10,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"runtime"
 	"sort"
 	"strconv"
@@ -32,10 +35,10 @@ const (
 	ChainID      = uint32(304)
 	PrivKey      = "56491130b44362b137b0a3b46dc63d647865876f11ff1613c857f946ec8612f6e4f216d065f4695a"
 	ClipUSD      = 55.00
-	EdgeBps      = 6.0  // Symmetric 6.0 bps entry around basis-adjusted fairLt
-	CancelBps    = 2.2  // 2.2 bps modify threshold (preserves queue-front priority, avoids churn)
-	ObiLimit     = 0.35 // Block sustained toxic-flow side when 8s-smoothed |OBI| > 0.35
-	StopEqUSD    = 93.50
+	EdgeBps      = 7.5  // Unused legacy constant
+	CancelBps    = 2.5
+	ObiLimit     = 0.35
+	StopEqUSD    = 92.50
 )
 
 type Market struct {
@@ -50,28 +53,40 @@ type Market struct {
 }
 
 var markets = map[string]Market{
-	"ETH":   {Sym: "ETH", ID: 0, SzDec: 4, PxDec: 2, MinB: 0.0020, AllowEntry: false, ClipUSD: -1.0, EdgeBps: 5.0},
-	"BTC":   {Sym: "BTC", ID: 1, SzDec: 5, PxDec: 1, MinB: 0.00007, AllowEntry: false, ClipUSD: -1.0, EdgeBps: 5.0},
-	"SOL":   {Sym: "SOL", ID: 2, SzDec: 3, PxDec: 3, MinB: 0.055, AllowEntry: false, ClipUSD: -1.0, EdgeBps: 7.0},
+	"ETH":   {Sym: "ETH", ID: 0, SzDec: 4, PxDec: 2, MinB: 0.0020, AllowEntry: true, ClipUSD: -1.0, EdgeBps: 5.0},
+	"BTC":   {Sym: "BTC", ID: 1, SzDec: 5, PxDec: 1, MinB: 0.00007, AllowEntry: true, ClipUSD: -1.0, EdgeBps: 5.0},
+	"SOL":   {Sym: "SOL", ID: 2, SzDec: 3, PxDec: 3, MinB: 0.055, AllowEntry: true, ClipUSD: -1.0, EdgeBps: 7.0},
 	"XRP":   {Sym: "XRP", ID: 7, SzDec: 0, PxDec: 6, MinB: 4.0, AllowEntry: false, ClipUSD: -1.0, EdgeBps: 5.4},
-	"HYPE":  {Sym: "HYPE", ID: 24, SzDec: 2, PxDec: 4, MinB: 0.07, AllowEntry: true, ClipUSD: 22.0, EdgeBps: 6.5},
+	"HYPE":  {Sym: "HYPE", ID: 24, SzDec: 2, PxDec: 4, MinB: 0.07, AllowEntry: false, ClipUSD: -1.0, EdgeBps: 6.5},
 	"BNB":   {Sym: "BNB", ID: 25, SzDec: 2, PxDec: 4, MinB: 0.01, AllowEntry: false, ClipUSD: -1.0, EdgeBps: 5.4},
-	"ZEC":   {Sym: "ZEC", ID: 90, SzDec: 3, PxDec: 3, MinB: 0.004, AllowEntry: true, ClipUSD: 22.0, EdgeBps: 7.5},
-	"XAU":   {Sym: "XAU", ID: 92, SzDec: 4, PxDec: 2, MinB: 0.0015, AllowEntry: false, ClipUSD: -1.0, EdgeBps: 6.0},
+	"PAXG":  {Sym: "PAXG", ID: 48, SzDec: 4, PxDec: 2, MinB: 0.0015, AllowEntry: true, ClipUSD: 240.0, EdgeBps: 7.5},
+	"ZEC":   {Sym: "ZEC", ID: 90, SzDec: 3, PxDec: 3, MinB: 0.004, AllowEntry: false, ClipUSD: -1.0, EdgeBps: 7.5},
+	"XAU":   {Sym: "XAU", ID: 92, SzDec: 4, PxDec: 2, MinB: 0.0015, AllowEntry: true, ClipUSD: 240.0, EdgeBps: 7.5},
 	"NVDA":  {Sym: "NVDA", ID: 110, SzDec: 3, PxDec: 3, MinB: 0.025, AllowEntry: false, ClipUSD: -1.0, EdgeBps: 5.0},
-	"AMZN":  {Sym: "AMZN", ID: 114, SzDec: 3, PxDec: 3, MinB: 0.0200, AllowEntry: true, ClipUSD: 40.0, EdgeBps: 4.0},
-	"GOOGL": {Sym: "GOOGL", ID: 116, SzDec: 4, PxDec: 2, MinB: 0.0150, AllowEntry: true, ClipUSD: 40.0, EdgeBps: 4.0},
-	"META":  {Sym: "META", ID: 117, SzDec: 4, PxDec: 2, MinB: 0.0080, AllowEntry: true, ClipUSD: 40.0, EdgeBps: 4.2},
-	"SPY":   {Sym: "SPY", ID: 128, SzDec: 4, PxDec: 2, MinB: 0.0070, AllowEntry: true, ClipUSD: 240.0, EdgeBps: 4.0},
-	"QQQ":   {Sym: "QQQ", ID: 129, SzDec: 4, PxDec: 2, MinB: 0.0075, AllowEntry: true, ClipUSD: 240.0, EdgeBps: 4.0},
-	"MU":    {Sym: "MU", ID: 164, SzDec: 4, PxDec: 2, MinB: 0.0060, AllowEntry: true, ClipUSD: 22.0, EdgeBps: 6.5},
-	"US500": {Sym: "US500", ID: 180, SzDec: 5, PxDec: 1, MinB: 0.00070, AllowEntry: true, ClipUSD: 240.0, EdgeBps: 4.0},
-	"US100": {Sym: "US100", ID: 181, SzDec: 6, PxDec: 0, MinB: 0.00020, AllowEntry: true, ClipUSD: 240.0, EdgeBps: 4.0},
-	"SOXL":  {Sym: "SOXL", ID: 197, SzDec: 4, PxDec: 2, MinB: 0.0500, AllowEntry: true, ClipUSD: 22.0, EdgeBps: 9.5},
+	"AMZN":  {Sym: "AMZN", ID: 114, SzDec: 3, PxDec: 3, MinB: 0.0200, AllowEntry: false, ClipUSD: -1.0, EdgeBps: 4.0},
+	"GOOGL": {Sym: "GOOGL", ID: 116, SzDec: 4, PxDec: 2, MinB: 0.0150, AllowEntry: false, ClipUSD: -1.0, EdgeBps: 4.0},
+	"META":  {Sym: "META", ID: 117, SzDec: 4, PxDec: 2, MinB: 0.0080, AllowEntry: false, ClipUSD: -1.0, EdgeBps: 4.2},
+	"SPY":   {Sym: "SPY", ID: 128, SzDec: 4, PxDec: 2, MinB: 0.0070, AllowEntry: true, ClipUSD: 240.0, EdgeBps: 5.0},
+	"QQQ":   {Sym: "QQQ", ID: 129, SzDec: 4, PxDec: 2, MinB: 0.0075, AllowEntry: false, ClipUSD: -1.0, EdgeBps: 4.0},
+	"MU":    {Sym: "MU", ID: 164, SzDec: 4, PxDec: 2, MinB: 0.0060, AllowEntry: false, ClipUSD: -1.0, EdgeBps: 6.5},
+	"US500": {Sym: "US500", ID: 180, SzDec: 5, PxDec: 1, MinB: 0.00070, AllowEntry: true, ClipUSD: 240.0, EdgeBps: 5.0},
+	"US100": {Sym: "US100", ID: 181, SzDec: 6, PxDec: 0, MinB: 0.00020, AllowEntry: false, ClipUSD: -1.0, EdgeBps: 4.0},
+	"SOXL":  {Sym: "SOXL", ID: 197, SzDec: 4, PxDec: 2, MinB: 0.0500, AllowEntry: false, ClipUSD: -1.0, EdgeBps: 9.5},
 }
-var evergreenSyms = []string{"GOOGL", "AMZN", "META", "SOXL", "MU", "ZEC", "HYPE"}
+var evergreenSyms = []string{}
 var bootTS = time.Now()
-var idToSym = map[int64]string{0: "ETH", 1: "BTC", 2: "SOL", 7: "XRP", 24: "HYPE", 25: "BNB", 90: "ZEC", 92: "XAU", 110: "NVDA", 114: "AMZN", 116: "GOOGL", 117: "META", 128: "SPY", 129: "QQQ", 164: "MU", 180: "US500", 181: "US100", 197: "SOXL"}
+var v87BootMS = bootTS.UnixMilli()
+var idToSym = map[int64]string{0: "ETH", 1: "BTC", 2: "SOL", 7: "XRP", 24: "HYPE", 25: "BNB", 48: "PAXG", 90: "ZEC", 92: "XAU", 110: "NVDA", 114: "AMZN", 116: "GOOGL", 117: "META", 128: "SPY", 129: "QQQ", 164: "MU", 180: "US500", 181: "US100", 197: "SOXL"}
+
+func isUSRthUTC(t time.Time) bool {
+	u := t.UTC()
+	wd := u.Weekday()
+	if wd < time.Monday || wd > time.Friday {
+		return false
+	}
+	mins := u.Hour()*60 + u.Minute()
+	return mins >= (13*60+25) && mins < 21*60
+}
 
 func isOffHoursUTC(t time.Time) bool {
 	u := t.UTC()
@@ -146,6 +161,7 @@ type MarketState struct {
 	ltAsk       float64
 	ltAskSz     float64
 	lastBookTS  time.Time
+	lastRecOBMS int64
 	pos         float64
 	avgEntry    float64
 	posOpenTS     time.Time
@@ -182,41 +198,53 @@ func newMarketState(initClip float64) *MarketState {
 }
 
 type TwinState struct {
-	Name            string
-	ThinSym         string
-	DeepSym         string
-	AlwaysActive    bool
-	BidEdgeBps      float64
-	AskEdgeBps      float64
-	FallbackRatio   float64
-	EmaRatio        float64
-	LastEmaTS       time.Time
-	WarmTicks       int
-	EntryTS         time.Time
-	WasHedged       bool
-	LastDualSendTS  time.Time
-	LastHedgeTS     time.Time
-	CoolUntil       time.Time
-	LastLog         time.Time
+	Name           string
+	ThinSym        string
+	DeepSym        string
+	AlwaysActive   bool
+	MinGapBps      float64
+	MaxCapUSD      float64
+	WfLB           int
+	WfZ            float64
+	HourlyMean     float64
+	HourlyStd      float64
+	FundDiffBps    float64
+	WfReady        bool
+	LastWfSync     time.Time
+	BidEdgeBps     float64
+	AskEdgeBps     float64
+	FallbackRatio  float64
+	EmaRatio       float64
+	LastEmaTS      time.Time
+	WarmTicks      int
+	EntryTS        time.Time
+	WasHedged      bool
+	LastDualSendTS time.Time
+	LastHedgeTS    time.Time
+	CoolUntil      time.Time
+	LastLog        time.Time
 }
 
 var (
 	mktStates = map[string]*MarketState{
 		"BTC": newMarketState(-1.0), "ETH": newMarketState(-1.0),
-		"SOL": newMarketState(-1.0), "XRP": newMarketState(-1.0), "HYPE": newMarketState(22.0),
-		"BNB": newMarketState(-1.0), "ZEC": newMarketState(22.0), "XAU": newMarketState(-1.0), "NVDA": newMarketState(-1.0),
-		"AMZN": newMarketState(40.0), "GOOGL": newMarketState(40.0), "META": newMarketState(40.0),
-		"SPY": newMarketState(220.0), "US500": newMarketState(220.0), "QQQ": newMarketState(220.0), "US100": newMarketState(220.0),
-		"MU": newMarketState(22.0), "SOXL": newMarketState(22.0),
+		"SOL": newMarketState(-1.0), "XRP": newMarketState(-1.0), "HYPE": newMarketState(-1.0),
+		"BNB": newMarketState(-1.0), "PAXG": newMarketState(240.0), "ZEC": newMarketState(-1.0), "XAU": newMarketState(240.0), "NVDA": newMarketState(-1.0),
+		"AMZN": newMarketState(-1.0), "GOOGL": newMarketState(-1.0), "META": newMarketState(-1.0),
+		"SPY": newMarketState(240.0), "US500": newMarketState(240.0), "QQQ": newMarketState(-1.0), "US100": newMarketState(-1.0),
+		"MU": newMarketState(-1.0), "SOXL": newMarketState(-1.0),
 	}
 	twins = []*TwinState{
-		{Name: "US500/SPY", ThinSym: "US500", DeepSym: "SPY", AlwaysActive: false, BidEdgeBps: 3.6, AskEdgeBps: 4.4, FallbackRatio: 10.002},
-		{Name: "US100/QQQ", ThinSym: "US100", DeepSym: "QQQ", AlwaysActive: false, BidEdgeBps: 4.2, AskEdgeBps: 4.2, FallbackRatio: 41.032},
+		{Name: "PAXG/XAU", ThinSym: "PAXG", DeepSym: "XAU", AlwaysActive: true, MinGapBps: 7.5, MaxCapUSD: 1400.0, WfLB: 48, WfZ: 2.2, BidEdgeBps: 7.5, AskEdgeBps: 7.5, FallbackRatio: 1.0000},
+		{Name: "US500/SPY", ThinSym: "US500", DeepSym: "SPY", AlwaysActive: false, MinGapBps: 5.0, MaxCapUSD: 4000.0, WfLB: 48, WfZ: 2.2, BidEdgeBps: 5.0, AskEdgeBps: 5.0, FallbackRatio: 10.002},
 	}
-	pairMu           sync.Mutex
-	pairMarketActive atomic.Bool
+	pairMu               sync.Mutex
+	pairMarketActive     atomic.Bool
 	probationForce       atomic.Bool
 	remotePaused         atomic.Bool
+	breakerTripped       atomic.Bool
+	l2TicksRecorded      atomic.Int64
+	l2RecCh              = make(chan string, 4096)
 	lastStopMS           atomic.Int64
 	streakWins           atomic.Int64
 	globalEntryLockUntil atomic.Int64
@@ -812,7 +840,8 @@ func recomputeBBO(st *MarketState) {
 }
 
 func isDislocSym(sym string) bool {
-	return sym == "GOOGL" || sym == "AMZN" || sym == "META" || sym == "SOXL" || sym == "MU" || sym == "ZEC" || sym == "HYPE"
+	_ = sym
+	return false
 }
 
 func dislocParams(sym string, now time.Time) (bool, float64, float64, float64, float64, float64, float64) {
@@ -1015,6 +1044,9 @@ func updateShadowPaper(st *MarketState, now time.Time, lb, la, fairLt, dEdge, dT
 }
 
 func manageCoin(sym string) {
+	if !isDislocSym(sym) {
+		return
+	}
 	btcTr60, btcTrOk := closedTrend60mBps("BTC")
 	ethTr60, ethTrOk := closedTrend60mBps("ETH")
 	st := mktStates[sym]
@@ -1556,7 +1588,7 @@ func rebalanceFromTrades(tb []byte) {
 		return
 	}
 	nowMS := time.Now().UnixMilli()
-	allSyms := []string{"BTC", "XAU", "ETH", "SOL", "XRP", "HYPE", "BNB", "ZEC", "NVDA", "AMZN", "GOOGL", "META", "MU", "SOXL", "SPY", "US500", "QQQ", "US100"}
+	allSyms := []string{"BTC", "XAU", "PAXG", "ETH", "SOL", "XRP", "HYPE", "BNB", "ZEC", "NVDA", "AMZN", "GOOGL", "META", "MU", "SOXL", "SPY", "US500", "QQQ", "US100"}
 	pnl := map[string]float64{}
 	wins := map[string]float64{}
 	closes := map[string]float64{}
@@ -1574,7 +1606,17 @@ func rebalanceFromTrades(tb []byte) {
 		tsMS int64
 		pnl  float64
 	}
+	twinGroup := func(s string) string {
+		if s == "PAXG" || s == "XAU" {
+			return "PAXG/XAU"
+		}
+		if s == "US500" || s == "SPY" {
+			return "US500/SPY"
+		}
+		return ""
+	}
 	var fills []closedFill
+	var bootPairFills []closedFill
 	for _, t := range resp.Trades {
 		tsMS := t.TS
 		if tsMS > 0 && tsMS < 100000000000 {
@@ -1600,10 +1642,54 @@ func rebalanceFromTrades(tb []byte) {
 			continue
 		}
 		realized, err := strconv.ParseFloat(pStr, 64)
-		if err != nil || math.Abs(realized) < 0.001 {
+		if err != nil || math.Abs(realized) < 0.0001 {
 			continue
 		}
 		fills = append(fills, closedFill{sym: s, tsMS: tsMS, pnl: realized})
+		if tsMS >= v87BootMS-30000 && twinGroup(s) != "" {
+			bootPairFills = append(bootPairFills, closedFill{sym: twinGroup(s), tsMS: tsMS, pnl: realized})
+		}
+	}
+	sort.Slice(bootPairFills, func(i, j int) bool { return bootPairFills[i].tsMS < bootPairFills[j].tsMS })
+	var pairRTs []closedFill
+	for _, f := range bootPairFills {
+		n := len(pairRTs)
+		if n > 0 && pairRTs[n-1].sym == f.sym && f.tsMS-pairRTs[n-1].tsMS <= 15000 {
+			pairRTs[n-1].pnl += f.pnl
+			pairRTs[n-1].tsMS = f.tsMS
+		} else {
+			pairRTs = append(pairRTs, f)
+		}
+	}
+	pairFlatNow := func(grp string) bool {
+		if grp == "PAXG/XAU" {
+			return math.Abs(float64(mktStates["PAXG"].netMicroUSD.Load()))/1e6 < 5.0 && math.Abs(float64(mktStates["XAU"].netMicroUSD.Load()))/1e6 < 5.0
+		}
+		if grp == "US500/SPY" {
+			return math.Abs(float64(mktStates["US500"].netMicroUSD.Load()))/1e6 < 5.0 && math.Abs(float64(mktStates["SPY"].netMicroUSD.Load()))/1e6 < 5.0
+		}
+		return true
+	}
+	consecPairLosses := 0
+	sessionPairPnl := 0.0
+	for _, prt := range pairRTs {
+		if nowMS-prt.tsMS < 5000 && !pairFlatNow(prt.sym) {
+			continue
+		}
+		sessionPairPnl += prt.pnl
+		if prt.pnl < -0.02 {
+			consecPairLosses++
+		} else if prt.pnl > 0.005 {
+			consecPairLosses = 0
+		}
+	}
+	if !breakerTripped.Load() && (consecPairLosses >= 2 || sessionPairPnl <= -0.45) {
+		breakerTripped.Store(true)
+		_ = os.WriteFile("/tmp/lighter_pause.flag", []byte("1"), 0644)
+		reason := fmt.Sprintf("AUTO-BREAKER losses=%d pnl=$%.4f", consecPairLosses, sessionPairPnl)
+		fmt.Printf("[%s] %s — halting safely!\n", time.Now().Format("15:04:05"), reason)
+		go flattenAndExitPause(reason)
+		return
 	}
 	sort.Slice(fills, func(i, j int) bool { return fills[i].tsMS < fills[j].tsMS })
 	var rts []closedFill
@@ -1950,6 +2036,17 @@ func runTxWS() {
 	}
 }
 
+func isTwinSym(sym string) bool {
+	return sym == "PAXG" || sym == "XAU" || sym == "SPY" || sym == "US500"
+}
+
+func pushL2Rec(line string) {
+	select {
+	case l2RecCh <- line:
+	default:
+	}
+}
+
 func runLtWS() {
 	for {
 		conn, _, err := websocket.DefaultDialer.Dial(WsURL, nil)
@@ -1973,6 +2070,7 @@ func runLtWS() {
 		for _, m := range markets {
 			if m.AllowEntry {
 				_ = conn.WriteJSON(map[string]any{"type": "subscribe", "channel": fmt.Sprintf("order_book/%d", m.ID)})
+				_ = conn.WriteJSON(map[string]any{"type": "subscribe", "channel": fmt.Sprintf("trade/%d", m.ID)})
 			}
 		}
 		if tok, err := txCli.GetAuthToken(time.Now().Add(6 * time.Hour)); err == nil {
@@ -1985,7 +2083,7 @@ func runLtWS() {
 				break
 			}
 			sMsg := string(msg)
-			if !strings.Contains(sMsg, "order_book") && !strings.Contains(sMsg, "account_all") {
+			if !strings.Contains(sMsg, "order_book") && !strings.Contains(sMsg, "account_all") && !strings.Contains(sMsg, `"channel":"trade:`) {
 				if strings.Contains(sMsg, `"error"`) || (strings.Contains(sMsg, `"code":`) && !strings.Contains(sMsg, `"code":200`)) {
 					fmt.Printf("[WS_RESP] %s\n", sMsg)
 					if strings.Contains(sMsg, "21501") || strings.Contains(sMsg, "invalid tx") {
@@ -2015,6 +2113,35 @@ func runLtWS() {
 				} `json:"order_book"`
 			}
 			if json.Unmarshal(msg, &m) != nil {
+				continue
+			}
+			if strings.HasPrefix(m.Channel, "trade:") {
+				idStr := strings.TrimPrefix(m.Channel, "trade:")
+				midID, _ := strconv.ParseInt(idStr, 10, 64)
+				if sym, ok := idToSym[midID]; ok && !strings.HasPrefix(m.Type, "subscribed") {
+					var trEv struct {
+						Trades []struct {
+							Price      string `json:"price"`
+							Size       string `json:"size"`
+							IsMakerAsk bool   `json:"is_maker_ask"`
+							TS         int64  `json:"timestamp"`
+						} `json:"trades"`
+					}
+					if json.Unmarshal(msg, &trEv) == nil {
+						nowMS := time.Now().UnixMilli()
+						for _, tr := range trEv.Trades {
+							sd := "B"
+							if tr.IsMakerAsk {
+								sd = "S"
+							}
+							tMS := tr.TS
+							if tMS <= 0 {
+								tMS = nowMS
+							}
+							pushL2Rec(fmt.Sprintf(`{"t":%d,"k":"tr","s":%q,"p":%s,"sz":%s,"sd":%q}`, tMS, sym, tr.Price, tr.Size, sd))
+						}
+					}
+				}
 				continue
 			}
 			if strings.HasPrefix(m.Channel, "account_all:") {
@@ -2091,10 +2218,8 @@ func runLtWS() {
 						}
 					}
 					for _, sym := range touched {
-						if sym == "SPY" || sym == "US500" || sym == "QQQ" || sym == "US100" {
+						if isTwinSym(sym) {
 							manageAllTwins()
-						} else {
-							manageCoin(sym)
 						}
 					}
 				}
@@ -2165,21 +2290,24 @@ func runLtWS() {
 							}
 						}
 					}
-					if needRecompute {
+					nowOB := time.Now()
+					nowMS := nowOB.UnixMilli()
+					sampleRec := st.ltBid > 0 && st.ltAsk > st.ltBid && nowMS-st.lastRecOBMS >= 100
+					if needRecompute || sampleRec {
 						recomputeBBO(st)
 					}
 					if st.ltBid > 0 && st.ltAsk > 0 {
-						st.lastBookTS = time.Now()
+						st.lastBookTS = nowOB
 					}
 					bboChanged := st.ltBid != prevB || st.ltAsk != prevA
-					shouldRun := bboChanged && st.bnMid > 0 && (st.dynClipUSD >= 0 || math.Abs(st.pos) > 1e-6 || time.Since(st.lastShadowTS) >= 100*time.Millisecond)
+					if sampleRec && (bboChanged || nowMS-st.lastRecOBMS >= 500) {
+						st.lastRecOBMS = nowMS
+						pushL2Rec(fmt.Sprintf(`{"t":%d,"k":"ob","s":%q,"b":%.6g,"bs":%.6g,"a":%.6g,"as":%.6g,"bd":%.1f,"ad":%.1f}`,
+							nowMS, sym, st.ltBid, st.ltBidSz, st.ltAsk, st.ltAskSz, st.ltBidDepthUSD, st.ltAskDepthUSD))
+					}
 					st.mu.Unlock()
-					if sym == "SPY" || sym == "US500" || sym == "QQQ" || sym == "US100" {
-						if bboChanged {
-							manageAllTwins()
-						}
-					} else if shouldRun {
-						manageCoin(sym)
+					if isTwinSym(sym) && bboChanged {
+						manageAllTwins()
 					}
 				}
 			}
@@ -2548,110 +2676,256 @@ func placePairOrder(sym, side string, pxF, midF, baseF float64, isClose, isIOC b
 	})
 }
 
-func seedPairHistory() {
-	hc := &http.Client{Timeout: 5 * time.Second}
-	type trPt struct {
-		ts int64
-		px float64
+func runTwinWalkForwardLoop() {
+	t := time.NewTicker(15 * time.Minute)
+	defer t.Stop()
+	for range t.C {
+		syncTwinWalkForward()
 	}
-	fetchTr := func(mid int64) []trPt {
-		req, err := http.NewRequest("GET", fmt.Sprintf("%s/api/v1/trades?market_id=%d&limit=100&sort_by=timestamp", BaseURL, mid), nil)
-		if err != nil {
-			return nil
-		}
-		req.Header.Set("User-Agent", "Mozilla/5.0")
-		resp, err := hc.Do(req)
-		if err != nil {
-			return nil
-		}
-		body, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		var d struct {
-			Trades []struct {
-				TS    int64  `json:"timestamp"`
-				Price string `json:"price"`
-			} `json:"trades"`
-		}
-		if json.Unmarshal(body, &d) != nil {
-			return nil
-		}
-		var out []trPt
-		for _, t := range d.Trades {
-			p, _ := strconv.ParseFloat(t.Price, 64)
-			if p > 0 && t.TS > 0 {
-				out = append(out, trPt{ts: t.TS, px: p})
+}
+
+func syncTwinWalkForward() {
+	hc := &http.Client{Timeout: 8 * time.Second}
+	fetch1hCandles := func(mid int64, startS, endS int64) map[int64]float64 {
+		out := map[int64]float64{}
+		cur := endS
+		for cur > startS {
+			st := cur - 480*3600
+			if st < startS {
+				st = startS
 			}
+			time.Sleep(220 * time.Millisecond)
+			u := fmt.Sprintf("%s/api/v1/candles?market_id=%d&resolution=1h&start_timestamp=%d&end_timestamp=%d&count_back=500", BaseURL, mid, st, cur)
+			req, err := http.NewRequest("GET", u, nil)
+			if err != nil {
+				break
+			}
+			req.Header.Set("User-Agent", "Mozilla/5.0")
+			resp, err := hc.Do(req)
+			if err != nil {
+				cur = st - 3600
+				continue
+			}
+			body, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			var d struct {
+				C []struct {
+					T int64   `json:"t"`
+					C float64 `json:"c"`
+				} `json:"c"`
+			}
+			if json.Unmarshal(body, &d) != nil || len(d.C) == 0 {
+				cur = st - 3600
+				continue
+			}
+			minT := cur
+			for _, bar := range d.C {
+				t := bar.T
+				if t > 1e11 {
+					t /= 1000
+				}
+				if t < minT {
+					minT = t
+				}
+				if bar.C > 0 {
+					out[t] = bar.C
+				}
+			}
+			nextCur := st
+			if minT < nextCur {
+				nextCur = minT
+			}
+			cur = nextCur - 3600
 		}
-		sort.Slice(out, func(i, j int) bool { return out[i].ts < out[j].ts })
 		return out
 	}
-	fetchBookMid := func(mid int64) float64 {
-		req, err := http.NewRequest("GET", fmt.Sprintf("%s/api/v1/orderBookOrders?market_id=%d&limit=3", BaseURL, mid), nil)
-		if err != nil {
-			return 0
+	fetch1hFundings := func(mid int64, startS, endS int64) map[int64]float64 {
+		out := map[int64]float64{}
+		cur := endS
+		for cur > startS {
+			st := cur - 550*3600
+			if st < startS {
+				st = startS
+			}
+			time.Sleep(220 * time.Millisecond)
+			u := fmt.Sprintf("%s/api/v1/fundings?market_id=%d&resolution=1h&start_timestamp=%d&end_timestamp=%d&count_back=600", BaseURL, mid, st, cur)
+			req, err := http.NewRequest("GET", u, nil)
+			if err != nil {
+				break
+			}
+			req.Header.Set("User-Agent", "Mozilla/5.0")
+			resp, err := hc.Do(req)
+			if err != nil {
+				cur = st - 3600
+				continue
+			}
+			body, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			var d struct {
+				Fundings []struct {
+					Timestamp int64  `json:"timestamp"`
+					Rate      string `json:"rate"`
+					Direction string `json:"direction"`
+				} `json:"fundings"`
+			}
+			if json.Unmarshal(body, &d) != nil || len(d.Fundings) == 0 {
+				cur = st - 3600
+				continue
+			}
+			minT := cur
+			for _, f := range d.Fundings {
+				t := f.Timestamp
+				if t > 1e11 {
+					t /= 1000
+				}
+				if t < minT {
+					minT = t
+				}
+				r, _ := strconv.ParseFloat(f.Rate, 64)
+				r /= 100.0
+				if f.Direction != "long" {
+					r = -r
+				}
+				out[t] = r
+			}
+			nextCur := st
+			if minT < nextCur {
+				nextCur = minT
+			}
+			cur = nextCur - 3600
 		}
-		req.Header.Set("User-Agent", "Mozilla/5.0")
-		resp, err := hc.Do(req)
-		if err != nil {
-			return 0
-		}
-		body, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		var ob struct {
-			Bids []struct {
-				Price string `json:"price"`
-			} `json:"bids"`
-			Asks []struct {
-				Price string `json:"price"`
-			} `json:"asks"`
-		}
-		if json.Unmarshal(body, &ob) != nil || len(ob.Bids) == 0 || len(ob.Asks) == 0 {
-			return 0
-		}
-		bb, _ := strconv.ParseFloat(ob.Bids[0].Price, 64)
-		ba, _ := strconv.ParseFloat(ob.Asks[0].Price, 64)
-		if bb > 0 && ba > bb {
-			return 0.5 * (bb + ba)
-		}
-		return 0
+		return out
 	}
+
+	nowH := (time.Now().Unix()/3600 - 1) * 3600
+	start32d := nowH - 32*86400
 	for _, tw := range twins {
 		tM, dM := markets[tw.ThinSym], markets[tw.DeepSym]
-		tPts, dPts := fetchTr(tM.ID), fetchTr(dM.ID)
-		var ratios []float64
-		if len(tPts) >= 5 && len(dPts) >= 5 {
-			di := 0
-			for _, tp := range tPts {
-				for di+1 < len(dPts) && math.Abs(float64(dPts[di+1].ts-tp.ts)) <= math.Abs(float64(dPts[di].ts-tp.ts)) {
-					di++
+		tc, dc := fetch1hCandles(tM.ID, start32d, nowH), fetch1hCandles(dM.ID, start32d, nowH)
+		tf, df := fetch1hFundings(tM.ID, start32d, nowH), fetch1hFundings(dM.ID, start32d, nowH)
+		var ts []int64
+		for t, tv := range tc {
+			if dv, ok := dc[t]; ok && tv > 0 && dv > 0 {
+				ts = append(ts, t)
+			}
+		}
+		sort.Slice(ts, func(i, j int) bool { return ts[i] < ts[j] })
+		if len(ts) < 60 {
+			fmt.Printf("[WF_SEED] %s SKIP insufficient 1h bars (%d)\n", tw.Name, len(ts))
+			continue
+		}
+		ratios := make([]float64, len(ts))
+		for i, t := range ts {
+			ratios[i] = tc[t] / dc[t]
+		}
+		bestLB := 48
+		bestZ := 2.2
+		bestSR := -999.0
+		trCut := nowH - 28*86400
+		for _, lb := range []int{24, 48} {
+			for _, zTh := range []float64{1.8, 2.2, 2.6} {
+				dayPnl := map[int64]float64{}
+				inPos := false
+				posDir := 0.0
+				entryR := 0.0
+				entryT := int64(0)
+				accFund := 0.0
+				for i := lb; i < len(ts); i++ {
+					t := ts[i]
+					if t < trCut {
+						continue
+					}
+					sum, sum2 := 0.0, 0.0
+					for k := i - lb; k < i; k++ {
+						sum += ratios[k]
+						sum2 += ratios[k] * ratios[k]
+					}
+					mu := sum / float64(lb)
+					varR := math.Max(1e-16, sum2/float64(lb)-mu*mu)
+					sd := math.Max(mu*0.0002, math.Sqrt(varR))
+					r := ratios[i]
+					z := (r - mu) / sd
+					fDiff := (tf[t] - df[t]) * 10000.0
+					dk := t / 86400
+					if _, exists := dayPnl[dk]; !exists {
+						dayPnl[dk] = 0.0
+					}
+					if inPos {
+						accFund += -posDir * (tf[t] - df[t]) * 600.0
+						nbps := posDir*(r/entryR-1.0)*10000.0 - 2.4
+						if posDir*z >= -0.1 || nbps <= -20.0 || t-entryT >= 16*3600 {
+							dayPnl[dk] += nbps/10000.0*600.0 + accFund
+							inPos = false
+						}
+					} else {
+						rthOK := tw.AlwaysActive || isUSRthUTC(time.Unix(t, 0))
+						if rthOK && math.Abs((r/mu-1.0)*10000.0) >= tw.MinGapBps {
+							if z <= -zTh && fDiff <= 2.0 {
+								inPos, posDir, entryR, entryT, accFund = true, 1.0, r, t, 0.0
+							} else if z >= zTh && fDiff >= -2.0 {
+								inPos, posDir, entryR, entryT, accFund = true, -1.0, r, t, 0.0
+							}
+						}
+					}
 				}
-				if math.Abs(float64(dPts[di].ts-tp.ts)) <= 12000 && dPts[di].px > 0 {
-					ratios = append(ratios, tp.px/dPts[di].px)
+				if len(dayPnl) >= 10 {
+					nD := float64(len(dayPnl))
+					sP := 0.0
+					for _, v := range dayPnl {
+						sP += v
+					}
+					mD := sP / nD
+					vD := 0.0
+					for _, v := range dayPnl {
+						d := v - mD
+						vD += d * d
+					}
+					sr := mD / math.Max(1e-6, math.Sqrt(vD/nD))
+					if sr > bestSR {
+						bestSR = sr
+						bestLB = lb
+						bestZ = zTh
+					}
 				}
 			}
 		}
-		med := tw.FallbackRatio
-		warm := 6
-		src := "fallback"
-		if len(ratios) >= 5 {
-			sort.Float64s(ratios)
-			med = ratios[len(ratios)/2]
-			warm = 12
-			src = fmt.Sprintf("%d prints", len(ratios))
-		} else {
-			tm, dm := fetchBookMid(tM.ID), fetchBookMid(dM.ID)
-			if tm > 0 && dm > 0 {
-				med = tm / dm
-				warm = 8
-				src = "live_bbo"
+		if len(ratios) <= bestLB {
+			bestLB = 24
+		}
+		sum, sum2 := 0.0, 0.0
+		for i := len(ratios) - bestLB; i < len(ratios); i++ {
+			sum += ratios[i]
+			sum2 += ratios[i] * ratios[i]
+		}
+		mu := sum / float64(bestLB)
+		sd := math.Max(mu*0.00025, math.Sqrt(math.Max(1e-16, sum2/float64(bestLB)-mu*mu)))
+		var lastFT, lastFD float64
+		var maxFT, maxFD int64
+		for ft, fv := range tf {
+			if ft > maxFT {
+				maxFT, lastFT = ft, fv
 			}
 		}
+		for fd, fv := range df {
+			if fd > maxFD {
+				maxFD, lastFD = fd, fv
+			}
+		}
+		fDiffBps := (lastFT - lastFD) * 10000.0
 		pairMu.Lock()
-		tw.EmaRatio = med
+		tw.WfLB = bestLB
+		tw.WfZ = bestZ
+		tw.HourlyMean = mu
+		tw.HourlyStd = sd
+		tw.FundDiffBps = fDiffBps
+		tw.WfReady = true
+		tw.LastWfSync = time.Now()
+		tw.EmaRatio = mu
 		tw.LastEmaTS = time.Now()
-		tw.WarmTicks = warm
+		tw.WarmTicks = 12
 		pairMu.Unlock()
-		fmt.Printf("[TWIN_SEED] %s ratio=%.6f (%s)\n", tw.Name, med, src)
+		fmt.Printf("[WF_SEED] %s lb=%dh zTh=%.1f mean=%.6f stdBps=%.2f fDiff=%+.2fbps/h (%d bars)\n",
+			tw.Name, bestLB, bestZ, mu, sd/mu*10000.0, fDiffBps, len(ts))
 	}
 }
 
@@ -2797,22 +3071,16 @@ func manageTwin(tw *TwinState) bool {
 	tSt.netMicroUSD.Store(int64(tPos * tMid * 1e6))
 	dSt.netMicroUSD.Store(int64(dPos * dMid * 1e6))
 
-	if booksFresh && dSpBps <= 2.2 && tSpBps <= 5.0 {
-		instR := tMid / dMid
-		if tw.EmaRatio <= 0 {
-			tw.EmaRatio = instR
-			tw.LastEmaTS = now
-		} else if math.Abs(instR-tw.EmaRatio)/tw.EmaRatio*10000.0 < 35.0 {
-			dt := math.Min(5.0, math.Max(0.001, now.Sub(tw.LastEmaTS).Seconds()))
-			tw.LastEmaTS = now
-			tau := 600.0
-			if math.Abs(tPos) >= tM.MinB || math.Abs(dPos) >= dM.MinB {
-				tau = 1800.0
-			}
-			tw.EmaRatio += (1.0 - math.Exp(-dt/tau)) * (instR - tw.EmaRatio)
-			tw.WarmTicks++
-		}
+	refMean := tw.EmaRatio
+	if tw.WfReady && tw.HourlyMean > 0 {
+		refMean = tw.HourlyMean
+	} else if refMean <= 0 {
+		refMean = tw.FallbackRatio
 	}
+	refStd := math.Max(refMean*0.00025, tw.HourlyStd)
+	instR := tMid / dMid
+	liveZ := (instR - refMean) / refStd
+	devBps := (instR/refMean - 1.0) * 10000.0
 
 	tUSD, dUSD := tPos*tMid, dPos*dMid
 	netDelta := tUSD + dUSD
@@ -2826,25 +3094,19 @@ func manageTwin(tw *TwinState) bool {
 		}
 	}
 
-	edgeLongThin, edgeShortThin := 0.0, 0.0
-	if tw.EmaRatio > 0 {
-		edgeLongThin = (db*tw.EmaRatio - ta) / ta * 10000.0
-		edgeShortThin = (tb - da*tw.EmaRatio) / tb * 10000.0
-	}
-	pairAllowed := tw.AlwaysActive || !isOffHoursUTC(now)
-
+	pairAllowed := tw.AlwaysActive || isUSRthUTC(now)
 	if pairAllowed && now.Sub(tw.LastLog) >= 30*time.Second {
 		tw.LastLog = now
-		fmt.Printf("[%s] GO-TOKYO v80 %s Eq=$%.4f | Thin=%.5f($%.1f) Deep=%.4f($%.1f) | Sp=%.2f/%.2f | Edge=%.2f/%.2f | DeepBBO=$%0.f/%0.f\n",
-			now.Format("15:04:05"), tw.Name, float64(eqNow.Load())/1e6, tPos, tUSD, dPos, dUSD, tSpBps, dSpBps, edgeLongThin, edgeShortThin, db*dbSz, da*daSz)
+		fmt.Printf("[%s] GO-TOKYO v87 LIVE | %s Eq=$%.4f | Z=%+.2f/%.1f dev=%+.1fbps fDiff=%+.2f | Pos=%.4f($%.0f)/%.4f($%.0f) | Sp=%.2f/%.2f | L2Rec=%d\n",
+			now.Format("15:04:05"), tw.Name, float64(eqNow.Load())/1e6, liveZ, tw.WfZ, devBps, tw.FundDiffBps, tPos, tUSD, dPos, dUSD, tSpBps, dSpBps, l2TicksRecorded.Load())
 	}
 
 	if now.Sub(tw.LastDualSendTS) < 1100*time.Millisecond {
 		return pairAllowed
 	}
 
-	// STEP A: Immediate 0.8ms Delta Hedge on Deep Leg OR Finish 1-Leg Exit
-	if math.Abs(netDelta) >= 11.5 && dSpBps <= 4.5 && tSpBps <= 6.5 {
+	// STEP A: Immediate <1ms Delta Hedge on Deep Leg OR Finish 1-Leg Exit
+	if math.Abs(netDelta) >= 11.5 && dSpBps <= 4.5 && tSpBps <= 8.0 {
 		if tw.WasHedged {
 			if math.Abs(tPos) < tM.MinB && math.Abs(dPos) >= dM.MinB && now.Sub(tw.LastHedgeTS) >= 900*time.Millisecond && takeWriteSlotTier(2) {
 				tw.LastHedgeTS = now
@@ -2889,7 +3151,7 @@ func manageTwin(tw *TwinState) bool {
 		return true
 	}
 
-	// STEP B: Hedged Twin Convergence Exit (Locked-Green Dual IOC OR Maker-First Unwind)
+	// STEP B: 1h-16h Walk-Forward Convergence Exit (Dual-IOC on Z-Convergence / Patient Maker Unwind on >=50% Reversion)
 	if math.Abs(tUSD) >= 11.0 && math.Abs(dUSD) >= 11.0 && tUSD*dUSD < 0 {
 		cancelThinEntries()
 		if tAE <= 0 || dAE <= 0 {
@@ -2904,9 +3166,8 @@ func manageTwin(tw *TwinState) bool {
 			execNetBps = ((tAE-ta)/tAE + (db-dAE)/dAE) * 10000.0
 			availExitUSD = 0.80 * math.Min(ta*taSz, db*dbSz)
 		}
-		allowCarry := tPos > 0 && tw.ThinSym == "US500" && execNetBps > -6.0
-		tightStopBook := tSpBps <= 3.0 && dSpBps <= 2.0
-		if ((execNetBps <= -18.0 && tightStopBook) || (ageS >= 1800.0 && !allowCarry && tightStopBook)) && takeWriteSlotTier(2) {
+		tightStopBook := tSpBps <= 3.5 && dSpBps <= 2.2
+		if ((execNetBps <= -20.0 && tightStopBook) || (ageS >= 57600.0 && tightStopBook)) && takeWriteSlotTier(2) {
 			if tBidOrd != nil && tBidOrd.IsClose && !tBidOrd.IsIOC {
 				cancelPairSide(tw.ThinSym, "BID")
 			}
@@ -2934,7 +3195,9 @@ func manageTwin(tw *TwinState) bool {
 			}
 			return true
 		}
-		if execNetBps >= 1.50 && availExitUSD >= math.Abs(tUSD)*0.95 && takeWriteSlot(true) {
+
+		converged := (tPos > 0 && liveZ >= -0.10) || (tPos < 0 && liveZ <= 0.10) || execNetBps >= 5.5
+		if converged && execNetBps >= 2.20 && availExitUSD >= math.Abs(tUSD)*0.95 && takeWriteSlot(true) {
 			if tBidOrd != nil && tBidOrd.IsClose && !tBidOrd.IsIOC {
 				cancelPairSide(tw.ThinSym, "BID")
 			}
@@ -2950,9 +3213,20 @@ func manageTwin(tw *TwinState) bool {
 			}
 			return true
 		}
-		// Zero-Slippage Maker-First Unwind on ThinSym
+
+		halfRev := (tPos > 0 && liveZ >= -0.50) || (tPos < 0 && liveZ <= 0.50)
+		if !halfRev {
+			if tBidOrd != nil && tBidOrd.IsClose && !tBidOrd.IsIOC {
+				cancelPairSide(tw.ThinSym, "BID")
+			}
+			if tAskOrd != nil && tAskOrd.IsClose && !tAskOrd.IsIOC {
+				cancelPairSide(tw.ThinSym, "ASK")
+			}
+			return true
+		}
 		if tPos > 0 {
-			wantAsk := math.Max(ta, roundTo(da*tw.EmaRatio*(1.0+0.6/10000.0), tM.PxDec))
+			minProfitAsk := tAE * (1.0 + 2.4/10000.0 - (dAE-da)/dAE)
+			wantAsk := math.Max(ta, math.Max(roundTo(da*refMean*(1.0+0.6/10000.0), tM.PxDec), roundTo(minProfitAsk, tM.PxDec)))
 			if tAskOrd != nil && tAskOrd.IsClose && !tAskOrd.IsIOC {
 				if math.Abs(tAskOrd.Px-wantAsk)/wantAsk*10000.0 >= 2.0 && now.Sub(tLastAsk) >= 4000*time.Millisecond && takeWriteSlot(true) {
 					modifyPairSide(tw.ThinSym, "ASK", wantAsk, tMid)
@@ -2961,7 +3235,8 @@ func manageTwin(tw *TwinState) bool {
 				placePairOrder(tw.ThinSym, "ASK", wantAsk, tMid, math.Abs(tPos), true, false)
 			}
 		} else {
-			wantBid := math.Min(tb, roundTo(db*tw.EmaRatio*(1.0-0.6/10000.0), tM.PxDec))
+			maxProfitBid := tAE * (1.0 - 2.4/10000.0 + (db-dAE)/dAE)
+			wantBid := math.Min(tb, math.Min(roundTo(db*refMean*(1.0-0.6/10000.0), tM.PxDec), roundTo(maxProfitBid, tM.PxDec)))
 			if tBidOrd != nil && tBidOrd.IsClose && !tBidOrd.IsIOC {
 				if math.Abs(tBidOrd.Px-wantBid)/wantBid*10000.0 >= 2.0 && now.Sub(tLastBid) >= 4000*time.Millisecond && takeWriteSlot(true) {
 					modifyPairSide(tw.ThinSym, "BID", wantBid, tMid)
@@ -2973,7 +3248,7 @@ func manageTwin(tw *TwinState) bool {
 		return true
 	}
 
-	// STEP C: Zero-1-Legging Maker-First Entry on ThinSym
+	// STEP C: Walk-Forward Z-Score + Funding-Filtered Entry
 	otherBusy := false
 	for sym, st := range mktStates {
 		if sym == tw.ThinSym || sym == tw.DeepSym {
@@ -2984,60 +3259,76 @@ func manageTwin(tw *TwinState) bool {
 			break
 		}
 	}
-	deepBookSafe := booksFresh && now.After(tw.CoolUntil) && dSpBps <= 1.85 && tSpBps <= 6.0 && db*dbSz >= 800.0 && da*daSz >= 800.0 && tw.EmaRatio > 0 && tw.WarmTicks >= 5
-	if !pairAllowed || otherBusy || remotePaused.Load() || !deepBookSafe {
+	deepBBO := math.Min(db*dbSz, da*daSz)
+	deepBookSafe := tw.WfReady && booksFresh && now.After(tw.CoolUntil) && dSpBps <= 2.2 && tSpBps <= 4.5 && deepBBO >= 350.0 && refMean > 0
+	if !pairAllowed || otherBusy || remotePaused.Load() || breakerTripped.Load() || !deepBookSafe {
+		cancelThinEntries()
+		return pairAllowed
+	}
+
+	curEq := float64(eqNow.Load()) / 1e6
+	if curEq < 50.0 {
+		curEq = 93.79
+	}
+	legUSD := math.Min(tw.MaxCapUSD, math.Max(180.0, curEq*2.5))
+	legUSD = math.Min(legUSD, 0.35*deepBBO)
+	if legUSD < 100.0 {
 		cancelThinEntries()
 		return pairAllowed
 	}
 
 	tickThin := math.Pow10(-tM.PxDec)
-	wantBid := roundTo(da*tw.EmaRatio*(1.0-tw.BidEdgeBps/10000.0), tM.PxDec)
-	if wantBid >= ta {
-		wantBid = roundTo(ta-tickThin, tM.PxDec)
-	}
-	wantAsk := roundTo(db*tw.EmaRatio*(1.0+tw.AskEdgeBps/10000.0), tM.PxDec)
-	if wantAsk <= tb {
-		wantAsk = roundTo(tb+tickThin, tM.PxDec)
-	}
-	preferBid := (tb - wantBid) <= (wantAsk - ta)
+	sigLong := liveZ <= -tw.WfZ && devBps <= -tw.MinGapBps && tw.FundDiffBps <= 2.0
+	sigShort := liveZ >= tw.WfZ && devBps >= tw.MinGapBps && tw.FundDiffBps >= -2.0
+	wantBid := math.Min(roundTo(ta-tickThin, tM.PxDec), roundTo(db*refMean*(1.0-tw.MinGapBps/10000.0), tM.PxDec))
+	wantAsk := math.Max(roundTo(tb+tickThin, tM.PxDec), roundTo(da*refMean*(1.0+tw.MinGapBps/10000.0), tM.PxDec))
 
 	if tBidOrd != nil && !tBidOrd.IsClose && !tBidOrd.IsIOC {
-		liveEdge := (db*tw.EmaRatio - tBidOrd.Px) / tBidOrd.Px * 10000.0
-		if liveEdge < 2.0 || tBidOrd.Px >= ta || (!preferBid && (wantAsk-ta)*1.5 < (tb-wantBid)) {
+		liveEdge := (db*refMean - tBidOrd.Px) / tBidOrd.Px * 10000.0
+		if !sigLong || liveEdge < tw.MinGapBps-0.5 || tBidOrd.Px >= ta {
 			cancelPairSide(tw.ThinSym, "BID")
-		} else if math.Abs(tBidOrd.Px-wantBid)/wantBid*10000.0 >= 2.5 && now.Sub(tLastBid) >= 4500*time.Millisecond && takeWriteSlot(false) {
+		} else if math.Abs(tBidOrd.Px-wantBid)/wantBid*10000.0 >= 2.5 && now.Sub(tLastBid) >= 5000*time.Millisecond && takeWriteSlot(false) {
 			modifyPairSide(tw.ThinSym, "BID", wantBid, tMid)
 		}
 		return true
 	}
 	if tAskOrd != nil && !tAskOrd.IsClose && !tAskOrd.IsIOC {
-		liveEdge := (tAskOrd.Px - da*tw.EmaRatio) / tAskOrd.Px * 10000.0
-		if liveEdge < 2.0 || tAskOrd.Px <= tb || (preferBid && (tb-wantBid)*1.5 < (wantAsk-ta)) {
+		liveEdge := (tAskOrd.Px - da*refMean) / tAskOrd.Px * 10000.0
+		if !sigShort || liveEdge < tw.MinGapBps-0.5 || tAskOrd.Px <= tb {
 			cancelPairSide(tw.ThinSym, "ASK")
-		} else if math.Abs(tAskOrd.Px-wantAsk)/wantAsk*10000.0 >= 2.5 && now.Sub(tLastAsk) >= 4500*time.Millisecond && takeWriteSlot(false) {
+		} else if math.Abs(tAskOrd.Px-wantAsk)/wantAsk*10000.0 >= 2.5 && now.Sub(tLastAsk) >= 5000*time.Millisecond && takeWriteSlot(false) {
 			modifyPairSide(tw.ThinSym, "ASK", wantAsk, tMid)
 		}
 		return true
 	}
 
-	pairPnl := float64(tSt.rollPnlMicro.Load()+dSt.rollPnlMicro.Load()) / 1e6
-	legUSD := 220.0
-	if pairPnl <= -0.08 {
-		legUSD = 60.0
-	} else if pairPnl >= 0.10 {
-		legUSD = 340.0
-	}
-	if preferBid {
-		bidEdge := (db*tw.EmaRatio - wantBid) / wantBid * 10000.0
-		if bidEdge >= 2.2 && now.Sub(tLastBid) >= 3000*time.Millisecond && takeWriteSlot(false) {
-			sz := roundTo(legUSD/wantBid, tM.SzDec)
-			placePairOrder(tw.ThinSym, "BID", wantBid, tMid, sz, false, false)
+	if sigLong {
+		iocLongEdge := (db*refMean - ta) / ta * 10000.0
+		if iocLongEdge >= tw.MinGapBps+1.5 && math.Min(ta*taSz, db*dbSz) >= legUSD*1.15 && takeWriteSlot(false) {
+			tw.LastDualSendTS = now
+			tSz := roundTo(legUSD/ta, tM.SzDec)
+			dSz := roundTo(legUSD/db, dM.SzDec)
+			fireTwinIOC(tw, "BID", ta, tMid, tSz, "ASK", db, dMid, dSz, false)
+		} else if now.Sub(tLastBid) >= 4000*time.Millisecond && takeWriteSlot(false) {
+			bidEdge := (db*refMean - wantBid) / wantBid * 10000.0
+			if bidEdge >= tw.MinGapBps {
+				sz := roundTo(legUSD/wantBid, tM.SzDec)
+				placePairOrder(tw.ThinSym, "BID", wantBid, tMid, sz, false, false)
+			}
 		}
-	} else {
-		askEdge := (wantAsk - da*tw.EmaRatio) / wantAsk * 10000.0
-		if askEdge >= 2.2 && now.Sub(tLastAsk) >= 3000*time.Millisecond && takeWriteSlot(false) {
-			sz := roundTo(legUSD/wantAsk, tM.SzDec)
-			placePairOrder(tw.ThinSym, "ASK", wantAsk, tMid, sz, false, false)
+	} else if sigShort {
+		iocShortEdge := (tb - da*refMean) / tb * 10000.0
+		if iocShortEdge >= tw.MinGapBps+1.5 && math.Min(tb*tbSz, da*daSz) >= legUSD*1.15 && takeWriteSlot(false) {
+			tw.LastDualSendTS = now
+			tSz := roundTo(legUSD/tb, tM.SzDec)
+			dSz := roundTo(legUSD/da, dM.SzDec)
+			fireTwinIOC(tw, "ASK", tb, tMid, tSz, "BID", da, dMid, dSz, false)
+		} else if now.Sub(tLastAsk) >= 4000*time.Millisecond && takeWriteSlot(false) {
+			askEdge := (wantAsk - da*refMean) / wantAsk * 10000.0
+			if askEdge >= tw.MinGapBps {
+				sz := roundTo(legUSD/wantAsk, tM.SzDec)
+				placePairOrder(tw.ThinSym, "ASK", wantAsk, tMid, sz, false, false)
+			}
 		}
 	}
 	return true
@@ -3051,11 +3342,125 @@ func runPairHeartbeat() {
 	}
 }
 
+func runL2TickRecorder() {
+	dir := "/opt/crypto-arb-bot/l2_archive"
+	if os.MkdirAll(dir, 0755) != nil {
+		dir = "/tmp/l2_archive"
+		_ = os.MkdirAll(dir, 0755)
+	}
+	var curDay string
+	var f *os.File
+	var gw *gzip.Writer
+	openDay := func(day string) {
+		if gw != nil {
+			_ = gw.Close()
+			gw = nil
+		}
+		if f != nil {
+			_ = f.Close()
+			f = nil
+		}
+		p := filepath.Join(dir, "l2_"+day+".jsonl.gz")
+		nf, err := os.OpenFile(p, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+		if err != nil {
+			return
+		}
+		f = nf
+		gw = gzip.NewWriter(nf)
+		curDay = day
+	}
+	pruneOld := func() {
+		ents, err := os.ReadDir(dir)
+		if err != nil {
+			return
+		}
+		type finfo struct {
+			name string
+			sz   int64
+		}
+		var list []finfo
+		var tot int64
+		for _, e := range ents {
+			if strings.HasPrefix(e.Name(), "l2_") && strings.HasSuffix(e.Name(), ".jsonl.gz") {
+				if info, err2 := e.Info(); err2 == nil {
+					list = append(list, finfo{name: e.Name(), sz: info.Size()})
+					tot += info.Size()
+				}
+			}
+		}
+		sort.Slice(list, func(i, j int) bool { return list[i].name < list[j].name })
+		for tot > 350*1024*1024 && len(list) > 1 {
+			_ = os.Remove(filepath.Join(dir, list[0].name))
+			tot -= list[0].sz
+			list = list[1:]
+		}
+	}
+	flushTick := time.NewTicker(10 * time.Second)
+	defer flushTick.Stop()
+	lastLogR := time.Now()
+	pruneCnt := 0
+	for {
+		select {
+		case line := <-l2RecCh:
+			day := time.Now().UTC().Format("2006-01-02")
+			if day != curDay || gw == nil {
+				openDay(day)
+			}
+			if gw != nil {
+				_, _ = gw.Write([]byte(line + "\n"))
+				n := l2TicksRecorded.Add(1)
+				if n%5000 == 0 || time.Since(lastLogR) >= 10*time.Minute {
+					lastLogR = time.Now()
+					fmt.Printf("[L2_REC] dir=%s day=%s ticks=%d\n", dir, curDay, n)
+				}
+			}
+		case <-flushTick.C:
+			if gw != nil {
+				_ = gw.Flush()
+			}
+			if f != nil {
+				_ = f.Sync()
+			}
+			pruneCnt++
+			if pruneCnt%60 == 0 {
+				pruneOld()
+			}
+		}
+	}
+}
+
+func triggerS3Pause(reason string) {
+	_ = os.WriteFile("/tmp/lighter_pause.flag", []byte("1"), 0644)
+	hc := &http.Client{Timeout: 3 * time.Second}
+	resp, err := hc.Get(fmt.Sprintf("https://crypto-arb-bot-tokyo-bin-767579108352.s3.ap-northeast-1.amazonaws.com/live-telemetry.json?_t=%d", time.Now().UnixMilli()))
+	if err != nil {
+		return
+	}
+	b, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	var tel struct {
+		PauseControlUrl string `json:"pauseControlUrl"`
+	}
+	if json.Unmarshal(b, &tel) != nil || tel.PauseControlUrl == "" {
+		return
+	}
+	payload, _ := json.Marshal(map[string]any{"paused": true, "ts": time.Now().UnixMilli(), "reason": reason})
+	req, err := http.NewRequest("PUT", tel.PauseControlUrl, bytes.NewReader(payload))
+	if err != nil {
+		return
+	}
+	req.Header.Set("Content-Type", "text/plain")
+	if pr, e2 := hc.Do(req); e2 == nil {
+		pr.Body.Close()
+	}
+}
+
 func flattenAndExitPause(reason string) {
 	if !remotePaused.CompareAndSwap(false, true) {
 		return
 	}
-	fmt.Printf("[INSTANT-PAUSE] %s — canceling orders & flattening in <1s!\n", reason)
+	fmt.Printf("[INSTANT-PAUSE] %s — canceling orders, setting S3 pause & flattening in <1s!\n", reason)
+	triggerS3Pause(reason)
 	useWsSend = false
 	cancelAll()
 	for sym, st := range mktStates {
@@ -3139,32 +3544,14 @@ func main() {
 	nonceSeq.Store(n)
 	coiSeq.Store(time.Now().UnixMilli() % 10000000)
 	probationForce.Store(false)
-	mktStates["BTC"].dynClipUSD = -1.0
-	mktStates["XAU"].dynClipUSD = -1.0
-	mktStates["ETH"].dynClipUSD = -1.0
-	mktStates["SOL"].dynClipUSD = -1.0
-	mktStates["XRP"].dynClipUSD = -1.0
-	mktStates["HYPE"].dynClipUSD = -1.0
-	mktStates["BNB"].dynClipUSD = -1.0
-	mktStates["ZEC"].dynClipUSD = -1.0
-	mktStates["NVDA"].dynClipUSD = -1.0
-	nowBoot := time.Now()
-	for _, s := range []string{"BTC", "XAU", "ETH", "SOL", "XRP", "HYPE", "BNB", "ZEC", "NVDA", "AMZN", "GOOGL", "META", "MU", "SOXL"} {
-		dAct, _, _, _, _, _, _ := dislocParams(s, nowBoot)
-		mktStates[s].dynClipUSD = -1.0
-		mktStates[s].makerActive = false
-		if isDislocSym(s) && dAct {
-			initC := 22.0
-			if s == "GOOGL" || s == "AMZN" || s == "META" {
-				initC = 40.0
-			}
-			mktStates[s].dynClipUSD = initC
-			mktStates[s].makerActive = true
-		}
+	for _, st := range mktStates {
+		st.dynClipUSD = -1.0
+		st.makerActive = false
 	}
 
 	go runTxWorker()
 	go runTxWS()
+	go runL2TickRecorder()
 	go runLtWS()
 	go runPauseWatchdog()
 	time.Sleep(1500 * time.Millisecond)
@@ -3176,10 +3563,10 @@ func main() {
 			rebalanceFromTrades(tb)
 		}
 	}
-	seedBinanceHistory()
-	seedPairHistory()
+	syncTwinWalkForward()
+	go runTwinWalkForwardLoop()
 	go runPairHeartbeat()
-	fmt.Printf("GO-TOKYO v86 LIVE | Calm RWA Stocks (GOOGL/AMZN/META) + 35s Wick Shield + 45s Basis | Stop=$%.2f\n", StopEqUSD)
+	fmt.Printf("GO-TOKYO v87 LIVE | Path A: 1h-8h WF Twins (PAXG/XAU + US500/SPY) + Path B: L2/Trade Recorder | Stop=$%.2f\n", StopEqUSD)
 	go syncAccountLoop()
-	runBnWS()
+	select {}
 }
