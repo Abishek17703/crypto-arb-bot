@@ -6886,7 +6886,6 @@ func runZeroFeeDnLoop() {
 		actSp := dnActiveSpec
 		specsSnap := dnSpecs
 		usdcAv := dnUsdcAvail
-		usdtAv := dnUsdtAvail
 		dnMu.Unlock()
 
 		if stNow == "IDLE" {
