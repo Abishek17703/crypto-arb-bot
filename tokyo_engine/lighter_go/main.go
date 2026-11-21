@@ -293,6 +293,7 @@ type CarbonOrder struct {
 	SlBps      float64 `json:"slBps"`
 	TpBps      float64 `json:"tpBps"`
 	MaxHoldSec int64   `json:"maxHoldSec"`
+	Strat      string  `json:"strat"`
 }
 
 type CarbonPos struct {
@@ -367,7 +368,7 @@ var (
 	breakerTripped          atomic.Bool
 	l2TicksRecorded         atomic.Int64
 	l2RecCh                 = make(chan string, 4096)
-	enableAutoTwins         = true
+	enableAutoTwins         = false
 	commonList              []*CommonAsset
 	carbonMu                sync.Mutex
 	activeCarbon            *CarbonPos
@@ -4409,15 +4410,27 @@ func runCarbonScanner() {
 						scS++
 					}
 
-					diffL := (la - cs.bnAsk) / cs.bnAsk * 10000.0
-					diffS := (cs.bnBid - lb) / cs.bnBid * 10000.0
+					bas := 0.0
+					if st := mktStates[cs.ca.Sym]; st != nil {
+						st.mu.Lock()
+						if st.basisWarmTicks >= 10 {
+							bas = st.basisBps
+						}
+						st.mu.Unlock()
+					}
+					rawDiffL := (la - cs.bnAsk) / cs.bnAsk * 10000.0
+					rawDiffS := (cs.bnBid - lb) / cs.bnBid * 10000.0
+					adjDiffL := (la - cs.bnAsk*(1.0+bas/10000.0)) / cs.bnAsk * 10000.0
+					adjDiffS := (cs.bnBid*(1.0+bas/10000.0) - lb) / cs.bnBid * 10000.0
+					diffL := math.Min(rawDiffL, adjDiffL)
+					diffS := math.Min(rawDiffS, adjDiffS)
 					if lb <= 0 || la <= lb || lsp > 3.0 || ldep < 200.0 {
 						scL, scS = 0, 0
 					}
-					if diffL > 2.5 {
+					if diffL > 3.0 {
 						scL = 0
 					}
-					if diffS > 2.5 {
+					if diffS > 3.0 {
 						scS = 0
 					}
 
@@ -4459,9 +4472,6 @@ func runCarbonScanner() {
 				snapMu.Unlock()
 				fmt.Printf("[STRAT_SCAN seq=%d] LAG_BEST=%s %+.2fbp/3.2 | TRI_BEST=%s %+.2fbp/4.8 | MOM_BEST=%s %s sc=%d/8\n",
 					seq, lDesc, lEdge, tDesc, tEdge, topR.sym, topR.side, topR.score)
-				if canOpenNewStrat() && topR.score >= 8 && topR.ltSp <= 2.0 && topR.diff <= 0.5 && topR.volR >= 1.1 && topR.depth >= 300.0 {
-					startAutoCarbonSnipe(topR.sym, topR.side, topR.slBps, topR.tpBps, topR.diff)
-				}
 			}
 		}
 		if scanTick%2 == 0 {
@@ -4618,7 +4628,26 @@ func manageCarbonBracket() {
 	}
 	tMid := 0.5 * (lb + la)
 
-	if !cpCopy.TpSent && !cpCopy.Closing {
+	if cpCopy.Closing {
+		if now.Sub(cpCopy.LastCloseAt) >= 1200*time.Millisecond && takeWriteSlotTier(2) {
+			if closeOrd != nil && !closeOrd.IsIOC {
+				cancelPairSide(cpCopy.Sym, closeSide)
+			}
+			exitPx := roundTo(lb*0.995, m.PxDec)
+			if cpCopy.Side == "SHORT" {
+				exitPx = roundTo(la*1.005, m.PxDec)
+			}
+			carbonMu.Lock()
+			if activeCarbon != nil && activeCarbon.ID == cpCopy.ID {
+				activeCarbon.LastCloseAt = now
+			}
+			carbonMu.Unlock()
+			placePairOrder(cpCopy.Sym, closeSide, exitPx, tMid, math.Abs(pos), true, true)
+		}
+		return
+	}
+
+	if !cpCopy.TpSent {
 		tpPx := entry * (1.0 + cpCopy.TpBps/10000.0)
 		if cpCopy.Side == "SHORT" {
 			tpPx = entry * (1.0 - cpCopy.TpBps/10000.0)
@@ -4684,6 +4713,7 @@ func manageCarbonBracket() {
 		carbonMu.Lock()
 		if activeCarbon != nil && activeCarbon.ID == cpCopy.ID {
 			activeCarbon.Closing = true
+			activeCarbon.LastCloseAt = now
 			activeCarbon.CloseReason = reason
 			activeCarbon.LastPnLBps = pnlBps
 		}
@@ -4735,7 +4765,7 @@ func runCarbonCommandLoop() {
 			}
 			ensureLtSubscribed(m.ID)
 			st.mu.Lock()
-			lb, la, bnB, bnA, bnM, bnTS := st.ltBid, st.ltAsk, st.bnBid, st.bnAsk, st.bnMid, st.lastEmaTS
+			lb, la, bnB, bnA, bnM, bnTS, bas, wTicks := st.ltBid, st.ltAsk, st.bnBid, st.bnAsk, st.bnMid, st.lastEmaTS, st.basisBps, st.basisWarmTicks
 			st.mu.Unlock()
 			if lb <= 0 || la <= lb {
 				lb, la, _, _ = fetchLtBookREST(m.ID)
@@ -4749,40 +4779,61 @@ func runCarbonCommandLoop() {
 				fmt.Printf("[CARBON_REJECT id=%d sym=%s reason=WIDE_SPREAD_%.2fbps]\n", co.ID, sym, spBps)
 				continue
 			}
-			overpayBps := (la - bnA) / bnA * 10000.0
+			rawOver := (la - bnA) / bnA * 10000.0
 			if side == "SHORT" {
-				overpayBps = (bnB - lb) / bnB * 10000.0
+				rawOver = (bnB - lb) / bnB * 10000.0
 			}
-			if overpayBps > 2.5 {
+			overpayBps := rawOver
+			if wTicks >= 10 {
+				if side == "LONG" {
+					overpayBps = math.Min(rawOver, rawOver-bas)
+				} else {
+					overpayBps = math.Min(rawOver, rawOver+bas)
+				}
+			}
+			if overpayBps > 3.0 {
 				fmt.Printf("[CARBON_REJECT id=%d sym=%s side=%s reason=OVERPAY_%.2fbps]\n", co.ID, sym, side, overpayBps)
 				continue
 			}
-			usd := math.Min(15.0, math.Max(11.5, co.USD))
-			slBps := math.Min(50.0, math.Max(12.0, co.SlBps))
-			tpBps := math.Max(slBps*2.0, co.TpBps)
+			usd := math.Min(240.0, math.Max(11.5, co.USD))
+			slBps := math.Min(55.0, math.Max(8.0, co.SlBps))
+			tpBps := co.TpBps
+			if tpBps < 5.0 {
+				tpBps = math.Round(slBps * 2.5)
+			}
 			maxHold := co.MaxHoldSec
 			if maxHold <= 0 {
 				maxHold = 900
 			}
 			ordSide := "BID"
-			entryPx := roundTo(la*1.0002, m.PxDec)
+			entryPx := roundTo(la*1.00035, m.PxDec)
 			refPx := la
 			if side == "SHORT" {
 				ordSide = "ASK"
-				entryPx = roundTo(lb*0.9998, m.PxDec)
+				entryPx = roundTo(lb*0.99965, m.PxDec)
 				refPx = lb
 			}
+			stratTag := strings.ToUpper(strings.TrimSpace(co.Strat))
+			if stratTag == "" {
+				stratTag = "BN_MOM_SNIPE"
+			}
+			stratMu.Lock()
+			if stratStats[stratTag] == nil {
+				stratStats[stratTag] = &StratStat{}
+			}
+			stratMu.Unlock()
 			sz := math.Max(m.MinB, roundTo(usd/refPx, m.SzDec))
 			carbonMu.Lock()
 			activeCarbon = &CarbonPos{
 				ID: co.ID, Sym: sym, Side: side, USD: usd, SlBps: slBps, TpBps: tpBps,
-				MaxHoldSec: maxHold, SentAt: time.Now(), EntryPx: refPx, StratTag: "BN_MOM_SNIPE",
+				MaxHoldSec: maxHold, SentAt: time.Now(), EntryPx: refPx, StratTag: stratTag,
 			}
 			carbonMu.Unlock()
-			recordStratOpen(co.ID, "BN_MOM_SNIPE", sym+"_"+side, usd, 1.0, -overpayBps, fmt.Sprintf("manual sl=%.0f tp=%.0f", slBps, tpBps))
+			recordStratOpen(co.ID, stratTag, sym+"_"+side, usd, usd/12.0, -overpayBps,
+				fmt.Sprintf("carbon_pick sl=-%.0f tp=+%.0f hold=%ds", slBps, tpBps, maxHold))
 			placePairOrder(sym, ordSide, entryPx, 0.5*(lb+la), sz, false, true)
-			fmt.Printf("[CARBON_EXEC id=%d sym=%s side=%s usd=%.2f px=%.5f overpay=%+.2fbp sl=-%.0f tp=+%.0f hold=%ds]\n",
-				co.ID, sym, side, usd, refPx, overpayBps, slBps, tpBps, maxHold)
+			fmt.Printf("[CARBON_EXEC id=%d sym=%s side=%s strat=%s usd=%.2f px=%.5f overpay=%+.2fbp sl=-%.0f tp=+%.0f hold=%ds]\n",
+				co.ID, sym, side, stratTag, usd, refPx, overpayBps, slBps, tpBps, maxHold)
 		}
 	}
 }
@@ -5131,10 +5182,7 @@ func evaluateFastStrategies() {
 	}
 	var cands []fastCand
 	bestLagDesc := "none"
-	bestLagSym := ""
-	bestLagSide := ""
 	bestLagEdge := -999.0
-	var bestLagCand *fastCand
 
 	for _, ca := range commonList {
 		if ca.LtVol24h < 500000.0 || ca.BnVol24h < 15000000.0 || !isSymTradeable24hOrOpen(ca.Sym, now) {
@@ -5169,28 +5217,18 @@ func evaluateFastStrategies() {
 			ltSp: ltSp, depth: ldep, longAlpha: laEdge, shortAlpha: saEdge, imp3s: i3, imp20s: i20,
 		}
 		cands = append(cands, fc)
-		idx := len(cands) - 1
 		if laEdge > bestLagEdge {
 			bestLagEdge = laEdge
-			bestLagSym = ca.Sym
-			bestLagSide = "LONG"
 			bestLagDesc = ca.Sym + "_LONG"
-			bestLagCand = &cands[idx]
 		}
 		if saEdge > bestLagEdge {
 			bestLagEdge = saEdge
-			bestLagSym = ca.Sym
-			bestLagSide = "SHORT"
 			bestLagDesc = ca.Sym + "_SHORT"
-			bestLagCand = &cands[idx]
 		}
 	}
 
 	bestTriDesc := "none"
 	bestTriEdge := -999.0
-	var triL, triS *fastCand
-	bestActTriEdge := -999.0
-	var actTriL, actTriS *fastCand
 
 	for i := range cands {
 		ci := &cands[i]
@@ -5229,16 +5267,9 @@ func evaluateFastStrategies() {
 			if edge > bestTriEdge {
 				bestTriEdge = edge
 				bestTriDesc = ci.ca.Sym + "/" + cj.ca.Sym
-				triL, triS = ci, cj
-			}
-			if edge >= 4.8 && (ci.imp3s-cj.imp3s) >= 2.0 && edge > bestActTriEdge {
-				bestActTriEdge = edge
-				actTriL, actTriS = ci, cj
 			}
 		}
 	}
-	_ = triL
-	_ = triS
 	if bestLagEdge < -900 {
 		bestLagEdge = 0
 	}
@@ -5252,78 +5283,7 @@ func evaluateFastStrategies() {
 	snapTriDesc = bestTriDesc
 	snapTriEdge = bestTriEdge
 	snapMu.Unlock()
-
-	if !canOpenNewStrat() {
-		return
-	}
-	mult, curEq := calcCapMult()
-
-	if actTriL != nil && actTriS != nil && bestActTriEdge >= 4.8 {
-		minDepth := math.Min(actTriL.depth, actTriS.depth)
-		legUSD := math.Min(math.Min(280.0, curEq*3.0), math.Max(120.0, curEq*1.55*mult))
-		legUSD = math.Min(legUSD, 0.35*minDepth)
-		if legUSD >= 95.0 && actTriL.topAskUSD >= legUSD*1.3 && actTriS.topBidUSD >= legUSD*1.3 && takeWriteSlot(false) {
-			mL, okL := markets[actTriL.ca.Sym]
-			mS, okS := markets[actTriS.ca.Sym]
-			if okL && okS {
-				ensureLtSubscribed(mL.ID)
-				ensureLtSubscribed(mS.ID)
-				pxL := roundTo(actTriL.la*1.00035, mL.PxDec)
-				pxS := roundTo(actTriS.lb*0.99965, mS.PxDec)
-				szL := math.Max(mL.MinB, roundTo(legUSD/actTriL.la, mL.SzDec))
-				szS := math.Max(mS.MinB, roundTo(legUSD/actTriS.lb, mS.SzDec))
-				oid := coiSeq.Add(1)
-				legs := actTriL.ca.Sym + "_L/" + actTriS.ca.Sym + "_S"
-				openMu.Lock()
-				activeOpen = &ActiveOpenPos{
-					ID: oid, Mode: "TRI_EQUALIZE", SymA: actTriL.ca.Sym, SideA: "LONG", SymB: actTriS.ca.Sym,
-					LegUSD: legUSD, EdgeBps: bestActTriEdge, Mult: mult, TpBps: 5.2, SlBps: 14.0,
-					SentAt: now, EntryPxA: actTriL.la, EntryPxB: actTriS.lb,
-				}
-				openMu.Unlock()
-				recordStratOpen(oid, "TRI_EQUALIZE", legs, legUSD, mult, bestActTriEdge,
-					fmt.Sprintf("lEdge=%+.2f sEdge=%+.2f impDiff=%+.2f", actTriL.longAlpha, actTriS.shortAlpha, actTriL.imp3s-actTriS.imp3s))
-				fireDualIOC("TRI", actTriL.ca.Sym, "BID", pxL, 0.5*(actTriL.lb+actTriL.la), szL,
-					actTriS.ca.Sym, "ASK", pxS, 0.5*(actTriS.lb+actTriS.la), szS, false)
-				return
-			}
-		}
-	}
-
-	if bestLagCand != nil && bestLagEdge >= 3.2 {
-		dirOK := (bestLagSide == "LONG" && bestLagCand.imp3s >= 2.2 && bestLagCand.imp20s >= 2.5) ||
-			(bestLagSide == "SHORT" && bestLagCand.imp3s <= -2.2 && bestLagCand.imp20s <= -2.5)
-		usd := math.Min(math.Min(240.0, curEq*2.5), math.Max(45.0, curEq*0.85*mult))
-		usd = math.Min(usd, 0.35*bestLagCand.depth)
-		topOK := (bestLagSide == "LONG" && bestLagCand.topAskUSD >= usd*1.2) || (bestLagSide == "SHORT" && bestLagCand.topBidUSD >= usd*1.2)
-		if dirOK && topOK && usd >= 35.0 && bestLagCand.depth >= usd*1.4 && takeWriteSlot(false) {
-			m, ok := markets[bestLagSym]
-			if ok {
-				ensureLtSubscribed(m.ID)
-				ordSide := "BID"
-				entryPx := roundTo(bestLagCand.la*1.00035, m.PxDec)
-				refPx := bestLagCand.la
-				if bestLagSide == "SHORT" {
-					ordSide = "ASK"
-					entryPx = roundTo(bestLagCand.lb*0.99965, m.PxDec)
-					refPx = bestLagCand.lb
-				}
-				sz := math.Max(m.MinB, roundTo(usd/refPx, m.SzDec))
-				tpBps := math.Min(14.0, math.Max(5.5, bestLagEdge+3.0))
-				oid := coiSeq.Add(1)
-				openMu.Lock()
-				activeOpen = &ActiveOpenPos{
-					ID: oid, Mode: "BN_LAG_ARB", SymA: bestLagSym, SideA: bestLagSide,
-					LegUSD: usd, EdgeBps: bestLagEdge, Mult: mult, TpBps: tpBps, SlBps: 11.0,
-					SentAt: now, EntryPxA: refPx,
-				}
-				openMu.Unlock()
-				recordStratOpen(oid, "BN_LAG_ARB", bestLagSym+"_"+bestLagSide, usd, mult, bestLagEdge,
-					fmt.Sprintf("imp3s=%+.2f imp20s=%+.2f tp=+%.1f", bestLagCand.imp3s, bestLagCand.imp20s, tpBps))
-				placePairOrder(bestLagSym, ordSide, entryPx, 0.5*(bestLagCand.lb+bestLagCand.la), sz, false, true)
-			}
-		}
-	}
+	return // v91.0: Read-only radar for Gemini Carbon; zero fixed auto-orders
 }
 
 func manageActiveOpenStrat() {
@@ -5749,7 +5709,7 @@ func main() {
 	go runOpenStratLoop()
 	go runCarbonScanner()
 	go runCarbonCommandLoop()
-	fmt.Printf("GO-TOKYO v90.1 LIVE | Open Multi-Strategy (BN_LAG_ARB + TRI_EQUALIZE + TWIN_EQUALIZE + BN_MOM_SNIPE) + CapMult + Journal | Stop=$%.2f\n", StopEqUSD)
+	fmt.Printf("GO-TOKYO v91.0 LIVE | 100%% Gemini Carbon Personal-Pick Mode (Zero Auto-Rules, 132 Assets + Radar + Journal) | Stop=$%.2f\n", StopEqUSD)
 	go syncAccountLoop()
 	select {}
 }

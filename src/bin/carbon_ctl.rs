@@ -39,6 +39,8 @@ enum Cmd {
         tp_bps: f64,
         #[arg(default_value_t = 900)]
         max_hold_sec: i64,
+        #[arg(default_value = "BN_MOM_SNIPE")]
+        strat: String,
     },
     WaitScan {
         #[arg(default_value_t = 0)]
@@ -252,6 +254,33 @@ fn parse_scan_seq(log: &str) -> (i64, i64) {
     (max_seq, max_score)
 }
 
+fn sync_journal(log: &str) {
+    use std::io::Write;
+    let j_path = "strategy_journal.log";
+    let existing = std::fs::read_to_string(j_path).unwrap_or_default();
+    let mut seen: std::collections::HashSet<&str> = existing.lines().collect();
+    if existing.is_empty() {
+        let _ = std::fs::write(j_path, "# GO-TOKYO v91.0 Strategy Journal (Auto-Synced)\n");
+    }
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(j_path) {
+        let mut board_latest: Option<&str> = None;
+        for l in log.lines() {
+            if l.contains("[STRAT_BOARD") {
+                board_latest = Some(l);
+            }
+            if (l.contains("[STRAT_OPEN") || l.contains("[STRAT_CLOSE")) && !seen.contains(l) {
+                let _ = writeln!(f, "{l}");
+                seen.insert(l);
+            }
+        }
+        if let Some(bl) = board_latest {
+            if !seen.contains(bl) {
+                let _ = writeln!(f, "{bl}");
+            }
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() {
     let _ = tokio_rustls::rustls::crypto::ring::default_provider().install_default();
@@ -276,34 +305,11 @@ async fn main() {
         },
         Cmd::Strategies => match tokio::join!(fetch_json(S3_TEL_URL), acct_snapshot()) {
             (Ok(tel), Ok((eq, open))) => {
-                use std::io::Write;
                 let paused = tel["hftTest"]["userPaused"].as_bool().unwrap_or(false);
                 let age_s = (now_ms() - tel["ts"].as_i64().unwrap_or(0)) as f64 / 1000.0;
                 println!("Eq=${eq:.4} | userPaused={paused} | s3_age={age_s:.1}s | Open={open:?}");
                 let log = tel["lighterLog"].as_str().unwrap_or("");
-                let j_path = "strategy_journal.log";
-                let existing = std::fs::read_to_string(j_path).unwrap_or_default();
-                let mut seen: std::collections::HashSet<&str> = existing.lines().collect();
-                if existing.is_empty() {
-                    let _ = std::fs::write(j_path, "# GO-TOKYO v90.0 Strategy Journal (Auto-Synced)\n");
-                }
-                if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(j_path) {
-                    let mut board_latest: Option<&str> = None;
-                    for l in log.lines() {
-                        if l.contains("[STRAT_BOARD") {
-                            board_latest = Some(l);
-                        }
-                        if (l.contains("[STRAT_OPEN") || l.contains("[STRAT_CLOSE")) && !seen.contains(l) {
-                            let _ = writeln!(f, "{l}");
-                            seen.insert(l);
-                        }
-                    }
-                    if let Some(bl) = board_latest {
-                        if !seen.contains(bl) {
-                            let _ = writeln!(f, "{bl}");
-                        }
-                    }
-                }
+                sync_journal(log);
                 let mut shown: Vec<&str> = log
                     .lines()
                     .filter(|l| {
@@ -409,8 +415,11 @@ async fn main() {
             sl_bps,
             tp_bps,
             max_hold_sec,
+            strat,
         } => {
             let oid = now_ms();
+            let usd_clamped = usd.clamp(11.5, 240.0);
+            let strat_up = strat.to_uppercase();
             let payload = json!({
                 "paused": false,
                 "ts": oid,
@@ -418,17 +427,18 @@ async fn main() {
                     "id": oid,
                     "sym": sym.to_uppercase(),
                     "side": side.to_uppercase(),
-                    "usd": usd.clamp(11.5, 15.0),
+                    "usd": usd_clamped,
                     "slBps": sl_bps,
                     "tpBps": tp_bps,
-                    "maxHoldSec": max_hold_sec
+                    "maxHoldSec": max_hold_sec,
+                    "strat": strat_up
                 }
             });
             match put_pause_control(payload).await {
                 Ok(_) => {
                     println!(
-                        "ORDER_SENT id={oid} sym={} side={} usd={:.2} sl={:.1}bps tp={:.1}bps hold={}s",
-                        sym.to_uppercase(), side.to_uppercase(), usd.clamp(11.5, 15.0), sl_bps, tp_bps, max_hold_sec
+                        "ORDER_SENT id={oid} sym={} side={} strat={} usd={usd_clamped:.2} sl={sl_bps:.1}bps tp={tp_bps:.1}bps hold={max_hold_sec}s",
+                        sym.to_uppercase(), side.to_uppercase(), strat_up
                     );
                     0
                 }
@@ -446,22 +456,30 @@ async fn main() {
                 if let (Ok(tel), Ok((eq, open))) = tokio::join!(fetch_json(S3_TEL_URL), acct_snapshot()) {
                     let log = tel["lighterLog"].as_str().unwrap_or("");
                     let (seq, top_sc) = parse_scan_seq(log);
-                    if seq > min_seq && (top_sc >= 7 || (min_seq == 0 && ticks >= 2) || ticks >= 30) {
+                    if seq > min_seq && (top_sc >= 7 || (min_seq == 0 && ticks >= 2) || ticks >= 225) {
                         println!("SCAN_READY Eq=${eq:.4} seq={seq} topScore={top_sc} Open={open:?}");
-                        for l in log.lines() {
-                            if l.contains("[CARBON_SCAN") || l.contains("GO-TOKYO v") || l.contains("[DISCOVER]") || l.contains("[STRAT_") {
-                                println!("{l}");
-                            }
+                        let matched: Vec<&str> = log
+                            .lines()
+                            .filter(|l| {
+                                l.contains("[CARBON_SCAN")
+                                    || l.contains("[STRAT_SCAN")
+                                    || l.contains("[STRAT_BOARD")
+                                    || l.contains("GO-TOKYO v")
+                            })
+                            .collect();
+                        let start = matched.len().saturating_sub(6);
+                        for l in &matched[start..] {
+                            println!("{l}");
                         }
                         rc = 0;
                         break;
                     }
                 }
-                if ticks >= 30 {
+                if ticks >= 225 {
                     rc = 1;
                     break;
                 }
-                tokio::time::sleep(Duration::from_secs(6)).await;
+                tokio::time::sleep(Duration::from_secs(8)).await;
             }
             rc
         }
@@ -478,9 +496,10 @@ async fn main() {
                     }
                     let closed_tag = format!("[CARBON_CLOSED id={order_id}");
                     if log.contains(&closed_tag) || (saw_open && open.is_empty()) || loops >= 200 {
+                        sync_journal(log);
                         println!("TRADE_DONE id={order_id} Eq=${eq:.4} Open={open:?}");
                         for l in log.lines() {
-                            if l.contains(&format!("id={order_id}")) || l.contains("[CARBON_") {
+                            if l.contains(&format!("id={order_id}")) || l.contains("[CARBON_") || l.contains("[STRAT_") {
                                 println!("{l}");
                             }
                         }
