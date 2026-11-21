@@ -311,6 +311,7 @@ type CarbonPos struct {
 	StratTag    string
 	CloseReason string
 	LastPnLBps  float64
+	LastCloseAt time.Time
 }
 
 type StratStat struct {
@@ -342,6 +343,7 @@ type ActiveOpenPos struct {
 	CoolSec     int64
 	LastPnlBps  float64
 	LastPnlUSD  float64
+	LastCloseAt time.Time
 }
 
 var (
@@ -4455,7 +4457,7 @@ func runCarbonScanner() {
 				lDesc, lEdge := snapLagDesc, snapLagEdge
 				tDesc, tEdge := snapTriDesc, snapTriEdge
 				snapMu.Unlock()
-				fmt.Printf("[STRAT_SCAN seq=%d] LAG_BEST=%s %+.2fbp/3.2 | TRI_BEST=%s %+.2fbp/3.8 | MOM_BEST=%s %s sc=%d/8\n",
+				fmt.Printf("[STRAT_SCAN seq=%d] LAG_BEST=%s %+.2fbp/3.2 | TRI_BEST=%s %+.2fbp/4.8 | MOM_BEST=%s %s sc=%d/8\n",
 					seq, lDesc, lEdge, tDesc, tEdge, topR.sym, topR.side, topR.score)
 				if canOpenNewStrat() && topR.score >= 8 && topR.ltSp <= 2.0 && topR.diff <= 0.5 && topR.volR >= 1.1 && topR.depth >= 300.0 {
 					startAutoCarbonSnipe(topR.sym, topR.side, topR.slBps, topR.tpBps, topR.diff)
@@ -5118,6 +5120,8 @@ func evaluateFastStrategies() {
 	type fastCand struct {
 		ca         *CommonAsset
 		lb, la     float64
+		topBidUSD  float64
+		topAskUSD  float64
 		ltSp       float64
 		depth      float64
 		longAlpha  float64
@@ -5141,7 +5145,7 @@ func evaluateFastStrategies() {
 			continue
 		}
 		st.mu.Lock()
-		lb, la, ldep := st.ltBid, st.ltAsk, math.Min(st.ltBidDepthUSD, st.ltAskDepthUSD)
+		lb, la, lbSz, laSz, ldep := st.ltBid, st.ltAsk, st.ltBidSz, st.ltAskSz, math.Min(st.ltBidDepthUSD, st.ltAskDepthUSD)
 		bb, ba, bm, eu, ef, bas := st.bnBid, st.bnAsk, st.bnMid, st.emaUltra, st.emaFast, st.basisBps
 		ltAge, bnAge, wTicks := now.Sub(st.lastBookTS), now.Sub(st.lastEmaTS), st.basisWarmTicks
 		st.mu.Unlock()
@@ -5161,8 +5165,8 @@ func evaluateFastStrategies() {
 		i3 := (bm - eu) / eu * 10000.0
 		i20 := (bm - ef) / ef * 10000.0
 		fc := fastCand{
-			ca: ca, lb: lb, la: la, ltSp: ltSp, depth: ldep,
-			longAlpha: laEdge, shortAlpha: saEdge, imp3s: i3, imp20s: i20,
+			ca: ca, lb: lb, la: la, topBidUSD: lb * lbSz, topAskUSD: la * laSz,
+			ltSp: ltSp, depth: ldep, longAlpha: laEdge, shortAlpha: saEdge, imp3s: i3, imp20s: i20,
 		}
 		cands = append(cands, fc)
 		idx := len(cands) - 1
@@ -5227,7 +5231,7 @@ func evaluateFastStrategies() {
 				bestTriDesc = ci.ca.Sym + "/" + cj.ca.Sym
 				triL, triS = ci, cj
 			}
-			if edge >= 3.8 && (ci.imp3s-cj.imp3s) >= 1.8 && edge > bestActTriEdge {
+			if edge >= 4.8 && (ci.imp3s-cj.imp3s) >= 2.0 && edge > bestActTriEdge {
 				bestActTriEdge = edge
 				actTriL, actTriS = ci, cj
 			}
@@ -5254,18 +5258,18 @@ func evaluateFastStrategies() {
 	}
 	mult, curEq := calcCapMult()
 
-	if actTriL != nil && actTriS != nil && bestActTriEdge >= 3.8 {
+	if actTriL != nil && actTriS != nil && bestActTriEdge >= 4.8 {
 		minDepth := math.Min(actTriL.depth, actTriS.depth)
 		legUSD := math.Min(math.Min(280.0, curEq*3.0), math.Max(120.0, curEq*1.55*mult))
 		legUSD = math.Min(legUSD, 0.35*minDepth)
-		if legUSD >= 95.0 && takeWriteSlot(false) {
+		if legUSD >= 95.0 && actTriL.topAskUSD >= legUSD*1.3 && actTriS.topBidUSD >= legUSD*1.3 && takeWriteSlot(false) {
 			mL, okL := markets[actTriL.ca.Sym]
 			mS, okS := markets[actTriS.ca.Sym]
 			if okL && okS {
 				ensureLtSubscribed(mL.ID)
 				ensureLtSubscribed(mS.ID)
-				pxL := roundTo(actTriL.la*1.00015, mL.PxDec)
-				pxS := roundTo(actTriS.lb*0.99985, mS.PxDec)
+				pxL := roundTo(actTriL.la*1.00035, mL.PxDec)
+				pxS := roundTo(actTriS.lb*0.99965, mS.PxDec)
 				szL := math.Max(mL.MinB, roundTo(legUSD/actTriL.la, mL.SzDec))
 				szS := math.Max(mS.MinB, roundTo(legUSD/actTriS.lb, mS.SzDec))
 				oid := coiSeq.Add(1)
@@ -5291,16 +5295,17 @@ func evaluateFastStrategies() {
 			(bestLagSide == "SHORT" && bestLagCand.imp3s <= -2.2 && bestLagCand.imp20s <= -2.5)
 		usd := math.Min(math.Min(240.0, curEq*2.5), math.Max(45.0, curEq*0.85*mult))
 		usd = math.Min(usd, 0.35*bestLagCand.depth)
-		if dirOK && usd >= 35.0 && bestLagCand.depth >= usd*1.4 && takeWriteSlot(false) {
+		topOK := (bestLagSide == "LONG" && bestLagCand.topAskUSD >= usd*1.2) || (bestLagSide == "SHORT" && bestLagCand.topBidUSD >= usd*1.2)
+		if dirOK && topOK && usd >= 35.0 && bestLagCand.depth >= usd*1.4 && takeWriteSlot(false) {
 			m, ok := markets[bestLagSym]
 			if ok {
 				ensureLtSubscribed(m.ID)
 				ordSide := "BID"
-				entryPx := roundTo(bestLagCand.la*1.0002, m.PxDec)
+				entryPx := roundTo(bestLagCand.la*1.00035, m.PxDec)
 				refPx := bestLagCand.la
 				if bestLagSide == "SHORT" {
 					ordSide = "ASK"
-					entryPx = roundTo(bestLagCand.lb*0.9998, m.PxDec)
+					entryPx = roundTo(bestLagCand.lb*0.99965, m.PxDec)
 					refPx = bestLagCand.lb
 				}
 				sz := math.Max(m.MinB, roundTo(usd/refPx, m.SzDec))
@@ -5381,26 +5386,52 @@ func manageActiveOpenStrat() {
 			return
 		}
 
-		// <=550ms Asymmetric Fill Guard: never hold 1 naked leg!
-		if !ap.Closing && age >= 550*time.Millisecond && ((usdA >= 8.0 && usdB < 5.0) || (usdB >= 8.0 && usdA < 5.0) || math.Abs(posA*midA+posB*midB) >= math.Max(20.0, ap.LegUSD*0.45)) {
-			if takeWriteSlotTier(2) {
+		if ap.Closing {
+			if now.Sub(ap.LastCloseAt) >= 1200*time.Millisecond && takeWriteSlotTier(2) {
+				openMu.Lock()
+				if activeOpen != nil && activeOpen.ID == ap.ID {
+					activeOpen.LastCloseAt = now
+				}
+				openMu.Unlock()
 				if !flatA {
 					if posA > 0 {
-						placePairOrder(ap.SymA, "ASK", roundTo(lbA*0.996, mA.PxDec), midA, math.Abs(posA), true, true)
+						placePairOrder(ap.SymA, "ASK", roundTo(lbA*0.995, mA.PxDec), midA, math.Abs(posA), true, true)
 					} else {
-						placePairOrder(ap.SymA, "BID", roundTo(laA*1.004, mA.PxDec), midA, math.Abs(posA), true, true)
+						placePairOrder(ap.SymA, "BID", roundTo(laA*1.005, mA.PxDec), midA, math.Abs(posA), true, true)
 					}
 				}
 				if !flatB {
 					if posB > 0 {
-						placePairOrder(ap.SymB, "ASK", roundTo(lbB*0.996, mB.PxDec), midB, math.Abs(posB), true, true)
+						placePairOrder(ap.SymB, "ASK", roundTo(lbB*0.995, mB.PxDec), midB, math.Abs(posB), true, true)
 					} else {
-						placePairOrder(ap.SymB, "BID", roundTo(laB*1.004, mB.PxDec), midB, math.Abs(posB), true, true)
+						placePairOrder(ap.SymB, "BID", roundTo(laB*1.005, mB.PxDec), midB, math.Abs(posB), true, true)
+					}
+				}
+			}
+			return
+		}
+
+		// <=550ms Asymmetric Fill Guard: never hold 1 naked leg!
+		if age >= 550*time.Millisecond && ((usdA >= 8.0 && usdB < 5.0) || (usdB >= 8.0 && usdA < 5.0) || math.Abs(posA*midA+posB*midB) >= math.Max(20.0, ap.LegUSD*0.45)) {
+			if takeWriteSlotTier(2) {
+				if !flatA {
+					if posA > 0 {
+						placePairOrder(ap.SymA, "ASK", roundTo(lbA*0.995, mA.PxDec), midA, math.Abs(posA), true, true)
+					} else {
+						placePairOrder(ap.SymA, "BID", roundTo(laA*1.005, mA.PxDec), midA, math.Abs(posA), true, true)
+					}
+				}
+				if !flatB {
+					if posB > 0 {
+						placePairOrder(ap.SymB, "ASK", roundTo(lbB*0.995, mB.PxDec), midB, math.Abs(posB), true, true)
+					} else {
+						placePairOrder(ap.SymB, "BID", roundTo(laB*1.005, mB.PxDec), midB, math.Abs(posB), true, true)
 					}
 				}
 				openMu.Lock()
 				if activeOpen != nil && activeOpen.ID == ap.ID {
 					activeOpen.Closing = true
+					activeOpen.LastCloseAt = now
 					activeOpen.CloseReason = "ASYM_LEG_GUARD"
 					activeOpen.CloseBps = -2.0
 					activeOpen.CloseUSD = -math.Max(usdA, usdB) * 0.0002
@@ -5455,18 +5486,19 @@ func manageActiveOpenStrat() {
 			reason = "MAX_HOLD"
 		}
 
-		if reason != "" && (!ap.Closing || age >= 2*time.Second) && takeWriteSlotTier(2) {
+		if reason != "" && takeWriteSlotTier(2) {
 			openMu.Lock()
 			if activeOpen != nil && activeOpen.ID == ap.ID {
 				activeOpen.Closing = true
+				activeOpen.LastCloseAt = now
 				activeOpen.CloseReason = reason
 				activeOpen.CloseBps = execNetBps
 				activeOpen.CloseUSD = pnlUSD
 				activeOpen.CoolSec = cool
 			}
 			openMu.Unlock()
-			fireDualIOC("TRI_CLOSE", ap.SymA, "ASK", roundTo(lbA*0.996, mA.PxDec), midA, math.Abs(posA),
-				ap.SymB, "BID", roundTo(laB*1.004, mB.PxDec), midB, math.Abs(posB), true)
+			fireDualIOC("TRI_CLOSE", ap.SymA, "ASK", roundTo(lbA*0.995, mA.PxDec), midA, math.Abs(posA),
+				ap.SymB, "BID", roundTo(laB*1.005, mB.PxDec), midB, math.Abs(posB), true)
 		}
 		return
 	}
@@ -5533,7 +5565,26 @@ func manageActiveOpenStrat() {
 	}
 	tMid := 0.5 * (lb + la)
 
-	if !ap.TpSent && !ap.Closing {
+	if ap.Closing {
+		if now.Sub(ap.LastCloseAt) >= 1200*time.Millisecond && takeWriteSlotTier(2) {
+			if closeOrd != nil && !closeOrd.IsIOC {
+				cancelPairSide(ap.SymA, closeSide)
+			}
+			exitPx := roundTo(lb*0.995, m.PxDec)
+			if ap.SideA == "SHORT" {
+				exitPx = roundTo(la*1.005, m.PxDec)
+			}
+			openMu.Lock()
+			if activeOpen != nil && activeOpen.ID == ap.ID {
+				activeOpen.LastCloseAt = now
+			}
+			openMu.Unlock()
+			placePairOrder(ap.SymA, closeSide, exitPx, tMid, math.Abs(pos), true, true)
+		}
+		return
+	}
+
+	if !ap.TpSent {
 		tpPx := entry * (1.0 + ap.TpBps/10000.0)
 		if ap.SideA == "SHORT" {
 			tpPx = entry * (1.0 - ap.TpBps/10000.0)
@@ -5602,17 +5653,18 @@ func manageActiveOpenStrat() {
 		reason = "MAX_HOLD"
 	}
 
-	if reason != "" && (!ap.Closing || age >= 2*time.Second) && takeWriteSlotTier(2) {
+	if reason != "" && takeWriteSlotTier(2) {
 		if closeOrd != nil && !closeOrd.IsIOC {
 			cancelPairSide(ap.SymA, closeSide)
 		}
-		exitPx := roundTo(lb*0.996, m.PxDec)
+		exitPx := roundTo(lb*0.995, m.PxDec)
 		if ap.SideA == "SHORT" {
-			exitPx = roundTo(la*1.004, m.PxDec)
+			exitPx = roundTo(la*1.005, m.PxDec)
 		}
 		openMu.Lock()
 		if activeOpen != nil && activeOpen.ID == ap.ID {
 			activeOpen.Closing = true
+			activeOpen.LastCloseAt = now
 			activeOpen.CloseReason = reason
 			activeOpen.CloseBps = pnlBps
 			activeOpen.CloseUSD = pnlUSD
@@ -5697,7 +5749,7 @@ func main() {
 	go runOpenStratLoop()
 	go runCarbonScanner()
 	go runCarbonCommandLoop()
-	fmt.Printf("GO-TOKYO v90.0 LIVE | Open Multi-Strategy (BN_LAG_ARB + TRI_EQUALIZE + TWIN_EQUALIZE + BN_MOM_SNIPE) + CapMult + Journal | Stop=$%.2f\n", StopEqUSD)
+	fmt.Printf("GO-TOKYO v90.1 LIVE | Open Multi-Strategy (BN_LAG_ARB + TRI_EQUALIZE + TWIN_EQUALIZE + BN_MOM_SNIPE) + CapMult + Journal | Stop=$%.2f\n", StopEqUSD)
 	go syncAccountLoop()
 	select {}
 }
