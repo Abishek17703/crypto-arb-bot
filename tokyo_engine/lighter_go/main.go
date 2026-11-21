@@ -2123,7 +2123,9 @@ func runLtWS() {
 		for _, m := range markets {
 			if m.AllowEntry {
 				_ = conn.WriteJSON(map[string]any{"type": "subscribe", "channel": fmt.Sprintf("order_book/%d", m.ID)})
-				_ = conn.WriteJSON(map[string]any{"type": "subscribe", "channel": fmt.Sprintf("trade/%d", m.ID)})
+				if m.Sym == "BTC" || m.Sym == "ETH" || m.Sym == "SOL" || m.Sym == "PAXG" || m.Sym == "XAU" || m.Sym == "SPY" || m.Sym == "US500" {
+					_ = conn.WriteJSON(map[string]any{"type": "subscribe", "channel": fmt.Sprintf("trade/%d", m.ID)})
+				}
 				subbedMids[m.ID] = true
 			}
 		}
@@ -3819,7 +3821,7 @@ func discoverCommonAssets() {
 		markets[sym] = m
 	}
 	for i, ca := range found {
-		allowWS := i < 45 || ca.Sym == "PAXG" || ca.Sym == "XAU"
+		allowWS := i < 60 || ca.Sym == "PAXG" || ca.Sym == "XAU"
 		curM, exists := markets[ca.Sym]
 		if exists {
 			allowWS = allowWS || curM.AllowEntry
@@ -3879,9 +3881,11 @@ func runBnAllBookTickerWS() {
 				break
 			}
 			var ev struct {
-				S string `json:"s"`
-				B string `json:"b"`
-				A string `json:"a"`
+				S  string `json:"s"`
+				B  string `json:"b"`
+				BQ string `json:"B"`
+				A  string `json:"a"`
+				AQ string `json:"A"`
 			}
 			if json.Unmarshal(msg, &ev) != nil || !strings.HasSuffix(ev.S, "USDT") {
 				continue
@@ -4005,20 +4009,30 @@ func runCarbonScanner() {
 			now := time.Now()
 			var stage1 []candScore
 			for _, ca := range commonList {
+				if ca.LtVol24h < 500000.0 || ca.BnVol24h < 15000000.0 {
+					continue
+				}
 				st := mktStates[ca.Sym]
 				if st == nil {
 					continue
 				}
 				st.mu.Lock()
 				bm, bb, ba, ef, es, ts := st.bnMid, st.bnBid, st.bnAsk, st.emaFast, st.emaSlow, st.lastEmaTS
+				lb, la, ldep := st.ltBid, st.ltAsk, math.Min(st.ltBidDepthUSD, st.ltAskDepthUSD)
+				ltFresh := !st.lastBookTS.IsZero() && now.Sub(st.lastBookTS) < 20*time.Second && lb > 0 && la > lb
 				st.mu.Unlock()
-				if bm <= 0 || ef <= 0 || es <= 0 || now.Sub(ts) > 25*time.Second {
+				if bm <= 0 || ef <= 0 || es <= 0 || now.Sub(ts) > 25*time.Second || !ltFresh {
+					continue
+				}
+				ltSp := (la - lb) / (0.5 * (lb + la)) * 10000.0
+				unitDiff := math.Abs(0.5*(lb+la)-bm) / bm * 10000.0
+				if ltSp > 3.0 || unitDiff > 15.0 || ldep < 200.0 {
 					continue
 				}
 				i20 := (bm - ef) / ef * 10000.0
 				i3m := (bm - es) / es * 10000.0
 				rk := math.Abs(i20) + 0.5*math.Abs(i3m)
-				if ca.LtVol24h >= 1000000.0 {
+				if ca.LtVol24h >= 5000000.0 {
 					rk += 2.0
 				}
 				stage1 = append(stage1, candScore{ca: ca, rank: rk, bnBid: bb, bnAsk: ba, bnMid: bm, imp20s: i20, imp3m: i3m})
@@ -4607,7 +4621,7 @@ func main() {
 	}
 	go runCarbonScanner()
 	go runCarbonCommandLoop()
-	fmt.Printf("GO-TOKYO v89 LIVE | Carbon Sniper (1:2-1:3 RR, $12 test, %d Common Assets) + L2 Recorder | Stop=$%.2f\n", len(commonList), StopEqUSD)
+	fmt.Printf("GO-TOKYO v89.1 LIVE | Carbon Sniper (1:2-1:3 RR, $12 test, %d Common Assets) + L2 Recorder | Stop=$%.2f\n", len(commonList), StopEqUSD)
 	go syncAccountLoop()
 	select {}
 }
