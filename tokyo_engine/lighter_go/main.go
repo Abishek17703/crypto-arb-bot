@@ -849,9 +849,6 @@ func runLtWS() {
 			continue
 		}
 		setConnNoDelay(conn)
-		dnMu.Lock()
-		dnSnap := append([]DnSpec(nil), dnSpecs...)
-		dnMu.Unlock()
 
 		wsMu.Lock()
 		ltConn = conn
