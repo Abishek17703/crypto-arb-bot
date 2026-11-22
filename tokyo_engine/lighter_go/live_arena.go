@@ -18,10 +18,10 @@ import (
 )
 
 const (
-	LiveArenaVer       = "LIVE-MICRO-v105.5-WALLET-EXACT"
-	Baseline3VenueUSD  = 306.8293 // Exact pre-launch cash ($91.6889 LT + $165.1504 BN Perp + $49.9900 Aster)
+	LiveArenaVer       = "LIVE-MICRO-v105.6-WALLET-EXACT"
+	Baseline3VenueUSD  = 224.2121 // True 3-venue Perp cash baseline ($91.6889 LT + $82.5332 BN Multi-Asset Perp + $49.9900 Aster)
 	StratStopLossUSD   = -1.50    // Auto-halt individual strategy if realized+unrealized drops <= -$1.50
-	GlobalStopLossUSD  = -6.50    // Auto-flatten & S3-pause ALL live strategies at <= -$6.50 ($300.33 Perp floor)
+	GlobalStopLossUSD  = -6.50    // Auto-flatten & S3-pause ALL live strategies at <= -$6.50 ($217.71 true Perp floor)
 	MaxLtTxPerMin      = 48       // Strict guard below #770015 Standard 60 tx/min quota
 )
 
