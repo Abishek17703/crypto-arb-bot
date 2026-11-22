@@ -515,33 +515,6 @@ func isSymUsedByAnySlot(sym, excludeSlotKey string) bool {
 	return false
 }
 
-func waitLtPositionFill(sym string, minB float64, timeout time.Duration) (pos, avgPx float64) {
-	t0 := time.Now()
-	deadline := t0.Add(timeout)
-	restChecked := false
-	for time.Now().Before(deadline) {
-		if st := mktStates[sym]; st != nil {
-			st.mu.Lock()
-			p, ae := st.pos, st.avgEntry
-			st.mu.Unlock()
-			if math.Abs(p) >= minB {
-				return p, ae
-			}
-		}
-		if !restChecked && time.Since(t0) >= 480*time.Millisecond {
-			restChecked = true
-			if rp, rae := fetchLtPosREST(sym); math.Abs(rp) >= minB {
-				return rp, rae
-			}
-		}
-		select {
-		case <-ltFillCh:
-		case <-time.After(20 * time.Millisecond):
-		}
-	}
-	return fetchLtPosREST(sym)
-}
-
 func appendLiveFillLocked(f LiveFillAudit) {
 	liveFills = append(liveFills, f)
 	if len(liveFills) > 120 {
