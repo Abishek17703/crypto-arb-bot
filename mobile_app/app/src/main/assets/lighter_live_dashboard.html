@@ -216,7 +216,7 @@
     const BN_LAST_AUDIT_KEY = "bn_last_audit_v7_" + ACCT_INDEX;
     const BN_OVERRIDE_KEY = "bn_manual_usd_v6_" + ACCT_INDEX;
     const RR_KEY = "comb_rr_base_v7_" + ACCT_INDEX;
-    const DN_TRADES_KEY = "dn_comb_trades_v7_" + ACCT_INDEX;
+    const DN_TRADES_KEY = "dn_comb_trades_v8_" + ACCT_INDEX;
 
     function lsGet(k, defVal = null) {
       try { const v = localStorage.getItem(k); return v === null ? defVal : v; } catch (_) { return defVal; }
@@ -422,6 +422,10 @@
       if (m) {
         return { coin: m[1], desc: `Hourly Funding Lock: Binance ${m[2]} + Lighter ${m[3] === "ASK" ? "SELL" : "BUY"}` };
       }
+      m = legs.match(/^BN_([A-Z0-9]+)_FLAT$/);
+      if (m) {
+        return { coin: m[1].replace(/(USDC|USDT)$/, ""), desc: `Binance Flatten (${m[1]})` };
+      }
       return { coin: legs.split("_")[0], desc: legs };
     }
 
@@ -432,18 +436,14 @@
       let scanTxt = "";
       let readyTxt = "";
       let audit = null;
-      const byId = new Map(savedDnMap);
-      let mapDirty = false;
+      const byId = (Array.isArray(data.dnTradesHistory) && data.dnTradesHistory.length > 0) ? new Map() : new Map(savedDnMap);
+      let mapDirty = Array.isArray(data.dnTradesHistory) && data.dnTradesHistory.length > 0;
 
       if (Array.isArray(data.dnTradesHistory)) {
         for (const h of data.dnTradesHistory) {
           if (h && h.id) {
             const key = String(h.id);
-            const cur = byId.get(key);
-            if (!cur || cur.status !== "CLOSED" || h.status === "CLOSED") {
-              byId.set(key, h);
-              mapDirty = true;
-            }
+            byId.set(key, h);
           }
         }
       }

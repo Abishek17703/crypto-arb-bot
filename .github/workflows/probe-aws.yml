@@ -33,6 +33,7 @@ jobs:
             "sudo pkill -9 -f 'python3.*[t]elemetry_sync' || true",
             "sudo mv /tmp/telemetry_sync_new.py /opt/crypto-arb-bot/telemetry_sync.py && sudo chmod +x /opt/crypto-arb-bot/telemetry_sync.py",
             "sudo curl -fsSL https://github.com/Abishek17703/crypto-arb-bot/releases/download/lighter-go-latest/lighter_go_bot -o /opt/crypto-arb-bot/lighter_go_bot.tmp && sudo mv /opt/crypto-arb-bot/lighter_go_bot.tmp /opt/crypto-arb-bot/lighter_go_bot && sudo chmod +x /opt/crypto-arb-bot/lighter_go_bot",
+            "sudo rm -f /tmp/lighter_trades.json",
             "sudo systemctl start tokyo-telemetry.service",
             "sleep 4 && sudo systemctl is-active tokyo-telemetry.service && ps aux | grep '[t]elemetry_sync'"
           ]}')

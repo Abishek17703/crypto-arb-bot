@@ -28,6 +28,7 @@ PAUSE_FLAG_PATH = "/tmp/lighter_pause.flag"
 LOG_PATH = "/tmp/lighter_tokyo.log"
 HIST_PATHS = ("/opt/crypto-arb-bot/dn_trades_history.json", "/tmp/dn_trades_history.json")
 START_EQUITY_USD = 397.7745
+DN_EPOCH_MS = 1795276700000
 
 
 class BinanceSession:
@@ -128,7 +129,7 @@ def read_log_tail(max_chars=8000):
 def fetch_lighter_fallback(acct_path="/tmp/lighter_acct.json", tr_path="/tmp/lighter_trades.json"):
     now = time.time()
     need_acct = not os.path.exists(acct_path) or (now - os.path.getmtime(acct_path) > 4.0)
-    need_tr = not os.path.exists(tr_path) or (now - os.path.getmtime(tr_path) > 10.0)
+    need_tr = not os.path.exists(tr_path) or (now - os.path.getmtime(tr_path) > 15.0)
     if need_acct:
         try:
             url = f"{LIGHTER_BASE}/api/v1/account?by=index&value={LIGHTER_ACCT_IDX}"
@@ -146,11 +147,28 @@ def fetch_lighter_fallback(acct_path="/tmp/lighter_acct.json", tr_path="/tmp/lig
         try:
             url = f"{LIGHTER_BASE}/api/v1/trades?account_index={LIGHTER_ACCT_IDX}&limit=100&sort_by=timestamp"
             req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-            with urllib.request.urlopen(req, timeout=3) as r:
-                raw = r.read()
-            if b'"trades"' in raw:
-                with open(tr_path + ".tmp", "wb") as f:
-                    f.write(raw)
+            with urllib.request.urlopen(req, timeout=4) as r:
+                d1 = json.loads(r.read().decode("utf-8", errors="replace"))
+            trades = list(d1.get("trades") or [])
+            cur = d1.get("next_cursor")
+            if cur and trades:
+                last_ts = int(trades[-1].get("timestamp") or 0)
+                if 0 < last_ts < 100000000000:
+                    last_ts *= 1000
+                if last_ts >= DN_EPOCH_MS:
+                    u2 = f"{url}&cursor={urllib.parse.quote(str(cur))}"
+                    req2 = urllib.request.Request(u2, headers={"User-Agent": "Mozilla/5.0"})
+                    with urllib.request.urlopen(req2, timeout=4) as r2:
+                        d2 = json.loads(r2.read().decode("utf-8", errors="replace"))
+                    seen = {int(x.get("trade_id") or 0) for x in trades}
+                    for x in (d2.get("trades") or []):
+                        tid = int(x.get("trade_id") or 0)
+                        if tid and tid not in seen:
+                            seen.add(tid)
+                            trades.append(x)
+            if trades:
+                with open(tr_path + ".tmp", "w", encoding="utf-8") as f:
+                    json.dump({"trades": trades}, f)
                 os.replace(tr_path + ".tmp", tr_path)
         except Exception:
             pass
@@ -165,8 +183,7 @@ def read_dn_history():
 
 
 def fetch_binance_income_and_reconstruct(fapi, lt_trades, disk_hist, cached_wallet, upnl):
-    start_ms = int((time.time() - 72 * 3600) * 1000)
-    inc = fapi.request("GET", "/fapi/v1/income", {"startTime": start_ms, "limit": 1000}, signed=True)
+    inc = fapi.request("GET", "/fapi/v1/income", {"startTime": DN_EPOCH_MS, "limit": 1000}, signed=True)
     if isinstance(inc, list):
         real_pnl, comm, fund, cnt = 0.0, 0.0, 0.0, 0
         for r in inc:
@@ -213,6 +230,8 @@ def fetch_binance_income_and_reconstruct(fapi, lt_trades, disk_hist, cached_wall
         ts_ms = int(t.get("timestamp") or 0)
         if 0 < ts_ms < 100000000000:
             ts_ms *= 1000
+        if ts_ms < DN_EPOCH_MS:
+            continue
         sym = t.get("market_symbol") or f"MKT-{t.get('market_id', '')}"
         sz = float(t.get("size") or 0.0)
         px = float(t.get("price") or 0.0)
@@ -250,7 +269,7 @@ def fetch_binance_income_and_reconstruct(fapi, lt_trades, disk_hist, cached_wall
             else:
                 _flush_close(sym)
                 op = open_by_sym.pop(sym, None)
-                open_ts = op["ts"] if op else max(0, ts_ms - 5000)
+                open_ts = op["ts"] if op else max(DN_EPOCH_MS, ts_ms - 5000)
                 open_usd = op["usd"] if (op and op["usd"] > 0) else usd
                 is_bid_open = op["is_bid"] if op else (not is_bid)
                 close_grp_by_sym[sym] = {
@@ -261,60 +280,146 @@ def fetch_binance_income_and_reconstruct(fapi, lt_trades, disk_hist, cached_wall
                     "isBidOpen": is_bid_open,
                     "ltLeg": pnl_v,
                     "closeUsd": usd,
+                    "bnLeg": 0.0,
+                    "feeUsd": 0.0,
+                    "matchedBnSym": f"{sym}USDC",
                 }
 
     for s in list(close_grp_by_sym.keys()):
         _flush_close(s)
 
+    by_sym = {}
+    for cl in clusters:
+        by_sym.setdefault(cl["sym"], []).append(cl)
+    for cs in by_sym.values():
+        cs.sort(key=lambda c: c["openTs"])
+
     inc_sorted = sorted(inc, key=lambda r: int(r.get("time") or 0))
     used_inc = set()
-    reconstructed = []
-    for cl in clusters:
-        sym = cl["sym"]
-        o_ts = cl["openTs"]
-        c_ts = cl["closeTs"]
-        valid_bn_syms = (f"{sym}USDC", f"{sym}USDT")
-        bn_leg = 0.0
-        fee_usd = 0.0
-        matched_bn_sym = f"{sym}USDC"
-        for idx, r in enumerate(inc_sorted):
-            if idx in used_inc:
-                continue
-            tp = r.get("incomeType", "")
-            if tp not in ("REALIZED_PNL", "COMMISSION", "FUNDING_FEE"):
-                continue
-            i_sym = r.get("symbol", "")
-            if i_sym not in valid_bn_syms:
-                continue
-            t_ms = int(r.get("time") or 0)
-            if (o_ts - 5000) <= t_ms <= (c_ts + 20000):
-                used_inc.add(idx)
-                matched_bn_sym = i_sym
-                v = float(r.get("income") or 0.0)
-                bn_leg += v
-                if tp == "COMMISSION":
-                    fee_usd += abs(v)
 
-        legs = f"BN_{matched_bn_sym}_SELL+LT_BID" if cl["isBidOpen"] else f"BN_{matched_bn_sym}_BUY+LT_ASK"
-        usd_v = cl["usd"] if cl["usd"] > 0 else cl["closeUsd"]
-        pnl_usd = round(bn_leg + cl["ltLeg"], 4)
-        pnl_bps = round(pnl_usd / max(1.0, usd_v) * 10000.0, 2)
+    for sym, cs in by_sym.items():
+        valid_bn_syms = (f"{sym}USDC", f"{sym}USDT")
+        prev_end = None
+        for k, cl in enumerate(cs):
+            win_start = (cl["openTs"] - 5000) if k == 0 else max(cl["openTs"] - 1500, prev_end + 1)
+            win_end = (cs[k + 1]["openTs"] - 1501) if (k + 1 < len(cs)) else (cl["closeTs"] + 600000)
+            if win_end < win_start:
+                win_end = win_start
+            prev_end = win_end
+            for idx, r in enumerate(inc_sorted):
+                if idx in used_inc:
+                    continue
+                tp = r.get("incomeType", "")
+                if tp not in ("REALIZED_PNL", "COMMISSION", "FUNDING_FEE"):
+                    continue
+                i_sym = r.get("symbol", "")
+                if i_sym not in valid_bn_syms:
+                    continue
+                t_ms = int(r.get("time") or 0)
+                if win_start <= t_ms <= win_end:
+                    used_inc.add(idx)
+                    cl["matchedBnSym"] = i_sym
+                    v = float(r.get("income") or 0.0)
+                    cl["bnLeg"] += v
+                    if tp == "COMMISSION":
+                        cl["feeUsd"] += abs(v)
+
+    bn_only_rows = []
+    for idx, r in enumerate(inc_sorted):
+        if idx in used_inc:
+            continue
+        tp = r.get("incomeType", "")
+        if tp not in ("REALIZED_PNL", "COMMISSION", "FUNDING_FEE"):
+            continue
+        t_ms = int(r.get("time") or 0)
+        if t_ms < DN_EPOCH_MS:
+            continue
+        i_sym = r.get("symbol", "")
+        base_sym = i_sym[:-4] if i_sym.endswith(("USDC", "USDT")) else i_sym
+        if by_sym.get(base_sym):
+            cl = min(by_sym[base_sym], key=lambda c: abs(t_ms - c["closeTs"]))
+            used_inc.add(idx)
+            cl["matchedBnSym"] = i_sym
+            v = float(r.get("income") or 0.0)
+            cl["bnLeg"] += v
+            if tp == "COMMISSION":
+                cl["feeUsd"] += abs(v)
+        else:
+            bn_only_rows.append((t_ms, i_sym, base_sym, tp, float(r.get("income") or 0.0)))
+
+    reconstructed = []
+    for cs in by_sym.values():
+        for cl in cs:
+            sym = cl["sym"]
+            o_ts = cl["openTs"]
+            c_ts = cl["closeTs"]
+            legs = f"BN_{cl['matchedBnSym']}_SELL+LT_BID" if cl["isBidOpen"] else f"BN_{cl['matchedBnSym']}_BUY+LT_ASK"
+            usd_v = cl["usd"] if cl["usd"] > 0 else cl["closeUsd"]
+            bn_leg = cl["bnLeg"]
+            lt_leg = cl["ltLeg"]
+            pnl_usd = round(bn_leg + lt_leg, 4)
+            pnl_bps = round(pnl_usd / max(1.0, usd_v) * 10000.0, 2)
+            reconstructed.append({
+                "id": int(o_ts),
+                "openTs": int(o_ts),
+                "closeTs": int(c_ts),
+                "strat": "ZERO_FEE_DN",
+                "legs": legs,
+                "coin": sym,
+                "usd": round(usd_v, 2),
+                "holdS": round(max(0.5, (c_ts - o_ts) / 1000.0), 1),
+                "pnlBps": pnl_bps,
+                "pnlUsd": pnl_usd,
+                "bnLegUsd": round(bn_leg, 4),
+                "ltLegUsd": round(lt_leg, 4),
+                "feeUsd": round(cl["feeUsd"], 4),
+                "status": "CLOSED",
+                "reason": "EXCHANGE_AUDITED",
+            })
+
+    bn_groups = {}
+    bn_flat_clusters = []
+    for t_ms, i_sym, base_sym, tp, v in bn_only_rows:
+        grp = bn_groups.get(i_sym)
+        if grp is not None and (t_ms - grp["lastTs"]) <= 30000:
+            grp["lastTs"] = t_ms
+            grp["bnLeg"] += v
+            if tp == "COMMISSION":
+                grp["feeUsd"] += abs(v)
+        else:
+            if grp is not None:
+                bn_flat_clusters.append(grp)
+            bn_groups[i_sym] = {
+                "iSym": i_sym,
+                "coin": base_sym,
+                "openTs": t_ms,
+                "lastTs": t_ms,
+                "bnLeg": v,
+                "feeUsd": abs(v) if tp == "COMMISSION" else 0.0,
+            }
+    for grp in bn_groups.values():
+        bn_flat_clusters.append(grp)
+
+    for g in bn_flat_clusters:
+        usd_v = round(g["feeUsd"] / 0.0005, 2) if g["feeUsd"] > 0.001 else 25.0
+        bn_leg = round(g["bnLeg"], 4)
+        pnl_bps = round(bn_leg / max(1.0, usd_v) * 10000.0, 2)
         reconstructed.append({
-            "id": int(o_ts),
-            "openTs": int(o_ts),
-            "closeTs": int(c_ts),
+            "id": int(g["openTs"]),
+            "openTs": int(g["openTs"]),
+            "closeTs": int(g["lastTs"]),
             "strat": "ZERO_FEE_DN",
-            "legs": legs,
-            "coin": sym,
-            "usd": round(usd_v, 2),
-            "holdS": round(max(0.5, (c_ts - o_ts) / 1000.0), 1),
+            "legs": f"BN_{g['iSym']}_FLAT",
+            "coin": g["coin"],
+            "usd": usd_v,
+            "holdS": 1.0,
             "pnlBps": pnl_bps,
-            "pnlUsd": pnl_usd,
-            "bnLegUsd": round(bn_leg, 4),
-            "ltLegUsd": round(cl["ltLeg"], 4),
-            "feeUsd": round(fee_usd, 4),
+            "pnlUsd": bn_leg,
+            "bnLegUsd": bn_leg,
+            "ltLegUsd": 0.0,
+            "feeUsd": round(g["feeUsd"], 4),
             "status": "CLOSED",
-            "reason": "EXCHANGE_AUDITED",
+            "reason": "BN_ONLY_FLAT",
         })
 
     merged = list(disk_hist or [])
