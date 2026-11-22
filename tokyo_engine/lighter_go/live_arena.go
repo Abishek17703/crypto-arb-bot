@@ -16,9 +16,9 @@ import (
 )
 
 const (
-	LiveArenaVer       = "LIVE-MICRO-v105.0-TOKYO"
-	StratStopLossUSD   = -1.50 // Auto-halt individual strategy if realized+unrealized drops <= -$1.50
-	GlobalStopLossUSD  = -4.00 // Auto-flatten & S3-pause ALL live strategies if combined PnL <= -$4.00
+	LiveArenaVer       = "LIVE-MICRO-v105.1-ULTRA-SAFE"
+	StratStopLossUSD   = -0.50 // Auto-halt individual strategy if realized+unrealized drops <= -$0.50
+	GlobalStopLossUSD  = -1.50 // Auto-flatten & S3-pause ALL live strategies if combined PnL <= -$1.50
 	MaxLtTxPerMin      = 48    // Strict guard below #770015 Standard 60 tx/min quota
 )
 
@@ -229,9 +229,9 @@ func initLiveMicroArena() {
 			venueDesc: "LT #770015 (0%) <-> BN USDC-M (0% M / 4bp T)",
 			desc:      "Top L10-verified winner (+$9.51/hr at $489 scale). Rests 0% PostOnly Maker on Lighter -> <4ms Tokyo Taker hedge on Binance USDC-M -> 0% GTX Maker exit on Binance -> 0% Lighter IOC close (4.00bp total 4-leg fee).",
 			peerVenue: "BN_USDC",
-			clip:      38.0,
-			scale489:  550.0 / 38.0,
-			startCash: 80.0,
+			clip:      15.0,
+			scale489:  550.0 / 15.0,
+			startCash: 40.0,
 			entryBp:   5.5,
 			exitBp:    2.3,
 			syms:      []string{"UNI", "HYPE", "ENA", "NEAR", "SUI", "ARB"},
@@ -242,9 +242,9 @@ func initLiveMicroArena() {
 			venueDesc: "LT #770015 (0%) <-> Aster Crypto (0% M / 4bp T)",
 			desc:      "Runner-up L10-verified winner (+$8.88/hr at $489 scale). Rests 0% PostOnly Maker on Lighter -> <8ms Tokyo Taker hedge on AsterDEX -> 0% GTX Maker exit on Aster -> 0% Lighter IOC close (4.00bp total 4-leg fee).",
 			peerVenue: "ASTER_C",
-			clip:      35.0,
-			scale489:  580.0 / 35.0,
-			startCash: 50.0,
+			clip:      15.0,
+			scale489:  580.0 / 15.0,
+			startCash: 25.0,
 			entryBp:   5.5,
 			exitBp:    2.2,
 			syms:      []string{"VVV", "XMR", "LIT"},
@@ -255,9 +255,9 @@ func initLiveMicroArena() {
 			venueDesc: "LT #770015 (0%) <-> Aster RWA (0% M / 1.25bp T)",
 			desc:      "Lowest-fee cross-venue arb in crypto: 0% Lighter #770015 Maker -> 1.25bp Aster RWA Taker hedge -> 0% Aster GTX Maker exit -> 0% Lighter IOC close = ONLY 1.25bp total 4-leg fee across NVDA/AAPL/TSLA/QQQ/SPY/META/COIN/MSTR!",
 			peerVenue: "ASTER_RWA",
-			clip:      40.0,
-			scale489:  1100.0 / 40.0,
-			startCash: 50.0,
+			clip:      15.0,
+			scale489:  1100.0 / 15.0,
+			startCash: 25.0,
 			entryBp:   3.8,
 			exitBp:    1.8,
 			syms:      []string{"NVDA", "AAPL", "TSLA", "QQQ", "SPY", "META", "COIN", "MSTR"},
@@ -268,9 +268,9 @@ func initLiveMicroArena() {
 			venueDesc: "LT #770015 (0%) <-> BN USDC-M (0% M / 4bp T)",
 			desc:      "High-frequency broad alt bucket (+$5.40/hr L10-verified). Disjoint symbol partition (AAVE/AVAX/WLD/LINK/DOGE/XRP/TIA/PENGU/TRUMP) with 0% Lighter Maker entry and 0% Binance USDC-M Maker exit.",
 			peerVenue: "BN_USDC",
-			clip:      38.0,
-			scale489:  650.0 / 38.0,
-			startCash: 80.0,
+			clip:      15.0,
+			scale489:  650.0 / 15.0,
+			startCash: 40.0,
 			entryBp:   4.8,
 			exitBp:    2.2,
 			syms:      []string{"AAVE", "AVAX", "WLD", "LINK", "DOGE", "XRP", "TIA", "PENGU", "TRUMP"},
@@ -1046,8 +1046,8 @@ func stepLiveSlot(rt *LiveSlotRuntime, now time.Time) {
 			combTakerNetBp = (((rt.EntryPeerPx-pAsk)*fx)+(lb-rt.EntryLtPx))/rt.EntryLtPx*10000.0 - rtTakerFeeBp
 		}
 
-		// Emergency stop-loss (-32bp) or strategy halted:
-		if halted || (holdS >= 30.0 && combTakerNetBp <= -32.0) {
+		// Tight per-trade stop-loss (-20bp = ~$0.03 max loss on $15 clip!) or strategy halted:
+		if halted || (holdS >= 20.0 && combTakerNetBp <= -20.0) {
 			_, ap, latMs, okM := executePeerMarketOrder(rt.PeerVenue, peerSym, closePeerSide, rt.HedgedQty, qDec, true)
 			if okM {
 				if ap <= 0 {
@@ -1239,7 +1239,10 @@ func stepLiveSlot(rt *LiveSlotRuntime, now time.Time) {
 			qtyDec = m.SzDec
 		}
 		qty := roundTo(math.Floor((rt.ClipUsd/ltMid)/commonStep+1e-9)*commonStep, qtyDec)
-		if qty < m.MinB || qty*ltMid < math.Max(11.0, minNot) {
+		if qty*ltMid < 10.5 && (qty+commonStep)*ltMid <= rt.ClipUsd+3.5 {
+			qty = roundTo(qty+commonStep, qtyDec)
+		}
+		if qty < m.MinB || qty*ltMid < math.Max(10.5, minNot) {
 			continue
 		}
 
