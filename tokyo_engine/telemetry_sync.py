@@ -740,6 +740,7 @@ def main():
                 lt_acct = read_json_safe("/tmp/lighter_acct.json")
                 lt_trades_obj = read_json_safe("/tmp/lighter_trades.json", {})
                 lt_trades = lt_trades_obj.get("trades", []) if isinstance(lt_trades_obj, dict) else []
+                arena_obj = read_json_safe(ARENA_JSON_PATH)
 
                 payload = {
                     "ts": int(now * 1000),
@@ -754,6 +755,7 @@ def main():
                     "lighterTrades": lt_trades,
                     "dnTradesHistory": cached_dn_hist,
                     "lighterLog": read_log_tail(8000),
+                    "forwardArena": arena_obj,
                     "pauseControlUrl": pause_url,
                     "pauseControlPost": pause_post,
                     "hftTest": {
@@ -782,9 +784,19 @@ def main():
                                 Body=arena_bytes,
                                 ContentType="application/json",
                                 CacheControl="no-store, no-cache, must-revalidate, max-age=0",
+                                ACL="public-read",
                             )
                     except Exception:
-                        pass
+                        try:
+                            s3.put_object(
+                                Bucket=S3_BUCKET,
+                                Key=ARENA_S3_KEY,
+                                Body=arena_bytes,
+                                ContentType="application/json",
+                                CacheControl="no-store, no-cache, must-revalidate, max-age=0",
+                            )
+                        except Exception:
+                            pass
         except Exception as e:
             print("Telemetry loop err:", e, flush=True)
 

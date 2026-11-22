@@ -80,9 +80,8 @@ jobs:
             "sudo curl -fsSL https://github.com/Abishek17703/crypto-arb-bot/releases/download/lighter-go-latest/lighter_go_bot -o /opt/crypto-arb-bot/lighter_go_bot.tmp && sudo mv /opt/crypto-arb-bot/lighter_go_bot.tmp /opt/crypto-arb-bot/lighter_go_bot && sudo chmod +x /opt/crypto-arb-bot/lighter_go_bot",
             "sudo curl -fsSL https://github.com/Abishek17703/crypto-arb-bot/releases/download/lighter-go-latest/arena_go -o /opt/crypto-arb-bot/arena_go.tmp && sudo mv /opt/crypto-arb-bot/arena_go.tmp /opt/crypto-arb-bot/arena_go && sudo chmod +x /opt/crypto-arb-bot/arena_go",
             "sudo rm -f /tmp/lighter_trades.json /tmp/forward_arena.json",
-            "sudo nohup /opt/crypto-arb-bot/arena_go >> /tmp/forward_arena.log 2>&1 &",
             "sudo systemctl start tokyo-telemetry.service",
-            "sleep 4 && sudo systemctl is-active tokyo-telemetry.service && ps aux | grep -E '[t]elemetry_sync|[a]rena_go'"
+            "sleep 6 && sudo systemctl is-active tokyo-telemetry.service && ps aux | grep '[t]elemetry_sync'"
           ]}')
           CMD_ID=$(aws ssm send-command --instance-ids "$INST_ID" --document-name "AWS-RunShellScript" --parameters "$SSM_JSON" --query "Command.CommandId" --output text)
           echo "SSM CommandId: $CMD_ID"
