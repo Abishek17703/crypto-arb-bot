@@ -26,7 +26,7 @@ const (
 	TargetHourly   = 5.00
 	ArenaOutPath   = "/tmp/forward_arena.json"
 	ArenaStatePath = "/opt/crypto-arb-bot/forward_arena_state.json"
-	ArenaVer       = "ARENA-v4.2-ROLLING-4H"
+	ArenaVer       = "ARENA-v4.3-TAKER-GRAB-LAB"
 
 	VenueBnUsdc   = "BN_USDC"
 	VenueBnUsdt   = "BN_USDT"
@@ -199,6 +199,7 @@ type StrategyAccount struct {
 	HourlyRunRate   float64              `json:"hourlyRunRate"`
 	RealizedHourly  float64              `json:"realizedHourly"`
 	Rolling4hHourly float64              `json:"rolling4hHourly"`
+	StratBootMs     int64                `json:"stratBootMs,omitempty"`
 	MakerPlaced     int64                `json:"makerPlaced"`
 	MakerCancelled  int64                `json:"makerCancelled"`
 	MakerFills      int64                `json:"makerFills"`
@@ -464,10 +465,19 @@ func initStrategies() {
 			VenueDesc: "BN_USDC 0% Pairs (-40bp SL)",
 			MaxLevCap: 10.0,
 		},
+		{
+			ID:        "S9_LT_TAKER_SPIKE_GRAB",
+			Name:      "Instant Taker-Grab (>=11bp Cross-Spread) + 0% Maker Exit",
+			Desc:      "Tests instant dual-Taker spike capture: fires 0% Lighter IOC (305ms speed-bump) + 4ms BN_USDC / 8ms Aster Taker hedge when crossed spread >=11bp above EMA, exiting via 0% Maker.",
+			VenueDesc: "LT_STD 0% IOC (305ms) + BN/ASTER",
+			MaxLevCap: 5.5,
+		},
 	}
 
+	nowInitMs := time.Now().UnixMilli()
 	for _, s := range defs {
 		s.StartCash = StartBudgetUSD
+		s.StratBootMs = nowInitMs
 		s.Cash = StartBudgetUSD
 		s.Equity = StartBudgetUSD
 		s.PeakEquity = StartBudgetUSD
@@ -1044,19 +1054,20 @@ func usdtFxLocked(venue string) float64 {
 }
 
 type PairArbCfg struct {
-	StratID       string
-	MakerVenue    string // e.g. VenueLtPrem, VenueLtStd, VenueAsterRWA
-	MakerSym      string
-	HedgeVenue    string // e.g. VenueBnUsdc, VenueAsterC, VenueAsterRWA
-	HedgeSym      string
-	SlotUsd       float64
-	EntryDislocBp float64 // dislocation vs EMA fair basis required to quote Maker entry
-	NetTargetBp   float64 // required net profit above all 4-leg fees for Maker exit
-	MaxHoldMs     int64
-	CancelTolBp   float64
-	MaxAgeMs      int64
-	CarryBias     int // 0=both sides, -1=only SHORT MakerSym / LONG HedgeSym (positive carry!)
-	FxAdjHedge    bool
+	StratID        string
+	MakerVenue     string // e.g. VenueLtPrem, VenueLtStd, VenueAsterRWA
+	MakerSym       string
+	HedgeVenue     string // e.g. VenueBnUsdc, VenueAsterC, VenueAsterRWA
+	HedgeSym       string
+	SlotUsd        float64
+	EntryDislocBp  float64 // dislocation vs EMA fair basis required to quote Maker entry
+	TakerGrabMinBp float64 // if >0, fires instant Taker IOC on MakerVenue (crossing Bid/Ask) -> Taker Hedge!
+	NetTargetBp    float64 // required net profit above all 4-leg fees for Maker exit
+	MaxHoldMs      int64
+	CancelTolBp    float64
+	MaxAgeMs       int64
+	CarryBias      int // 0=both sides, -1=only SHORT MakerSym / LONG HedgeSym (positive carry!)
+	FxAdjHedge     bool
 }
 
 func runCrossVenuePairArbLocked(cfg PairArbCfg, commonQtyDec int, minBase float64, nowMs int64) {
@@ -1184,6 +1195,27 @@ func runCrossVenuePairArbLocked(cfg PairArbCfg, commonQtyDec int, minBase float6
 	shortDislocBp := (((bM.Ask - hAskUsd) / hAskUsd) * 10000.0) - eqBasisBp
 	longDislocBp := (((hBidUsd - bM.Bid) / hBidUsd) * 10000.0) + eqBasisBp
 	entryTag := "E|" + cfg.HedgeVenue + "|" + cfg.HedgeSym + "|EN"
+
+	// Instant Taker-Grab mode (S9): crosses bM.Bid (SELL) or bM.Ask (BUY) with real 305ms LT_STD IOC speed-bump -> fires hedge on fill!
+	if cfg.TakerGrabMinBp > 0 {
+		cancelAllMakersForSymLocked(cfg.StratID, cfg.MakerVenue, cfg.MakerSym, nowMs)
+		coolKey := cfg.StratID + ":TG:" + cfg.MakerSym
+		if nowMs < stratCoolMap[coolKey] {
+			return
+		}
+		crossShortBp := (((bM.Bid - hAskUsd) / hAskUsd) * 10000.0) - eqBasisBp
+		crossLongBp := (((hBidUsd - bM.Ask) / hBidUsd) * 10000.0) + eqBasisBp
+		if crossShortBp >= cfg.TakerGrabMinBp && cfg.CarryBias <= 0 {
+			if placeTakerLocked(cfg.StratID, cfg.MakerVenue, cfg.MakerSym, "SELL", qty, bM.Bid, 12.0, false, entryTag, nowMs) > 0 {
+				stratCoolMap[coolKey] = nowMs + 2500
+			}
+		} else if crossLongBp >= cfg.TakerGrabMinBp && cfg.CarryBias >= 0 {
+			if placeTakerLocked(cfg.StratID, cfg.MakerVenue, cfg.MakerSym, "BUY", qty, bM.Ask, 12.0, false, entryTag, nowMs) > 0 {
+				stratCoolMap[coolKey] = nowMs + 2500
+			}
+		}
+		return
+	}
 
 	if shortDislocBp >= cfg.EntryDislocBp && cfg.CarryBias <= 0 {
 		cancelStaleOrRefreshMakerLocked(cfg.StratID, cfg.MakerVenue, cfg.MakerSym, "SELL", bM.Ask, qty, cfg.CancelTolBp, false, entryTag, cfg.MaxAgeMs, nowMs)
@@ -1552,6 +1584,55 @@ func evalStrategiesLocked(nowMs int64) {
 			cancelAllMakersForSymLocked("S8_BN_USDC_PAIR_STATARB", VenueBnUsdc, sA, nowMs)
 		}
 	}
+
+	// ------------------------------------------------------------------------
+	// S9: Instant Taker-Grab (>=11bp Cross-Spread Spike) + 0% Maker Exit
+	// Tests whether 0%-fee Lighter IOC (305ms speed-bump) + 4ms/8ms Hedge beats Maker!
+	// ------------------------------------------------------------------------
+	for _, sym := range s1Syms {
+		sp := ltSpecs[sym]
+		if sp == nil || sp.BnUsdcSym == "" {
+			continue
+		}
+		dec := sp.SizeDecimals
+		if sp.BnQtyDec < dec {
+			dec = sp.BnQtyDec
+		}
+		runCrossVenuePairArbLocked(PairArbCfg{
+			StratID:        "S9_LT_TAKER_SPIKE_GRAB",
+			MakerVenue:     VenueLtStd,
+			MakerSym:       sym,
+			HedgeVenue:     VenueBnUsdc,
+			HedgeSym:       sp.BnUsdcSym,
+			SlotUsd:        550.0,
+			TakerGrabMinBp: 11.0,
+			NetTargetBp:    2.2,
+			MaxHoldMs:      900000,
+		}, dec, sp.MinBase, nowMs)
+	}
+	for _, sym := range []string{"VVV", "XMR", "LIT"} {
+		sp := ltSpecs[sym]
+		as := asterSpecs[sym+"USDT"]
+		if sp == nil || as == nil {
+			continue
+		}
+		dec := sp.SizeDecimals
+		if as.QtyDec < dec {
+			dec = as.QtyDec
+		}
+		runCrossVenuePairArbLocked(PairArbCfg{
+			StratID:        "S9_LT_TAKER_SPIKE_GRAB",
+			MakerVenue:     VenueLtStd,
+			MakerSym:       sym,
+			HedgeVenue:     VenueAsterC,
+			HedgeSym:       sym + "USDT",
+			SlotUsd:        550.0,
+			TakerGrabMinBp: 11.0,
+			NetTargetBp:    2.2,
+			MaxHoldMs:      900000,
+			FxAdjHedge:     true,
+		}, dec, sp.MinBase, nowMs)
+	}
 }
 
 // settleHourlyFundingLocked applies true hourly Lighter & periodic Binance funding at top of hour!
@@ -1632,8 +1713,13 @@ func updateMarkToMarketAndWriteTelemetry() {
 		}
 		netGain := s.Equity - s.StartCash
 		realGain := s.Cash - s.StartCash
+		stratStart := bootMs
+		if s.StratBootMs > bootMs {
+			stratStart = s.StratBootMs
+		}
+		stratUpHr := math.Max(float64(nowMs-stratStart)/3600000.0, 1.0/3600.0)
 		// Avoid wild extrapolation in first 3 minutes
-		denomHr := math.Max(upHours, 0.05)
+		denomHr := math.Max(stratUpHr, 0.05)
 		s.HourlyRunRate = roundTo(netGain/denomHr, 3)
 		s.RealizedHourly = roundTo(realGain/denomHr, 3)
 		s.ActiveMakers = makerCntByStrat[id]
@@ -1806,6 +1892,11 @@ func loadCheckpoint() {
 		s.WinTrips = saved.WinTrips
 		s.GrossVolumeUsd = saved.GrossVolumeUsd
 		s.EquityCurve = saved.EquityCurve
+		if saved.StratBootMs > 0 {
+			s.StratBootMs = saved.StratBootMs
+		} else {
+			s.StratBootMs = tel.BootTsMs
+		}
 		s.Positions = map[string]*Position{}
 		for _, p := range saved.PosSnap {
 			pc := p
