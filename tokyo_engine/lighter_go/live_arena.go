@@ -1098,12 +1098,12 @@ func stepLiveSlot(rt *LiveSlotRuntime, now time.Time) {
 		}
 
 		var status string
-		var exQ, avgP float64
+		var avgP float64
 		var polled, okQ bool
 		if rt.PeerVenue == "BN_USDC" {
-			status, exQ, avgP, polled, okQ = queryBnOrder(peerSym, rt.ExitPeerOid, rt.LastOrdPoll, false)
+			status, _, avgP, polled, okQ = queryBnOrder(peerSym, rt.ExitPeerOid, rt.LastOrdPoll, false)
 		} else {
-			status, exQ, avgP, polled, okQ = queryAsterOrder(peerSym, rt.ExitPeerOid, rt.LastOrdPoll, false)
+			status, _, avgP, polled, okQ = queryAsterOrder(peerSym, rt.ExitPeerOid, rt.LastOrdPoll, false)
 		}
 		if polled {
 			rt.LastOrdPoll = now
