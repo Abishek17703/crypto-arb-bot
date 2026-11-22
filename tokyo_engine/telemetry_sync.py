@@ -164,6 +164,174 @@ def read_dn_history():
     return []
 
 
+def fetch_binance_income_and_reconstruct(fapi, lt_trades, disk_hist, cached_wallet, upnl):
+    start_ms = int((time.time() - 72 * 3600) * 1000)
+    inc = fapi.request("GET", "/fapi/v1/income", {"startTime": start_ms, "limit": 1000}, signed=True)
+    if not isinstance(inc, list):
+        return None, disk_hist
+
+    real_pnl, comm, fund, cnt = 0.0, 0.0, 0.0, 0
+    for r in inc:
+        tp = r.get("incomeType", "")
+        try:
+            v = float(r.get("income", 0.0))
+        except Exception:
+            v = 0.0
+        if tp == "REALIZED_PNL":
+            real_pnl += v
+            cnt += 1
+        elif tp == "COMMISSION":
+            comm += v
+        elif tp == "FUNDING_FEE":
+            fund += v
+
+    binance_audit = {
+        "real": round(real_pnl, 4),
+        "fee": round(comm, 4),
+        "fund": round(fund, 4),
+        "upnl": round(upnl, 4),
+        "net": round(real_pnl + comm + fund + upnl, 4),
+        "trades": cnt,
+        "wallet": round(cached_wallet, 4),
+    }
+
+    norm_lt = []
+    for t in (lt_trades or []):
+        bid_id = t.get("bid_account_id")
+        ask_id = t.get("ask_account_id")
+        if bid_id == LIGHTER_ACCT_IDX:
+            is_bid = True
+            p_raw = t.get("bid_account_pnl")
+        elif ask_id == LIGHTER_ACCT_IDX:
+            is_bid = False
+            p_raw = t.get("ask_account_pnl")
+        else:
+            continue
+        ts_ms = int(t.get("timestamp") or 0)
+        if 0 < ts_ms < 100000000000:
+            ts_ms *= 1000
+        sym = t.get("market_symbol") or f"MKT-{t.get('market_id', '')}"
+        sz = float(t.get("size") or 0.0)
+        px = float(t.get("price") or 0.0)
+        usd = float(t.get("usd_amount") or (sz * px))
+        has_pnl = p_raw is not None and str(p_raw).strip() != ""
+        pnl_v = float(p_raw) if has_pnl else 0.0
+        tid = int(t.get("trade_id") or 0)
+        norm_lt.append((ts_ms, tid, sym, sz, px, usd, is_bid, has_pnl, pnl_v))
+
+    norm_lt.sort(key=lambda x: (x[0], x[1]))
+
+    open_by_sym = {}
+    close_grp_by_sym = {}
+    clusters = []
+
+    def _flush_close(s):
+        g = close_grp_by_sym.pop(s, None)
+        if g is not None:
+            clusters.append(g)
+
+    for ts_ms, tid, sym, sz, px, usd, is_bid, has_pnl, pnl_v in norm_lt:
+        if not has_pnl:
+            _flush_close(sym)
+            op = open_by_sym.get(sym)
+            if op is None or op["is_bid"] != is_bid:
+                open_by_sym[sym] = {"ts": ts_ms, "usd": usd, "is_bid": is_bid}
+            else:
+                op["usd"] += usd
+        else:
+            grp = close_grp_by_sym.get(sym)
+            if grp is not None and (ts_ms - grp["closeTs"]) <= 3000:
+                grp["closeTs"] = ts_ms
+                grp["ltLeg"] += pnl_v
+                grp["closeUsd"] += usd
+            else:
+                _flush_close(sym)
+                op = open_by_sym.pop(sym, None)
+                open_ts = op["ts"] if op else max(0, ts_ms - 5000)
+                open_usd = op["usd"] if (op and op["usd"] > 0) else usd
+                is_bid_open = op["is_bid"] if op else (not is_bid)
+                close_grp_by_sym[sym] = {
+                    "sym": sym,
+                    "openTs": open_ts,
+                    "closeTs": ts_ms,
+                    "usd": open_usd,
+                    "isBidOpen": is_bid_open,
+                    "ltLeg": pnl_v,
+                    "closeUsd": usd,
+                }
+
+    for s in list(close_grp_by_sym.keys()):
+        _flush_close(s)
+
+    inc_sorted = sorted(inc, key=lambda r: int(r.get("time") or 0))
+    used_inc = set()
+    reconstructed = []
+    for cl in clusters:
+        sym = cl["sym"]
+        o_ts = cl["openTs"]
+        c_ts = cl["closeTs"]
+        valid_bn_syms = (f"{sym}USDC", f"{sym}USDT")
+        bn_leg = 0.0
+        fee_usd = 0.0
+        matched_bn_sym = f"{sym}USDC"
+        for idx, r in enumerate(inc_sorted):
+            if idx in used_inc:
+                continue
+            tp = r.get("incomeType", "")
+            if tp not in ("REALIZED_PNL", "COMMISSION", "FUNDING_FEE"):
+                continue
+            i_sym = r.get("symbol", "")
+            if i_sym not in valid_bn_syms:
+                continue
+            t_ms = int(r.get("time") or 0)
+            if (o_ts - 5000) <= t_ms <= (c_ts + 20000):
+                used_inc.add(idx)
+                matched_bn_sym = i_sym
+                v = float(r.get("income") or 0.0)
+                bn_leg += v
+                if tp == "COMMISSION":
+                    fee_usd += abs(v)
+
+        legs = f"BN_{matched_bn_sym}_SELL+LT_BID" if cl["isBidOpen"] else f"BN_{matched_bn_sym}_BUY+LT_ASK"
+        usd_v = cl["usd"] if cl["usd"] > 0 else cl["closeUsd"]
+        pnl_usd = round(bn_leg + cl["ltLeg"], 4)
+        pnl_bps = round(pnl_usd / max(1.0, usd_v) * 10000.0, 2)
+        reconstructed.append({
+            "id": int(o_ts),
+            "openTs": int(o_ts),
+            "closeTs": int(c_ts),
+            "strat": "ZERO_FEE_DN",
+            "legs": legs,
+            "coin": sym,
+            "usd": round(usd_v, 2),
+            "holdS": round(max(0.5, (c_ts - o_ts) / 1000.0), 1),
+            "pnlBps": pnl_bps,
+            "pnlUsd": pnl_usd,
+            "bnLegUsd": round(bn_leg, 4),
+            "ltLegUsd": round(cl["ltLeg"], 4),
+            "feeUsd": round(fee_usd, 4),
+            "status": "CLOSED",
+            "reason": "EXCHANGE_AUDITED",
+        })
+
+    merged = list(disk_hist or [])
+    for rec in reconstructed:
+        dup = False
+        for d in merged:
+            d_coin = d.get("coin") or ""
+            if not d_coin and d.get("legs"):
+                d_coin = d.get("legs", "").replace("BN_", "").split("_")[0].replace("USDC", "").replace("USDT", "")
+            d_ts = int(d.get("openTs") or d.get("id") or 0)
+            if d_coin == rec["coin"] and abs(d_ts - rec["openTs"]) < 10000:
+                dup = True
+                break
+        if not dup:
+            merged.append(rec)
+
+    merged.sort(key=lambda r: int(r.get("closeTs") or r.get("openTs") or r.get("id") or 0), reverse=True)
+    return binance_audit, merged[:200]
+
+
 def is_go_bot_running():
     r = subprocess.run(["pgrep", "-f", "lighter_go_bot"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     return r.returncode == 0
@@ -331,8 +499,11 @@ def main():
     cached_wallet = 0.0
     cached_futures = {"marginBalance": 0.0, "availableBalance": 0.0, "initialMargin": 0.0, "unrealizedProfit": 0.0}
     cached_balances = []
+    cached_audit = None
+    cached_dn_hist = read_dn_history()
     last_bn_poll = 0.0
     last_lt_poll = 0.0
+    last_inc_poll = 0.0
     last_s3_push = 0.0
     last_pause_poll = 0.0
     last_proc_chk = 0.0
@@ -382,6 +553,22 @@ def main():
                 last_lt_poll = now
                 fetch_lighter_fallback()
 
+            if now - last_inc_poll >= 15.0:
+                last_inc_poll = now
+                lt_tr_obj = read_json_safe("/tmp/lighter_trades.json", {})
+                lt_tr_list = lt_tr_obj.get("trades", []) if isinstance(lt_tr_obj, dict) else []
+                aud, hist = fetch_binance_income_and_reconstruct(
+                    fapi,
+                    lt_tr_list,
+                    read_dn_history(),
+                    cached_wallet,
+                    cached_futures.get("unrealizedProfit", 0.0),
+                )
+                if aud is not None:
+                    cached_audit = aud
+                if hist is not None:
+                    cached_dn_hist = hist
+
             if now - last_s3_push >= 1.0:
                 last_s3_push = now
                 paused = bool(state["user_paused"])
@@ -401,10 +588,11 @@ def main():
                     "rawWalletUsd": cached_wallet,
                     "netEquityGainTodayUsd": round(cached_wallet - START_EQUITY_USD, 4),
                     "binanceFutures": cached_futures,
+                    "binanceAudit": cached_audit,
                     "balances": cached_balances,
                     "lighterAccount": lt_acct,
                     "lighterTrades": lt_trades,
-                    "dnTradesHistory": read_dn_history(),
+                    "dnTradesHistory": cached_dn_hist,
                     "lighterLog": read_log_tail(8000),
                     "pauseControlUrl": pause_url,
                     "hftTest": {

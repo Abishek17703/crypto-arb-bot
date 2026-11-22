@@ -218,19 +218,31 @@
     const RR_KEY = "comb_rr_base_v7_" + ACCT_INDEX;
     const DN_TRADES_KEY = "dn_comb_trades_v7_" + ACCT_INDEX;
 
-    let startLtUsd = parseFloat(localStorage.getItem(LT_START_KEY) || "93.0426");
-    let startBnUsd = parseFloat(localStorage.getItem(BN_START_KEY) || "397.7745");
-    let startCombUsd = parseFloat(localStorage.getItem(COMB_START_KEY) || String(startLtUsd + startBnUsd));
-    let bnManualOverride = parseFloat(localStorage.getItem(BN_OVERRIDE_KEY) || "NaN");
+    function lsGet(k, defVal = null) {
+      try { const v = localStorage.getItem(k); return v === null ? defVal : v; } catch (_) { return defVal; }
+    }
+    function lsSet(k, v) {
+      try { localStorage.setItem(k, v); } catch (_) {}
+    }
+    function lsDel(k) {
+      try { localStorage.removeItem(k); } catch (_) {}
+    }
+
+    let startLtUsd = parseFloat(lsGet(LT_START_KEY, "93.0426"));
+    let startBnUsd = parseFloat(lsGet(BN_START_KEY, "397.7745"));
+    let startCombUsd = parseFloat(lsGet(COMB_START_KEY, String(startLtUsd + startBnUsd)));
+    let bnManualOverride = parseFloat(lsGet(BN_OVERRIDE_KEY, "NaN"));
     document.getElementById("seedInput").value = startCombUsd.toFixed(4);
     if (!isNaN(bnManualOverride) && bnManualOverride > 0) {
       document.getElementById("bnLiveInput").value = bnManualOverride.toFixed(4);
     }
-    let eqHist = JSON.parse(localStorage.getItem(STORE_KEY) || "[]");
-    let rrBase = JSON.parse(localStorage.getItem(RR_KEY) || "null");
+    let eqHist = [];
+    try { eqHist = JSON.parse(lsGet(STORE_KEY, "[]") || "[]"); } catch (_) {}
+    let rrBase = null;
+    try { rrBase = JSON.parse(lsGet(RR_KEY, "null") || "null"); } catch (_) {}
     let savedDnMap = new Map();
     try {
-      const persisted = JSON.parse(localStorage.getItem(DN_TRADES_KEY) || "[]");
+      const persisted = JSON.parse(lsGet(DN_TRADES_KEY, "[]") || "[]");
       if (Array.isArray(persisted)) {
         for (const p of persisted) if (p && p.id) savedDnMap.set(String(p.id), p);
       }
@@ -239,7 +251,8 @@
 
     let lastTel = null;
     let lastAcct = null;
-    let lastBnAudit = JSON.parse(localStorage.getItem(BN_LAST_AUDIT_KEY) || "null");
+    let lastBnAudit = null;
+    try { lastBnAudit = JSON.parse(lsGet(BN_LAST_AUDIT_KEY, "null") || "null"); } catch (_) {}
     let activeOpenMkts = [];
     const seenTradeIds = new Set();
     let closedList = [];
@@ -268,12 +281,12 @@
       const raw = document.getElementById("bnLiveInput").value.trim();
       if (!raw) {
         bnManualOverride = NaN;
-        localStorage.removeItem(BN_OVERRIDE_KEY);
+        lsDel(BN_OVERRIDE_KEY);
       } else {
         const v = parseFloat(raw);
         if (!isNaN(v) && v > 0) {
           bnManualOverride = v;
-          localStorage.setItem(BN_OVERRIDE_KEY, String(v));
+          lsSet(BN_OVERRIDE_KEY, String(v));
         }
       }
       renderAll();
@@ -317,9 +330,9 @@
         startCombUsd = v;
         startLtUsd = curLt - diff * 0.5;
         startBnUsd = curBn - diff * 0.5;
-        localStorage.setItem(COMB_START_KEY, String(startCombUsd));
-        localStorage.setItem(LT_START_KEY, String(startLtUsd));
-        localStorage.setItem(BN_START_KEY, String(startBnUsd));
+        lsSet(COMB_START_KEY, String(startCombUsd));
+        lsSet(LT_START_KEY, String(startLtUsd));
+        lsSet(BN_START_KEY, String(startBnUsd));
         renderAll();
       }
     }
@@ -332,13 +345,13 @@
       startBnUsd = curBn;
       startCombUsd = curLt + curBn;
       document.getElementById("seedInput").value = startCombUsd.toFixed(4);
-      localStorage.setItem(COMB_START_KEY, String(startCombUsd));
-      localStorage.setItem(LT_START_KEY, String(startLtUsd));
-      localStorage.setItem(BN_START_KEY, String(startBnUsd));
+      lsSet(COMB_START_KEY, String(startCombUsd));
+      lsSet(LT_START_KEY, String(startLtUsd));
+      lsSet(BN_START_KEY, String(startBnUsd));
       eqHist = [{ t: Date.now(), v: startCombUsd }];
-      localStorage.setItem(STORE_KEY, JSON.stringify(eqHist));
+      lsSet(STORE_KEY, JSON.stringify(eqHist));
       rrBase = { t: Date.now(), v: startCombUsd };
-      localStorage.setItem(RR_KEY, JSON.stringify(rrBase));
+      lsSet(RR_KEY, JSON.stringify(rrBase));
       renderAll();
     }
 
@@ -536,14 +549,18 @@
         }
       }
 
+      if (data.binanceAudit && typeof data.binanceAudit === "object") {
+        audit = data.binanceAudit;
+      }
+
       if (mapDirty) {
         savedDnMap = byId;
         const persistArr = Array.from(byId.values()).filter(x => !x.synKey).slice(-200);
-        try { localStorage.setItem(DN_TRADES_KEY, JSON.stringify(persistArr)); } catch (_) {}
+        lsSet(DN_TRADES_KEY, JSON.stringify(persistArr));
       }
       if (audit) {
         lastBnAudit = audit;
-        try { localStorage.setItem(BN_LAST_AUDIT_KEY, JSON.stringify(audit)); } catch (_) {}
+        lsSet(BN_LAST_AUDIT_KEY, JSON.stringify(audit));
       }
       return { ver, scanTxt, readyTxt, rows: Array.from(byId.values()).sort((a, b) => b.id - a.id) };
     }
@@ -566,11 +583,11 @@
       const prevLen = eqHist.length;
       eqHist = eqHist.filter(pt => pt && isFinite(pt.v) && Math.abs(pt.v - combCap) < 1.50);
       if (eqHist.length !== prevLen) {
-        localStorage.setItem(STORE_KEY, JSON.stringify(eqHist));
+        lsSet(STORE_KEY, JSON.stringify(eqHist));
       }
       if (rrBase && Math.abs(rrBase.v - combCap) >= 1.50) {
         rrBase = eqHist.length ? { t: eqHist[0].t, v: eqHist[0].v } : { t: nowTs, v: combCap };
-        localStorage.setItem(RR_KEY, JSON.stringify(rrBase));
+        lsSet(RR_KEY, JSON.stringify(rrBase));
       }
 
       // Update rolling history of TRUE Combined 2-Platform Equity (Binance + Lighter)
@@ -579,7 +596,7 @@
         if (eqHist.length > 2500) eqHist = eqHist.slice(-2500);
         if (nowTs - lastSaveTs >= 15000) {
           lastSaveTs = nowTs;
-          localStorage.setItem(STORE_KEY, JSON.stringify(eqHist));
+          lsSet(STORE_KEY, JSON.stringify(eqHist));
         }
       }
 
@@ -716,7 +733,7 @@
       await poll();
       if (eqHist.length) {
         rrBase = { t: Date.now(), v: eqHist[eqHist.length - 1].v };
-        localStorage.setItem(RR_KEY, JSON.stringify(rrBase));
+        lsSet(RR_KEY, JSON.stringify(rrBase));
       }
       renderAll();
     }
