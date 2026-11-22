@@ -30,7 +30,7 @@ import (
 )
 
 const (
-	BotVersion = "v105.0"
+	BotVersion = "v107.2"
 	BaseURL    = "https://mainnet.zklighter.elliot.ai"
 	WsURL      = "wss://mainnet.zklighter.elliot.ai/stream"
 	AcctIdx    = int64(770015)

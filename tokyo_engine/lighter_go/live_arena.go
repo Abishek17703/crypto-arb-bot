@@ -18,7 +18,7 @@ import (
 )
 
 const (
-	LiveArenaVer       = "LIVE-MICRO-v107.1-SUB8MS-HEDGE"
+	LiveArenaVer       = "LIVE-MICRO-v107.2-2SLOT-S9"
 	Baseline3VenueUSD  = 223.8805 // 100% Flat Clean-Epoch 3-venue baseline ($91.3605 LT + $82.4512 BN Perp + $50.0688 Aster)
 	StratStopLossUSD   = -1.50    // Auto-halt individual strategy if realized+unrealized drops <= -$1.50
 	GlobalStopLossUSD  = -6.50    // Auto-flatten & S3-pause ALL live strategies at <= -$6.50 ($217.38 true Perp floor)
@@ -139,12 +139,14 @@ type LiveArenaTelemetry struct {
 }
 
 type LiveSlotRuntime struct {
+	SlotKey      string
 	StratID      string
 	PeerVenue    string // "BN_USDC" or "ASTER_C" or "ASTER_RWA"
 	Symbols      []string
 	ClipUsd      float64
 	ScaleMult489 float64 // Full-$489 Arena slotUsd / micro ClipUsd
 	EntryDisloc  float64
+	TakerGrabBp  float64 // >0 enables S9 Instant Taker-Grab (0% Lighter IOC -> <8ms Peer Hedge)!
 	ExitNetBp    float64
 	CancelTolBp  float64
 	MaxRestSec   float64
@@ -168,6 +170,7 @@ type LiveSlotRuntime struct {
 	EntryPeerPx  float64
 	EntryFx      float64
 	EntryPeerFee float64
+	EntryFeeUsd  float64
 	OpenedAt     time.Time
 	TradeID      int64
 
@@ -183,10 +186,12 @@ type LiveSlotRuntime struct {
 	OrigSymbols   []string
 	PendingVenue  string
 	PendingSyms   []string
+	PendingGrabBp float64
 	RotatedNote   string
 }
 
 type SavedSlotSnap struct {
+	SlotKey      string  `json:"slotKey,omitempty"`
 	StratID      string  `json:"stratId"`
 	State        string  `json:"state"`
 	Sym          string  `json:"sym"`
@@ -199,6 +204,7 @@ type SavedSlotSnap struct {
 	EntryPeerPx  float64 `json:"entryPeerPx"`
 	EntryFx      float64 `json:"entryFx"`
 	EntryPeerFee float64 `json:"entryPeerFee"`
+	EntryFeeUsd  float64 `json:"entryFeeUsd,omitempty"`
 	OpenedMs     int64   `json:"openedMs"`
 	TradeID      int64   `json:"tradeId"`
 	ExitPeerOid  int64   `json:"exitPeerOid"`
@@ -211,7 +217,8 @@ var (
 	liveBootMs       = time.Now().UnixMilli()
 	liveStrats       = map[string]*LiveStratAccount{}
 	liveStratOrder   = []string{}
-	liveSlots        = map[string]*LiveSlotRuntime{}
+	liveSlots        = map[string]*LiveSlotRuntime{} // key: SlotKey (e.g. StratID+":0", StratID+":1")
+	liveSlotKeys     = []string{}
 	liveFills        = []LiveFillAudit{}
 	ltTxTimesMs      = []int64{}
 	lastLiveSaveMs   int64
@@ -256,26 +263,27 @@ func initLiveMicroArena() {
 	}
 
 	defs := []struct {
-		id        string
-		name      string
-		venueDesc string
-		desc      string
-		peerVenue string
-		clip      float64
-		scale489  float64
-		startCash float64
-		entryBp   float64
-		exitBp    float64
-		syms      []string
+		id          string
+		name        string
+		venueDesc   string
+		desc        string
+		peerVenue   string
+		clip        float64
+		scale489    float64
+		startCash   float64
+		entryBp     float64
+		takerGrabBp float64
+		exitBp      float64
+		syms        []string
 	}{
 		{
 			id:        "LIVE_S5_MARGIN_STRICT",
-			name:      "0% LT Maker -> BN USDC-M High-Conviction (>=7.5bp)",
+			name:      "0% LT Maker -> BN USDC-M High-Conviction (2x $15 Slots)",
 			venueDesc: "LT #770015 (0%) <-> BN USDC-M (0% M / 4bp T)",
-			desc:      "Upgraded to S7 High-Conviction >=7.5bp threshold (+$13.40/hr 4h leader) with pre-warmed <8ms Tokyo Taker hedge -> 0% GTX Maker exit on Binance -> 0% Lighter IOC close.",
+			desc:      "2 concurrent $15 slots (>=7.5bp S7 threshold) with <8ms pre-warmed Tokyo Taker hedge -> 0% GTX Maker exit on Binance -> 0% Lighter IOC close.",
 			peerVenue: "BN_USDC",
 			clip:      15.0,
-			scale489:  550.0 / 15.0,
+			scale489:  550.0 / 30.0,
 			startCash: 40.0,
 			entryBp:   7.5,
 			exitBp:    2.6,
@@ -283,38 +291,39 @@ func initLiveMicroArena() {
 		},
 		{
 			id:        "LIVE_S3_LT_ASTER_CRYPTO",
-			name:      "0% LT Maker <-> AsterDEX High-Conviction (>=7.5bp)",
+			name:      "0% LT Maker <-> AsterDEX High-Conviction (2x $15 Slots)",
 			venueDesc: "LT #770015 (0%) <-> Aster Crypto (0% M / 4bp T)",
-			desc:      "High-conviction >=7.5bp entry (+$10.65/hr 4h) with pre-warmed <8ms Tokyo Taker hedge on AsterDEX -> 0% GTX Maker exit on Aster -> 0% Lighter IOC close.",
+			desc:      "2 concurrent $15 slots (>=7.5bp threshold, +$11.34/hr 4h) with <8ms Tokyo Taker hedge on AsterDEX -> 0% GTX Maker exit on Aster -> 0% Lighter IOC close.",
 			peerVenue: "ASTER_C",
 			clip:      15.0,
-			scale489:  580.0 / 15.0,
+			scale489:  580.0 / 30.0,
 			startCash: 25.0,
 			entryBp:   7.5,
 			exitBp:    2.6,
 			syms:      []string{"VVV", "XMR", "LIT"},
 		},
 		{
-			id:        "LIVE_S4_ASTER_LT_RWA",
-			name:      "0% LT Maker <-> Aster RWA / Auto-Crypto Boost (>=6.0bp)",
-			venueDesc: "LT #770015 (0%) <-> Aster RWA (1.25bp) / BN Boost",
-			desc:      "Lowest-fee cross-venue arb (1.25bp total 4-leg fee on RWA during US hours; auto-rotates to >=7.5bp Crypto Boost on weekends when IDLE).",
-			peerVenue: "ASTER_RWA",
-			clip:      15.0,
-			scale489:  1100.0 / 15.0,
-			startCash: 25.0,
-			entryBp:   6.0,
-			exitBp:    2.2,
-			syms:      []string{"NVDA", "AAPL", "TSLA", "QQQ", "SPY", "META", "COIN", "MSTR"},
+			id:          "LIVE_S4_ASTER_LT_RWA",
+			name:        "S9 Instant Taker-Grab (>=11bp Cross-Spike, 2x $15 Slots)",
+			venueDesc:   "LT #770015 0% IOC <-> BN USDC-M (+$23/hr S9 Leader!)",
+			desc:        "Promoted #1 Forward-Test leader (+$23.09/hr, 35/52 wins): instantly grabs >=11.0bp crossed dislocations via 0% Lighter IOC -> <8ms BN USDC-M Taker hedge -> 0% Maker exit (auto-restores RWA on US open).",
+			peerVenue:   "BN_USDC",
+			clip:        15.0,
+			scale489:    550.0 / 30.0,
+			startCash:   25.0,
+			entryBp:     8.0,
+			takerGrabBp: 11.0,
+			exitBp:      2.2,
+			syms:        []string{"KAITO", "CRV", "ETHFI", "WLFI"},
 		},
 		{
 			id:        "LIVE_S2_ZERO_FEE_DN",
-			name:      "0% LT Maker -> BN USDC-M Broad Alts (>=7.2bp)",
+			name:      "0% LT Maker -> BN USDC-M Broad Alts (2x $15 Slots)",
 			venueDesc: "LT #770015 (0%) <-> BN USDC-M (0% M / 4bp T)",
-			desc:      "Upgraded to S7 High-Conviction >=7.2bp threshold (+$13.40/hr 4h leader) across AAVE/AVAX/WLD/LINK/DOGE/XRP/TIA/PENGU/TRUMP with <8ms pre-warmed hedge.",
+			desc:      "2 concurrent $15 slots (>=7.2bp S7 threshold) across AAVE/AVAX/WLD/LINK/DOGE/XRP/TIA/PENGU/TRUMP so 1 slow coin never blocks new opportunities.",
 			peerVenue: "BN_USDC",
 			clip:      15.0,
-			scale489:  650.0 / 15.0,
+			scale489:  650.0 / 30.0,
 			startCash: 40.0,
 			entryBp:   7.2,
 			exitBp:    2.5,
@@ -336,20 +345,26 @@ func initLiveMicroArena() {
 			PeakEquity: d.startCash,
 			State:      "IDLE",
 		}
-		liveSlots[d.id] = &LiveSlotRuntime{
-			StratID:       d.id,
-			PeerVenue:     d.peerVenue,
-			Symbols:       append([]string(nil), d.syms...),
-			OrigPeerVenue: d.peerVenue,
-			OrigSymbols:   append([]string(nil), d.syms...),
-			ClipUsd:       d.clip,
-			ScaleMult489:  d.scale489,
-			EntryDisloc:   d.entryBp,
-			ExitNetBp:     d.exitBp,
-			CancelTolBp:   2.5,
-			MaxRestSec:    35.0,
-			MaxHoldSec:    900.0,
-			State:         "IDLE",
+		for sub := 0; sub < 2; sub++ {
+			sk := fmt.Sprintf("%s:%d", d.id, sub)
+			liveSlotKeys = append(liveSlotKeys, sk)
+			liveSlots[sk] = &LiveSlotRuntime{
+				SlotKey:       sk,
+				StratID:       d.id,
+				PeerVenue:     d.peerVenue,
+				Symbols:       append([]string(nil), d.syms...),
+				OrigPeerVenue: "ASTER_RWA",
+				OrigSymbols:   []string{"NVDA", "AAPL", "TSLA", "QQQ", "SPY", "META", "COIN", "MSTR"},
+				ClipUsd:       d.clip,
+				ScaleMult489:  d.scale489,
+				EntryDisloc:   d.entryBp,
+				TakerGrabBp:   d.takerGrabBp,
+				ExitNetBp:     d.exitBp,
+				CancelTolBp:   2.5,
+				MaxRestSec:    35.0,
+				MaxHoldSec:    900.0,
+				State:         "IDLE",
+			}
 		}
 	}
 	liveMu.Unlock()
@@ -393,7 +408,7 @@ func loadLiveArenaState() {
 		dst.HaltReason = st.HaltReason
 
 		// Fallback seamless position recovery even when upgrading from v105.2 (before SlotSnapshots existed):
-		rt := liveSlots[st.ID]
+		rt := liveSlots[st.ID+":0"]
 		if rt != nil && len(saved.SlotSnapshots) == 0 && len(st.PosSnap) >= 2 && (st.State == "HEDGED" || st.State == "PEER_EXIT_OPEN") {
 			var ltP, peerP LivePosView
 			for _, pv := range st.PosSnap {
@@ -416,6 +431,7 @@ func loadLiveArenaState() {
 				if peerP.Venue == "ASTER_RWA" {
 					rt.EntryPeerFee = 1.25
 				}
+				rt.EntryFeeUsd = roundTo((rt.HedgedQty*rt.EntryPeerPx*rt.EntryFx)*(rt.EntryPeerFee/10000.0), 4)
 				if ltP.Qty < 0 {
 					rt.LtSide, rt.PeerSide = "ASK", "BUY"
 				} else {
@@ -427,7 +443,11 @@ func loadLiveArenaState() {
 		}
 	}
 	for _, sn := range saved.SlotSnapshots {
-		rt := liveSlots[sn.StratID]
+		sk := sn.SlotKey
+		if sk == "" {
+			sk = sn.StratID + ":0"
+		}
+		rt := liveSlots[sk]
 		if rt == nil || (sn.State != "HEDGED" && sn.State != "PEER_EXIT_OPEN") || sn.HedgedQty <= 0 {
 			continue
 		}
@@ -441,7 +461,22 @@ func loadLiveArenaState() {
 		rt.EntryLtPx = sn.EntryLtPx
 		rt.EntryPeerPx = sn.EntryPeerPx
 		rt.EntryFx = sn.EntryFx
+		if rt.EntryFx <= 0 {
+			rt.EntryFx = 1.0
+		}
 		rt.EntryPeerFee = sn.EntryPeerFee
+		ef := sn.EntryFeeUsd
+		if ef <= 0 {
+			ef = roundTo((sn.HedgedQty*sn.EntryPeerPx*rt.EntryFx)*(sn.EntryPeerFee/10000.0), 4)
+		}
+		rt.EntryFeeUsd = ef
+		// Seamless v107.1 -> v107.2 migration: refund upfront open-slot fee out of Closed Cash into Open Basis!
+		if sn.SlotKey == "" && ef > 0 {
+			if dst := liveStrats[sn.StratID]; dst != nil {
+				dst.FeesPaid = math.Max(0, roundTo(dst.FeesPaid-ef, 4))
+				dst.Cash = roundTo(dst.StartCash+dst.RealizedGross-dst.FeesPaid+dst.FundingUsd, 4)
+			}
+		}
 		rt.OpenedAt = time.UnixMilli(sn.OpenedMs)
 		rt.TradeID = sn.TradeID
 		rt.ExitPeerOid = sn.ExitPeerOid
@@ -467,6 +502,44 @@ func hasAdoptedLivePositions() bool {
 		}
 	}
 	return false
+}
+
+func isSymUsedByAnySlot(sym, excludeSlotKey string) bool {
+	liveMu.Lock()
+	defer liveMu.Unlock()
+	for k, other := range liveSlots {
+		if k != excludeSlotKey && other != nil && other.State != "IDLE" && other.Sym == sym {
+			return true
+		}
+	}
+	return false
+}
+
+func waitLtPositionFill(sym string, minB float64, timeout time.Duration) (pos, avgPx float64) {
+	t0 := time.Now()
+	deadline := t0.Add(timeout)
+	restChecked := false
+	for time.Now().Before(deadline) {
+		if st := mktStates[sym]; st != nil {
+			st.mu.Lock()
+			p, ae := st.pos, st.avgEntry
+			st.mu.Unlock()
+			if math.Abs(p) >= minB {
+				return p, ae
+			}
+		}
+		if !restChecked && time.Since(t0) >= 480*time.Millisecond {
+			restChecked = true
+			if rp, rae := fetchLtPosREST(sym); math.Abs(rp) >= minB {
+				return rp, rae
+			}
+		}
+		select {
+		case <-ltFillCh:
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+	return fetchLtPosREST(sym)
 }
 
 func appendLiveFillLocked(f LiveFillAudit) {
@@ -897,7 +970,10 @@ func finalizeSlotClose(rt *LiveSlotRuntime, peerExitPx, peerExitFeeBp float64, e
 		fx = 1.0
 	}
 	notional := qty * rt.EntryLtPx
-	entryFeeUsd := (qty * rt.EntryPeerPx * fx) * (rt.EntryPeerFee / 10000.0)
+	entryFeeUsd := rt.EntryFeeUsd
+	if entryFeeUsd <= 0 && rt.EntryPeerFee > 0 {
+		entryFeeUsd = (qty * rt.EntryPeerPx * fx) * (rt.EntryPeerFee / 10000.0)
+	}
 	exitFeeUsd := (qty * peerExitPx * fx) * (peerExitFeeBp / 10000.0)
 	totalFeeUsd := entryFeeUsd + exitFeeUsd
 
@@ -938,9 +1014,9 @@ func finalizeSlotClose(rt *LiveSlotRuntime, peerExitPx, peerExitFeeBp float64, e
 	liveMu.Lock()
 	acct := liveStrats[rt.StratID]
 	if acct != nil {
-		// Note: entryFeeUsd was already added to FeesPaid at hedge open; add exitFeeUsd + grossTotal now!
+		// Book BOTH entryFeeUsd + exitFeeUsd (totalFeeUsd) and grossTotal ONLY when the round-trip closes so 0/0 closed ALWAYS shows $0.0000!
 		acct.RealizedGross = roundTo(acct.RealizedGross+grossTotal, 4)
-		acct.FeesPaid = roundTo(acct.FeesPaid+exitFeeUsd, 4)
+		acct.FeesPaid = roundTo(acct.FeesPaid+totalFeeUsd, 4)
 		acct.Cash = roundTo(acct.StartCash+acct.RealizedGross-acct.FeesPaid+acct.FundingUsd, 4)
 		acct.GrossVolumeUsd = roundTo(acct.GrossVolumeUsd+notional*2.0, 2)
 		if execType == "MAKER_GTX_EXIT" {
@@ -992,6 +1068,7 @@ func finalizeSlotClose(rt *LiveSlotRuntime, peerExitPx, peerExitFeeBp float64, e
 	rt.LtCOI = 0
 	rt.ExitPeerOid = 0
 	rt.HedgedQty = 0
+	rt.EntryFeeUsd = 0
 	rt.CoolUntil = now.Add(3 * time.Second)
 	liveMu.Unlock()
 
@@ -1107,8 +1184,7 @@ func stepLiveSlot(rt *LiveSlotRuntime, now time.Time) {
 			liveMu.Lock()
 			acct.MakerFills++
 			acct.TakerFills++
-			acct.FeesPaid = roundTo(acct.FeesPaid+entryFeeUsd, 4)
-			acct.Cash = roundTo(acct.StartCash+acct.RealizedGross-acct.FeesPaid+acct.FundingUsd, 4)
+			// Hold entryFeeUsd inside Open Hedged Basis (rt.EntryFeeUsd) until round-trip close so 0/0 closed trips ALWAYS reads $0.0000!
 			acct.GrossVolumeUsd = roundTo(acct.GrossVolumeUsd+notional*2.0, 2)
 			appendLiveFillLocked(LiveFillAudit{
 				TsMs:      tid,
@@ -1138,7 +1214,7 @@ func stepLiveSlot(rt *LiveSlotRuntime, now time.Time) {
 				Qty:       fq,
 				Notional:  roundTo(fq*ap*fx, 2),
 				FeeUsd:    roundTo(entryFeeUsd, 4),
-				Realized:  roundTo(-entryFeeUsd, 4),
+				Realized:  0.0,
 				SlipBp:    roundTo(slipBp, 2),
 				LatencyMs: latMs,
 				Tag:       "PEER_HEDGE",
@@ -1149,6 +1225,7 @@ func stepLiveSlot(rt *LiveSlotRuntime, now time.Time) {
 			rt.EntryPeerPx = ap
 			rt.EntryFx = fx
 			rt.EntryPeerFee = tFeeBp
+			rt.EntryFeeUsd = roundTo(entryFeeUsd, 4)
 			rt.OpenedAt = now
 			rt.TradeID = tid
 			liveMu.Unlock()
@@ -1388,10 +1465,12 @@ func stepLiveSlot(rt *LiveSlotRuntime, now time.Time) {
 	if len(rt.PendingSyms) > 0 && rt.State == "IDLE" && rt.HedgedQty == 0 && rt.Sym == "" {
 		rt.PeerVenue = rt.PendingVenue
 		rt.Symbols = append([]string(nil), rt.PendingSyms...)
+		rt.TakerGrabBp = rt.PendingGrabBp
 		rt.PendingVenue = ""
 		rt.PendingSyms = nil
-		fmt.Printf("[IDLE_SAFE_ROTATE strat=%s newVenue=%s syms=%v note=%s]\n",
-			rt.StratID, rt.PeerVenue, rt.Symbols, rt.RotatedNote)
+		rt.PendingGrabBp = 0
+		fmt.Printf("[IDLE_SAFE_ROTATE slot=%s newVenue=%s grab=%.1fbp syms=%v note=%s]\n",
+			rt.SlotKey, rt.PeerVenue, rt.TakerGrabBp, rt.Symbols, rt.RotatedNote)
 	}
 	liveMu.Unlock()
 
@@ -1423,12 +1502,259 @@ func stepLiveSlot(rt *LiveSlotRuntime, now time.Time) {
 		return
 	}
 
+	// -------------------------------------------------------------------------
+	// S9 INSTANT TAKER-GRAB MODE (rt.TakerGrabBp > 0):
+	// Instantly crosses >= 11.0bp crossed dislocation via 0% Lighter IOC -> <8ms Peer Taker Hedge!
+	// -------------------------------------------------------------------------
+	if rt.TakerGrabBp > 0 {
+		gSym, gPeerSym, gLtSide, gPeerSide := "", "", "", ""
+		gCrossBp, gLtSigPx, gQty := -999.0, 0.0, 0.0
+		gQDec, gTFeeBp, gFx := 0, 4.0, 1.0
+
+		for _, sym := range rt.Symbols {
+			if isSymUsedByAnySlot(sym, rt.SlotKey) {
+				continue
+			}
+			m, okM := markets[sym]
+			st := mktStates[sym]
+			if !okM || st == nil {
+				continue
+			}
+			st.mu.Lock()
+			lb, la, ltPos, lTS := st.ltBid, st.ltAsk, st.pos, st.lastBookTS
+			st.mu.Unlock()
+			if math.Abs(ltPos) >= m.MinB || lb <= 0 || la <= lb || now.Sub(lTS) > 8*time.Second {
+				continue
+			}
+			peerSym, qDec, _, step, _, minNot, _, tFeeBp, pBid, pAsk, emaBps, jumpBps, fx, warmTicks, bookAge, okP := getPeerSpecAndBook(rt.PeerVenue, sym, now)
+			if !okP || warmTicks < 8 || bookAge > 8*time.Second || math.Abs(emaBps) > 35.0 || math.Abs(jumpBps) > 1.8 {
+				continue
+			}
+			pSp := (pAsk - pBid) / pBid * 10000.0
+			if pSp > 8.0 {
+				continue
+			}
+			pBidUsd := pBid * fx
+			pAskUsd := pAsk * fx
+			ltMid := 0.5 * (lb + la)
+
+			commonStep := math.Max(step, math.Pow10(-m.SzDec))
+			qtyDec := qDec
+			if m.SzDec < qtyDec {
+				qtyDec = m.SzDec
+			}
+			qty := roundTo(math.Floor((rt.ClipUsd/ltMid)/commonStep+1e-9)*commonStep, qtyDec)
+			if qty*ltMid < 10.5 && (qty+commonStep)*ltMid <= rt.ClipUsd+3.5 {
+				qty = roundTo(qty+commonStep, qtyDec)
+			}
+			if qty < m.MinB || qty*ltMid < math.Max(10.5, minNot) {
+				continue
+			}
+
+			rawCrossShort := ((lb - pAskUsd) / pAskUsd) * 10000.0
+			crossShortBp := rawCrossShort - emaBps
+			if crossShortBp >= rt.TakerGrabBp && rawCrossShort >= tFeeBp+3.0 && crossShortBp > gCrossBp {
+				gCrossBp = crossShortBp
+				gSym, gPeerSym = sym, peerSym
+				gLtSide, gPeerSide = "ASK", "BUY"
+				gLtSigPx, gQty = lb, qty
+				gQDec, gTFeeBp, gFx = qDec, tFeeBp, fx
+			}
+
+			rawCrossLong := ((pBidUsd - la) / pBidUsd) * 10000.0
+			crossLongBp := rawCrossLong + emaBps
+			if crossLongBp >= rt.TakerGrabBp && rawCrossLong >= tFeeBp+3.0 && crossLongBp > gCrossBp {
+				gCrossBp = crossLongBp
+				gSym, gPeerSym = sym, peerSym
+				gLtSide, gPeerSide = "BID", "SELL"
+				gLtSigPx, gQty = la, qty
+				gQDec, gTFeeBp, gFx = qDec, tFeeBp, fx
+			}
+		}
+
+		if gSym == "" || gQty <= 0 {
+			return
+		}
+
+		// Confirm live Lighter REST BBO still crosses >= TakerGrabBp right before firing IOC:
+		m := markets[gSym]
+		rb, ra := fetchLtBookREST(m.ID)
+		if rb <= 0 || ra <= rb {
+			return
+		}
+		_, qDecChk, _, stepChk, _, _, _, tFeeChk, pBidChk, pAskChk, emaChk, _, fxChk, _, _, okChk := getPeerSpecAndBook(rt.PeerVenue, gSym, now)
+		if !okChk {
+			return
+		}
+		gQDec, gTFeeBp, gFx = qDecChk, tFeeChk, fxChk
+		var iocLimitPx, peerSigPx float64
+		if gLtSide == "ASK" {
+			gLtSigPx = rb
+			peerSigPx = pAskChk
+			rawCS := ((rb - pAskChk*fxChk) / (pAskChk * fxChk)) * 10000.0
+			gCrossBp = rawCS - emaChk
+			if gCrossBp < rt.TakerGrabBp || rawCS < tFeeChk+2.5 {
+				return
+			}
+			iocLimitPx = roundTo(rb*0.9988, m.PxDec)
+		} else {
+			gLtSigPx = ra
+			peerSigPx = pBidChk
+			rawCL := ((pBidChk*fxChk - ra) / (pBidChk * fxChk)) * 10000.0
+			gCrossBp = rawCL + emaChk
+			if gCrossBp < rt.TakerGrabBp || rawCL < tFeeChk+2.5 {
+				return
+			}
+			iocLimitPx = roundTo(ra*1.0012, m.PxDec)
+		}
+
+		// Pre-set Peer leverage before firing Lighter IOC so hedge fires in <8ms upon fill!
+		if rt.PeerVenue == "BN_USDC" {
+			ensureBnLeverage(gPeerSym)
+		} else {
+			lev := 5
+			if rt.PeerVenue == "ASTER_RWA" {
+				lev = 8
+			}
+			ensureAsterLeverage(gPeerSym, lev)
+		}
+
+		// Claim symbol lock while IOC is in flight across 305ms Lighter speed-bump:
+		liveMu.Lock()
+		if !canSendLtTxLocked(now.UnixMilli(), false) {
+			liveMu.Unlock()
+			return
+		}
+		recordLtTxLocked(now.UnixMilli())
+		rt.Sym = gSym
+		liveMu.Unlock()
+
+		tIoc0 := time.Now()
+		placeLtHedgeIOC(gSym, gLtSide, iocLimitPx, gQty, false)
+		ltPos, ltAvg := waitLtPositionFill(gSym, m.MinB, 950*time.Millisecond)
+		ltIocLatMs := time.Since(tIoc0).Milliseconds()
+		if math.Abs(ltPos) < m.MinB {
+			liveMu.Lock()
+			rt.Sym = ""
+			rt.CoolUntil = time.Now().Add(2500 * time.Millisecond)
+			liveMu.Unlock()
+			return
+		}
+		fillQty := math.Abs(ltPos)
+		if ltAvg <= 0 {
+			ltAvg = gLtSigPx
+		}
+		hQty := fillQty
+		if stepChk > 0 {
+			hQty = roundTo(math.Floor(fillQty/stepChk+1e-9)*stepChk, gQDec)
+		}
+		if hQty <= 0 {
+			_, _ = closeLtLegGuaranteedSync(gSym, ltPos, rb, ra)
+			liveMu.Lock()
+			rt.Sym = ""
+			rt.CoolUntil = time.Now().Add(5 * time.Second)
+			liveMu.Unlock()
+			return
+		}
+
+		fq, ap, latMs, okH := executePeerMarketOrder(rt.PeerVenue, gPeerSym, gPeerSide, hQty, gQDec, false)
+		if !okH || fq <= 0 {
+			_, _ = closeLtLegGuaranteedSync(gSym, ltPos, rb, ra)
+			liveMu.Lock()
+			rt.Sym = ""
+			rt.CoolUntil = time.Now().Add(10 * time.Second)
+			liveMu.Unlock()
+			return
+		}
+		if ap <= 0 {
+			ap = peerSigPx
+		}
+		notional := fq * ltAvg
+		entryFeeUsd := (fq * ap * gFx) * (gTFeeBp / 10000.0)
+		slipBp := 0.0
+		if peerSigPx > 0 {
+			if gPeerSide == "BUY" {
+				slipBp = ((ap - peerSigPx) / peerSigPx) * 10000.0
+			} else {
+				slipBp = ((peerSigPx - ap) / peerSigPx) * 10000.0
+			}
+		}
+		ltSideHuman := "BUY"
+		if gLtSide == "ASK" {
+			ltSideHuman = "SELL"
+		}
+		tid := time.Now().UnixMilli()
+		liveMu.Lock()
+		acct.TakerFills += 2
+		acct.GrossVolumeUsd = roundTo(acct.GrossVolumeUsd+notional*2.0, 2)
+		appendLiveFillLocked(LiveFillAudit{
+			TsMs:      tid,
+			StratID:   rt.StratID,
+			Venue:     "LT_STD",
+			Symbol:    gSym,
+			Side:      ltSideHuman,
+			ExecType:  "LT_IOC_0FEE_GRAB",
+			FillPx:    ltAvg,
+			SignalPx:  gLtSigPx,
+			Qty:       fq,
+			Notional:  roundTo(notional, 2),
+			FeeUsd:    0.0,
+			Realized:  0.0,
+			LatencyMs: ltIocLatMs,
+			Tag:       "S9_TAKER_GRAB",
+		})
+		appendLiveFillLocked(LiveFillAudit{
+			TsMs:      tid,
+			StratID:   rt.StratID,
+			Venue:     rt.PeerVenue,
+			Symbol:    gPeerSym,
+			Side:      gPeerSide,
+			ExecType:  "TOKYO_TAKER_HEDGE",
+			FillPx:    ap,
+			SignalPx:  peerSigPx,
+			Qty:       fq,
+			Notional:  roundTo(fq*ap*gFx, 2),
+			FeeUsd:    roundTo(entryFeeUsd, 4),
+			Realized:  0.0,
+			SlipBp:    roundTo(slipBp, 2),
+			LatencyMs: latMs,
+			Tag:       "PEER_HEDGE",
+		})
+		rt.State = "HEDGED"
+		rt.Sym = gSym
+		rt.PeerSym = gPeerSym
+		rt.LtSide = gLtSide
+		rt.PeerSide = gPeerSide
+		rt.HedgedQty = fq
+		rt.EntryLtPx = ltAvg
+		rt.EntryPeerPx = ap
+		rt.EntryFx = gFx
+		rt.EntryPeerFee = gTFeeBp
+		rt.EntryFeeUsd = roundTo(entryFeeUsd, 4)
+		rt.OpenedAt = time.Now()
+		rt.TradeID = tid
+		liveMu.Unlock()
+
+		lockedEdgeBp := ((ltAvg - ap*gFx) / (ap * gFx) * 10000.0) - gTFeeBp
+		if gLtSide == "BID" {
+			lockedEdgeBp = ((ap*gFx - ltAvg) / (ap * gFx) * 10000.0) - gTFeeBp
+		}
+		recordStratOpen(tid, rt.StratID,
+			fmt.Sprintf("S9_GRAB_%s_%s+%s_%s", gSym, gLtSide, rt.PeerVenue, gPeerSide),
+			gSym, notional, lockedEdgeBp,
+			fmt.Sprintf("S9Grab Lt0pct@%.5f(%dms)+Peer@%.5f(%dms)", ltAvg, ltIocLatMs, ap, latMs))
+		return
+	}
+
 	bestSym, bestPeerSym, bestLtSide, bestPeerSide := "", "", "", ""
 	bestDisloc, bestLtPx, bestQty := -999.0, 0.0, 0.0
 
 	for _, sym := range rt.Symbols {
 		switch sym {
 		case "PRL", "BB", "ARM", "OPENAI", "ZEC":
+			continue
+		}
+		if isSymUsedByAnySlot(sym, rt.SlotKey) {
 			continue
 		}
 		m, okM := markets[sym]
@@ -1602,68 +1928,95 @@ func writeLiveArenaTelemetry(now time.Time) {
 
 	for _, id := range liveStratOrder {
 		acct := liveStrats[id]
-		rt := liveSlots[id]
-		if acct == nil || rt == nil {
+		rt0 := liveSlots[id+":0"]
+		if acct == nil || rt0 == nil {
 			continue
 		}
 
 		upnl := 0.0
 		snaps := []LivePosView{}
 		activeMakers := 0
-		if rt.State == "LT_ENTRY_OPEN" || rt.State == "PEER_EXIT_OPEN" {
-			activeMakers = 1
-		}
-		if (rt.State == "HEDGED" || rt.State == "PEER_EXIT_OPEN") && rt.HedgedQty > 0 {
-			if st := mktStates[rt.Sym]; st != nil {
-				st.mu.Lock()
-				lb, la := st.ltBid, st.ltAsk
-				st.mu.Unlock()
-				ltQtySigned := rt.HedgedQty
-				ltMark := lb
-				if rt.LtSide == "ASK" {
-					ltQtySigned = -rt.HedgedQty
-					ltMark = la
+		var activeSyms []string
+		var stateParts []string
+		primaryState := "IDLE"
+		rotNote := rt0.RotatedNote
+
+		for sub := 0; sub < 2; sub++ {
+			rt := liveSlots[fmt.Sprintf("%s:%d", id, sub)]
+			if rt == nil {
+				continue
+			}
+			if rt.RotatedNote != "" {
+				rotNote = rt.RotatedNote
+			}
+			if rt.State == "LT_ENTRY_OPEN" || rt.State == "PEER_EXIT_OPEN" {
+				activeMakers++
+			}
+			if rt.State != "IDLE" {
+				if primaryState == "IDLE" || rt.State == "HEDGED" || rt.State == "PEER_EXIT_OPEN" {
+					primaryState = rt.State
 				}
-				if ltMark > 0 {
-					if ltQtySigned > 0 {
-						upnl += rt.HedgedQty * (ltMark - rt.EntryLtPx)
+				if rt.Sym != "" {
+					activeSyms = append(activeSyms, rt.Sym)
+					stateParts = append(stateParts, fmt.Sprintf("%s(%s)", rt.State, rt.Sym))
+				} else {
+					stateParts = append(stateParts, rt.State)
+				}
+			}
+			if (rt.State == "HEDGED" || rt.State == "PEER_EXIT_OPEN") && rt.HedgedQty > 0 {
+				// Deduct opening peer fee inside Open Hedged Basis until close so 0/0 Closed Signal stays $0.0000!
+				upnl -= rt.EntryFeeUsd
+				if st := mktStates[rt.Sym]; st != nil {
+					st.mu.Lock()
+					lb, la := st.ltBid, st.ltAsk
+					st.mu.Unlock()
+					ltQtySigned := rt.HedgedQty
+					ltMark := lb
+					if rt.LtSide == "ASK" {
+						ltQtySigned = -rt.HedgedQty
+						ltMark = la
+					}
+					if ltMark > 0 {
+						if ltQtySigned > 0 {
+							upnl += rt.HedgedQty * (ltMark - rt.EntryLtPx)
+						} else {
+							upnl += rt.HedgedQty * (rt.EntryLtPx - ltMark)
+						}
+					}
+					snaps = append(snaps, LivePosView{
+						Venue:     "LT_STD",
+						Symbol:    rt.Sym,
+						Qty:       ltQtySigned,
+						AvgPx:     rt.EntryLtPx,
+						OpenedMs:  rt.OpenedAt.UnixMilli(),
+						UpdatedMs: nowMs,
+						Tag:       rt.State,
+					})
+				}
+				_, _, _, _, _, _, _, _, pBid, pAsk, _, _, fx, _, _, okP := getPeerSpecAndBook(rt.PeerVenue, rt.Sym, now)
+				peerQtySigned := rt.HedgedQty
+				pMark := pBid
+				if rt.PeerSide == "SELL" {
+					peerQtySigned = -rt.HedgedQty
+					pMark = pAsk
+				}
+				if okP && pMark > 0 {
+					if peerQtySigned > 0 {
+						upnl += rt.HedgedQty * (pMark - rt.EntryPeerPx) * fx
 					} else {
-						upnl += rt.HedgedQty * (rt.EntryLtPx - ltMark)
+						upnl += rt.HedgedQty * (rt.EntryPeerPx - pMark) * fx
 					}
 				}
 				snaps = append(snaps, LivePosView{
-					Venue:     "LT_STD",
-					Symbol:    rt.Sym,
-					Qty:       ltQtySigned,
-					AvgPx:     rt.EntryLtPx,
+					Venue:     rt.PeerVenue,
+					Symbol:    rt.PeerSym,
+					Qty:       peerQtySigned,
+					AvgPx:     rt.EntryPeerPx,
 					OpenedMs:  rt.OpenedAt.UnixMilli(),
 					UpdatedMs: nowMs,
 					Tag:       rt.State,
 				})
 			}
-			_, _, _, _, _, _, _, _, pBid, pAsk, _, _, fx, _, _, okP := getPeerSpecAndBook(rt.PeerVenue, rt.Sym, now)
-			peerQtySigned := rt.HedgedQty
-			pMark := pBid
-			if rt.PeerSide == "SELL" {
-				peerQtySigned = -rt.HedgedQty
-				pMark = pAsk
-			}
-			if okP && pMark > 0 {
-				if peerQtySigned > 0 {
-					upnl += rt.HedgedQty * (pMark - rt.EntryPeerPx) * fx
-				} else {
-					upnl += rt.HedgedQty * (rt.EntryPeerPx - pMark) * fx
-				}
-			}
-			snaps = append(snaps, LivePosView{
-				Venue:     rt.PeerVenue,
-				Symbol:    rt.PeerSym,
-				Qty:       peerQtySigned,
-				AvgPx:     rt.EntryPeerPx,
-				OpenedMs:  rt.OpenedAt.UnixMilli(),
-				UpdatedMs: nowMs,
-				Tag:       rt.State,
-			})
 		}
 
 		acct.UnrealizedPnL = roundTo(upnl, 4)
@@ -1714,23 +2067,28 @@ func writeLiveArenaTelemetry(now time.Time) {
 				roll4h = roundTo((acct.Cash-refPt.Cash)/dtHr, 3)
 			}
 		}
-		acct.Rolling4hHourly = roll4h
-		// Rank & scale on Closed Realized 4h $/hr once >= 1 closed trip so open spread wicks never distort signal!
-		sigHr := roll4h
+		// Strictly zero Closed Signal $/hr when 0 round-trips have closed!
 		if acct.RoundTrips == 0 {
-			sigHr = acct.HourlyRunRate
+			acct.RealizedHourly = 0.0
+			roll4h = 0.0
 		}
-		acct.Scaled489Hourly = roundTo(sigHr*rt.ScaleMult489, 2)
+		acct.Rolling4hHourly = roll4h
+		sigHr := roll4h
+		acct.Scaled489Hourly = roundTo(sigHr*rt0.ScaleMult489, 2)
 		acct.ActiveMakers = activeMakers
 		acct.PosSnap = snaps
-		acct.State = rt.State
-		acct.ActiveSym = rt.Sym
-		acct.RotatedNote = rt.RotatedNote
+		acct.State = primaryState
+		acct.ActiveSym = strings.Join(activeSyms, ",")
+		acct.RotatedNote = rotNote
+		stateDisp := "IDLE (2x$15 Ready)"
+		if len(stateParts) > 0 {
+			stateDisp = strings.Join(stateParts, " + ")
+		}
 		if acct.Halted {
 			acct.StatusNote = "HALTED: " + acct.HaltReason
 		} else {
-			acct.StatusNote = fmt.Sprintf("State:%s %s | Closed $%+.3f | 4h:$%+.2f/hr (@$489: $%+.2f/hr)",
-				rt.State, rt.Sym, realStrat, roll4h, acct.Scaled489Hourly)
+			acct.StatusNote = fmt.Sprintf("Slots:%s | Closed $%+.4f | 4h:$%+.2f/hr (@$489: $%+.2f/hr)",
+				stateDisp, realStrat, roll4h, acct.Scaled489Hourly)
 		}
 
 		if sigHr > bestHr {
@@ -1756,7 +2114,7 @@ func writeLiveArenaTelemetry(now time.Time) {
 	// Build live dislocation radar across all 4 strategy symbol sets:
 	spreads := make([]LiveSpreadSnap, 0, 26)
 	for _, id := range liveStratOrder {
-		rt := liveSlots[id]
+		rt := liveSlots[id+":0"]
 		if rt == nil {
 			continue
 		}
@@ -1801,10 +2159,11 @@ func writeLiveArenaTelemetry(now time.Time) {
 	}
 
 	liveMu.Lock()
-	slotSnaps := make([]SavedSlotSnap, 0, len(liveStratOrder))
-	for _, id := range liveStratOrder {
-		if rt := liveSlots[id]; rt != nil {
+	slotSnaps := make([]SavedSlotSnap, 0, len(liveSlotKeys))
+	for _, sk := range liveSlotKeys {
+		if rt := liveSlots[sk]; rt != nil {
 			slotSnaps = append(slotSnaps, SavedSlotSnap{
+				SlotKey:      rt.SlotKey,
 				StratID:      rt.StratID,
 				State:        rt.State,
 				Sym:          rt.Sym,
@@ -1817,6 +2176,7 @@ func writeLiveArenaTelemetry(now time.Time) {
 				EntryPeerPx:  rt.EntryPeerPx,
 				EntryFx:      rt.EntryFx,
 				EntryPeerFee: rt.EntryPeerFee,
+				EntryFeeUsd:  rt.EntryFeeUsd,
 				OpenedMs:     rt.OpenedAt.UnixMilli(),
 				TradeID:      rt.TradeID,
 				ExitPeerOid:  rt.ExitPeerOid,
@@ -1897,22 +2257,26 @@ func evaluateForwardArenaIdleSafeRotation() {
 
 	liveMu.Lock()
 	defer liveMu.Unlock()
-	rt4 := liveSlots["LIVE_S4_ASTER_LT_RWA"]
-	if rt4 == nil {
-		return
-	}
-	// Never swap mid-position! Queue into PendingSyms so it only applies when State == "IDLE"!
-	if s4Hr < 4.50 && topCryptoHr >= 6.50 {
-		wantSyms := []string{"KAITO", "CRV", "ETHFI", "WLFI"} // strictly disjoint from S5/S3/S2!
-		if rt4.PeerVenue != "BN_USDC" && len(rt4.PendingSyms) == 0 {
-			rt4.PendingVenue = "BN_USDC"
-			rt4.PendingSyms = wantSyms
-			rt4.RotatedNote = fmt.Sprintf("4h Rolling Auto-Swap: RWA $%.2f/hr -> Crypto Boost (waits for IDLE)", s4Hr)
+	for sub := 0; sub < 2; sub++ {
+		rt4 := liveSlots[fmt.Sprintf("LIVE_S4_ASTER_LT_RWA:%d", sub)]
+		if rt4 == nil {
+			continue
 		}
-	} else if s4Hr >= 5.00 && rt4.PeerVenue != rt4.OrigPeerVenue && len(rt4.PendingSyms) == 0 {
-		rt4.PendingVenue = rt4.OrigPeerVenue
-		rt4.PendingSyms = append([]string(nil), rt4.OrigSymbols...)
-		rt4.RotatedNote = fmt.Sprintf("4h Rolling Auto-Swap: Restored RWA Equities ($%.2f/hr >= $5.00)", s4Hr)
+		// Never swap mid-position! Queue into PendingSyms so it only applies when State == "IDLE"!
+		if s4Hr < 4.50 && topCryptoHr >= 6.50 {
+			wantSyms := []string{"KAITO", "CRV", "ETHFI", "WLFI"} // strictly disjoint from S5/S3/S2!
+			if rt4.PeerVenue != "BN_USDC" && len(rt4.PendingSyms) == 0 {
+				rt4.PendingVenue = "BN_USDC"
+				rt4.PendingSyms = wantSyms
+				rt4.PendingGrabBp = 11.0
+				rt4.RotatedNote = fmt.Sprintf("4h Rolling Auto-Swap: RWA $%.2f/hr -> S9 Instant Taker-Grab", s4Hr)
+			}
+		} else if s4Hr >= 5.00 && rt4.PeerVenue != rt4.OrigPeerVenue && len(rt4.PendingSyms) == 0 {
+			rt4.PendingVenue = rt4.OrigPeerVenue
+			rt4.PendingSyms = append([]string(nil), rt4.OrigSymbols...)
+			rt4.PendingGrabBp = 0.0
+			rt4.RotatedNote = fmt.Sprintf("4h Rolling Auto-Swap: Restored RWA Equities ($%.2f/hr >= $5.00)", s4Hr)
+		}
 	}
 }
 
@@ -1977,11 +2341,11 @@ func runLiveMicroArenaLoop() {
 			lastRotCheck = now
 			go evaluateForwardArenaIdleSafeRotation()
 		}
-		for _, id := range liveStratOrder {
+		for _, sk := range liveSlotKeys {
 			if remotePaused.Load() || breakerTripped.Load() {
 				return
 			}
-			if rt := liveSlots[id]; rt != nil {
+			if rt := liveSlots[sk]; rt != nil {
 				stepLiveSlot(rt, now)
 			}
 		}
