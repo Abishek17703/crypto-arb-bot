@@ -25,6 +25,10 @@ LIGHTER_ACCT_IDX = 770015
 LIGHTER_BASE = "https://mainnet.zklighter.elliot.ai"
 LIGHTER_GO_BIN = "/opt/crypto-arb-bot/lighter_go_bot"
 LIGHTER_GO_URL = "https://github.com/Abishek17703/crypto-arb-bot/releases/download/lighter-go-latest/lighter_go_bot"
+ARENA_GO_BIN = "/opt/crypto-arb-bot/arena_go"
+ARENA_JSON_PATH = "/tmp/forward_arena.json"
+ARENA_S3_KEY = "forward-arena.json"
+ARENA_LOG_PATH = "/tmp/forward_arena.log"
 PAUSE_FLAG_PATH = "/tmp/lighter_pause.flag"
 LOG_PATH = "/tmp/lighter_tokyo.log"
 HIST_PATHS = ("/opt/crypto-arb-bot/dn_trades_history.json", "/tmp/dn_trades_history.json")
@@ -455,6 +459,18 @@ def is_go_bot_running():
     return r.returncode == 0
 
 
+def ensure_arena_running():
+    if not os.path.exists(ARENA_GO_BIN):
+        return
+    r = subprocess.run(["pgrep", "-f", "/opt/crypto-arb-bot/arena_go"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if r.returncode != 0:
+        try:
+            with open(ARENA_LOG_PATH, "a", encoding="utf-8", errors="replace") as af:
+                subprocess.Popen([ARENA_GO_BIN], stdout=af, stderr=subprocess.STDOUT)
+        except Exception:
+            pass
+
+
 def stop_go_bot_gracefully():
     write_flag(True)
     deadline = time.time() + 3.0
@@ -668,6 +684,7 @@ def main():
 
             if now - last_proc_chk >= 5.0:
                 last_proc_chk = now
+                ensure_arena_running()
                 if not state["user_paused"] and os.path.exists(PAUSE_FLAG_PATH) and not is_go_bot_running():
                     state["user_paused"] = True
                     append_log("[TELEMETRY] Detected local pause flag exit from Go engine; keeping paused.")
@@ -754,6 +771,20 @@ def main():
                     ContentType="application/json",
                     CacheControl="no-store, no-cache, must-revalidate, max-age=0",
                 )
+                if os.path.exists(ARENA_JSON_PATH):
+                    try:
+                        with open(ARENA_JSON_PATH, "rb") as af:
+                            arena_bytes = af.read()
+                        if len(arena_bytes) > 50:
+                            s3.put_object(
+                                Bucket=S3_BUCKET,
+                                Key=ARENA_S3_KEY,
+                                Body=arena_bytes,
+                                ContentType="application/json",
+                                CacheControl="no-store, no-cache, must-revalidate, max-age=0",
+                            )
+                    except Exception:
+                        pass
         except Exception as e:
             print("Telemetry loop err:", e, flush=True)
 
