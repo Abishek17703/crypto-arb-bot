@@ -26,7 +26,7 @@ const (
 	TargetHourly   = 5.00
 	ArenaOutPath   = "/tmp/forward_arena.json"
 	ArenaStatePath = "/opt/crypto-arb-bot/forward_arena_state.json"
-	ArenaVer       = "ARENA-v4.1-TOKYO-PERSIST"
+	ArenaVer       = "ARENA-v4.2-ROLLING-4H"
 
 	VenueBnUsdc   = "BN_USDC"
 	VenueBnUsdt   = "BN_USDT"
@@ -178,6 +178,7 @@ type FillAudit struct {
 type EquityPoint struct {
 	TsMs   int64   `json:"ts"`
 	Equity float64 `json:"eq"`
+	Cash   float64 `json:"cash,omitempty"`
 }
 
 type StrategyAccount struct {
@@ -197,6 +198,7 @@ type StrategyAccount struct {
 	MaxDrawdownUsd  float64              `json:"maxDrawdownUsd"`
 	HourlyRunRate   float64              `json:"hourlyRunRate"`
 	RealizedHourly  float64              `json:"realizedHourly"`
+	Rolling4hHourly float64              `json:"rolling4hHourly"`
 	MakerPlaced     int64                `json:"makerPlaced"`
 	MakerCancelled  int64                `json:"makerCancelled"`
 	MakerFills      int64                `json:"makerFills"`
@@ -1637,12 +1639,31 @@ func updateMarkToMarketAndWriteTelemetry() {
 		s.ActiveMakers = makerCntByStrat[id]
 		s.PosSnap = snaps
 
-		if len(s.EquityCurve) == 0 || nowMs-s.EquityCurve[len(s.EquityCurve)-1].TsMs >= 15000 {
-			s.EquityCurve = append(s.EquityCurve, EquityPoint{TsMs: nowMs, Equity: s.Equity})
-			if len(s.EquityCurve) > 240 {
-				s.EquityCurve = append([]EquityPoint(nil), s.EquityCurve[len(s.EquityCurve)-240:]...)
+		if len(s.EquityCurve) == 0 || nowMs-s.EquityCurve[len(s.EquityCurve)-1].TsMs >= 30000 {
+			s.EquityCurve = append(s.EquityCurve, EquityPoint{TsMs: nowMs, Equity: s.Equity, Cash: s.Cash})
+			if len(s.EquityCurve) > 540 { // 540 * 30s = 4.5 hours full rolling window!
+				s.EquityCurve = append([]EquityPoint(nil), s.EquityCurve[len(s.EquityCurve)-540:]...)
 			}
 		}
+
+		// Compute true 4-hour rolling $/hr from EquityCurve (falls back smoothly to all-time if <4h collected):
+		roll4h := s.HourlyRunRate
+		targetTs := nowMs - 4*3600*1000
+		if len(s.EquityCurve) >= 2 {
+			refPt := s.EquityCurve[0]
+			for _, pt := range s.EquityCurve {
+				if pt.TsMs <= targetTs {
+					refPt = pt
+				} else {
+					break
+				}
+			}
+			dtHr := float64(nowMs-refPt.TsMs) / 3600000.0
+			if dtHr >= 0.50 {
+				roll4h = roundTo((s.Equity-refPt.Equity)/dtHr, 3)
+			}
+		}
+		s.Rolling4hHourly = roll4h
 
 		s.StatusNote = fmt.Sprintf("Net $%+.2f ($%+.2f/hr) | Fills:%dM/%dT (Pickoff:%d) | Pos:%d | Resting:%d",
 			netGain, s.HourlyRunRate, s.MakerFills, s.TakerFills, s.PickoffFills, len(snaps), s.ActiveMakers)
@@ -1757,7 +1778,7 @@ func loadCheckpoint() {
 		return
 	}
 	var tel ArenaTelemetry
-	if json.Unmarshal(raw, &tel) != nil || tel.Version != ArenaVer || tel.BootTsMs <= 0 {
+	if json.Unmarshal(raw, &tel) != nil || !strings.HasPrefix(tel.Version, "ARENA-v4.") || tel.BootTsMs <= 0 {
 		return
 	}
 	mu.Lock()

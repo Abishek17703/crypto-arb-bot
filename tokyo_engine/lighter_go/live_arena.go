@@ -16,7 +16,7 @@ import (
 )
 
 const (
-	LiveArenaVer       = "LIVE-MICRO-v105.3-HOT-RELOAD"
+	LiveArenaVer       = "LIVE-MICRO-v105.4-ROLLING-4H"
 	StratStopLossUSD   = -1.50 // Auto-halt individual strategy if realized+unrealized drops <= -$1.50 (~3.3x max historical $15 DD)
 	GlobalStopLossUSD  = -6.50 // Auto-flatten & S3-pause ALL live strategies at <= -$6.50 ($300.33 Perp equity floor)
 	MaxLtTxPerMin      = 48    // Strict guard below #770015 Standard 60 tx/min quota
@@ -50,6 +50,12 @@ type LiveFillAudit struct {
 	Tag       string  `json:"tag"`
 }
 
+type LiveEqPoint struct {
+	TsMs int64   `json:"ts"`
+	Cash float64 `json:"cash"`
+	Eq   float64 `json:"eq"`
+}
+
 type LiveStratAccount struct {
 	ID              string        `json:"id"`
 	Name            string        `json:"name"`
@@ -67,6 +73,7 @@ type LiveStratAccount struct {
 	MaxDrawdownUsd  float64       `json:"maxDrawdownUsd"`
 	HourlyRunRate   float64       `json:"hourlyRunRate"`
 	RealizedHourly  float64       `json:"realizedHourly"`
+	Rolling4hHourly float64       `json:"rolling4hHourly"`
 	Scaled489Hourly float64       `json:"scaled489Hourly"`
 	MakerPlaced     int64         `json:"makerPlaced"`
 	MakerCancelled  int64         `json:"makerCancelled"`
@@ -77,10 +84,12 @@ type LiveStratAccount struct {
 	GrossVolumeUsd  float64       `json:"grossVolumeUsd"`
 	ActiveMakers    int           `json:"activeMakers"`
 	PosSnap         []LivePosView `json:"positions"`
+	EquityCurve     []LiveEqPoint `json:"equityCurve,omitempty"`
 	Halted          bool          `json:"halted"`
 	HaltReason      string        `json:"haltReason"`
 	State           string        `json:"state"`
 	ActiveSym       string        `json:"activeSym"`
+	RotatedNote     string        `json:"rotatedNote,omitempty"`
 	StatusNote      string        `json:"statusNote"`
 }
 
@@ -371,6 +380,7 @@ func loadLiveArenaState() {
 		dst.RoundTrips = st.RoundTrips
 		dst.WinTrips = st.WinTrips
 		dst.GrossVolumeUsd = st.GrossVolumeUsd
+		dst.EquityCurve = st.EquityCurve
 		dst.Halted = st.Halted
 		dst.HaltReason = st.HaltReason
 
@@ -1514,22 +1524,53 @@ func writeLiveArenaTelemetry(now time.Time) {
 			fmt.Printf("[STRAT_CIRCUIT_BREAKER id=%s net=$%+.4f] Halting strategy!\n", id, netStrat)
 		}
 
+		if len(acct.EquityCurve) == 0 || nowMs-acct.EquityCurve[len(acct.EquityCurve)-1].TsMs >= 30000 {
+			acct.EquityCurve = append(acct.EquityCurve, LiveEqPoint{TsMs: nowMs, Cash: acct.Cash, Eq: acct.Equity})
+			if len(acct.EquityCurve) > 540 { // 4.5h rolling history
+				acct.EquityCurve = append([]LiveEqPoint(nil), acct.EquityCurve[len(acct.EquityCurve)-540:]...)
+			}
+		}
+
+		// Compute 4h rolling realized $/hr (signal-clean: ignores temporary hedged mark-to-market noise!):
 		acct.HourlyRunRate = roundTo(netStrat/denomHr, 3)
 		acct.RealizedHourly = roundTo(realStrat/denomHr, 3)
-		acct.Scaled489Hourly = roundTo(acct.HourlyRunRate*rt.ScaleMult489, 2)
+		roll4h := acct.RealizedHourly
+		targetTs := nowMs - 4*3600*1000
+		if len(acct.EquityCurve) >= 2 {
+			refPt := acct.EquityCurve[0]
+			for _, pt := range acct.EquityCurve {
+				if pt.TsMs <= targetTs {
+					refPt = pt
+				} else {
+					break
+				}
+			}
+			dtHr := float64(nowMs-refPt.TsMs) / 3600000.0
+			if dtHr >= 0.25 {
+				roll4h = roundTo((acct.Cash-refPt.Cash)/dtHr, 3)
+			}
+		}
+		acct.Rolling4hHourly = roll4h
+		// Rank & scale on Closed Realized 4h $/hr once >= 1 closed trip so open spread wicks never distort signal!
+		sigHr := roll4h
+		if acct.RoundTrips == 0 {
+			sigHr = acct.HourlyRunRate
+		}
+		acct.Scaled489Hourly = roundTo(sigHr*rt.ScaleMult489, 2)
 		acct.ActiveMakers = activeMakers
 		acct.PosSnap = snaps
 		acct.State = rt.State
 		acct.ActiveSym = rt.Sym
+		acct.RotatedNote = rt.RotatedNote
 		if acct.Halted {
 			acct.StatusNote = "HALTED: " + acct.HaltReason
 		} else {
-			acct.StatusNote = fmt.Sprintf("State:%s %s | Net $%+.3f ($%+.2f/hr micro -> $%+.2f/hr @$489)",
-				rt.State, rt.Sym, netStrat, acct.HourlyRunRate, acct.Scaled489Hourly)
+			acct.StatusNote = fmt.Sprintf("State:%s %s | Closed $%+.3f | 4h:$%+.2f/hr (@$489: $%+.2f/hr)",
+				rt.State, rt.Sym, realStrat, roll4h, acct.Scaled489Hourly)
 		}
 
-		if acct.HourlyRunRate > bestHr {
-			bestHr = acct.HourlyRunRate
+		if sigHr > bestHr {
+			bestHr = sigHr
 			bestID = id
 			bestScaled489 = acct.Scaled489Hourly
 		}
@@ -1664,16 +1705,22 @@ func evaluateForwardArenaIdleSafeRotation() {
 	var fa struct {
 		UptimeHours float64 `json:"uptimeHours"`
 		Strategies  []struct {
-			ID            string  `json:"id"`
-			HourlyRunRate float64 `json:"hourlyRunRate"`
+			ID              string  `json:"id"`
+			HourlyRunRate   float64 `json:"hourlyRunRate"`
+			Rolling4hHourly float64 `json:"rolling4hHourly"`
 		} `json:"strategies"`
 	}
-	if json.Unmarshal(raw, &fa) != nil || fa.UptimeHours < 2.0 {
+	if json.Unmarshal(raw, &fa) != nil || fa.UptimeHours < 1.0 {
 		return
 	}
 	hrMap := map[string]float64{}
 	for _, s := range fa.Strategies {
-		hrMap[s.ID] = s.HourlyRunRate
+		// Use the 4-hour rolling $/hr directly so weekday/weekend & US-open shifts rotate automatically!
+		r := s.Rolling4hHourly
+		if r == 0 && s.HourlyRunRate != 0 {
+			r = s.HourlyRunRate
+		}
+		hrMap[s.ID] = r
 	}
 	s4Hr := hrMap["S4_ASTER_LT_BN_RWA_15X"]
 	s5Hr := hrMap["S5_LT_STD_MARGIN_STRICT"]
@@ -1687,17 +1734,17 @@ func evaluateForwardArenaIdleSafeRotation() {
 		return
 	}
 	// Never swap mid-position! Queue into PendingSyms so it only applies when State == "IDLE"!
-	if s4Hr < 4.50 && topCryptoHr >= 7.00 {
+	if s4Hr < 4.50 && topCryptoHr >= 6.50 {
 		wantSyms := []string{"KAITO", "CRV", "ETHFI", "WLFI"} // strictly disjoint from S5/S3/S2!
 		if rt4.PeerVenue != "BN_USDC" && len(rt4.PendingSyms) == 0 {
 			rt4.PendingVenue = "BN_USDC"
 			rt4.PendingSyms = wantSyms
-			rt4.RotatedNote = fmt.Sprintf("Auto-parked RWA ($%.2f/hr < $4.50) -> Crypto Boost when IDLE", s4Hr)
+			rt4.RotatedNote = fmt.Sprintf("4h Rolling Auto-Swap: RWA $%.2f/hr -> Crypto Boost (waits for IDLE)", s4Hr)
 		}
 	} else if s4Hr >= 5.00 && rt4.PeerVenue != rt4.OrigPeerVenue && len(rt4.PendingSyms) == 0 {
 		rt4.PendingVenue = rt4.OrigPeerVenue
 		rt4.PendingSyms = append([]string(nil), rt4.OrigSymbols...)
-		rt4.RotatedNote = fmt.Sprintf("Restored RWA Equities ($%.2f/hr >= $5.00) when IDLE", s4Hr)
+		rt4.RotatedNote = fmt.Sprintf("4h Rolling Auto-Swap: Restored RWA Equities ($%.2f/hr >= $5.00)", s4Hr)
 	}
 }
 
