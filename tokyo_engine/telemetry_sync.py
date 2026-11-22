@@ -167,38 +167,41 @@ def read_dn_history():
 def fetch_binance_income_and_reconstruct(fapi, lt_trades, disk_hist, cached_wallet, upnl):
     start_ms = int((time.time() - 72 * 3600) * 1000)
     inc = fapi.request("GET", "/fapi/v1/income", {"startTime": start_ms, "limit": 1000}, signed=True)
-    if not isinstance(inc, list):
-        return None, disk_hist
+    if isinstance(inc, list):
+        real_pnl, comm, fund, cnt = 0.0, 0.0, 0.0, 0
+        for r in inc:
+            tp = r.get("incomeType", "")
+            try:
+                v = float(r.get("income", 0.0))
+            except Exception:
+                v = 0.0
+            if tp == "REALIZED_PNL":
+                real_pnl += v
+                cnt += 1
+            elif tp == "COMMISSION":
+                comm += v
+            elif tp == "FUNDING_FEE":
+                fund += v
 
-    real_pnl, comm, fund, cnt = 0.0, 0.0, 0.0, 0
-    for r in inc:
-        tp = r.get("incomeType", "")
-        try:
-            v = float(r.get("income", 0.0))
-        except Exception:
-            v = 0.0
-        if tp == "REALIZED_PNL":
-            real_pnl += v
-            cnt += 1
-        elif tp == "COMMISSION":
-            comm += v
-        elif tp == "FUNDING_FEE":
-            fund += v
-
-    binance_audit = {
-        "real": round(real_pnl, 4),
-        "fee": round(comm, 4),
-        "fund": round(fund, 4),
-        "upnl": round(upnl, 4),
-        "net": round(real_pnl + comm + fund + upnl, 4),
-        "trades": cnt,
-        "wallet": round(cached_wallet, 4),
-    }
+        binance_audit = {
+            "real": round(real_pnl, 4),
+            "fee": round(comm, 4),
+            "fund": round(fund, 4),
+            "upnl": round(upnl, 4),
+            "net": round(real_pnl + comm + fund + upnl, 4),
+            "trades": cnt,
+            "wallet": round(cached_wallet, 4),
+        }
+    else:
+        if isinstance(inc, dict):
+            append_log(f"[INC_ERR] {inc}")
+        binance_audit = None
+        inc = []
 
     norm_lt = []
     for t in (lt_trades or []):
-        bid_id = t.get("bid_account_id")
-        ask_id = t.get("ask_account_id")
+        bid_id = int(t.get("bid_account_id") or -1)
+        ask_id = int(t.get("ask_account_id") or -1)
         if bid_id == LIGHTER_ACCT_IDX:
             is_bid = True
             p_raw = t.get("bid_account_pnl")
@@ -555,19 +558,22 @@ def main():
 
             if now - last_inc_poll >= 15.0:
                 last_inc_poll = now
-                lt_tr_obj = read_json_safe("/tmp/lighter_trades.json", {})
-                lt_tr_list = lt_tr_obj.get("trades", []) if isinstance(lt_tr_obj, dict) else []
-                aud, hist = fetch_binance_income_and_reconstruct(
-                    fapi,
-                    lt_tr_list,
-                    read_dn_history(),
-                    cached_wallet,
-                    cached_futures.get("unrealizedProfit", 0.0),
-                )
-                if aud is not None:
-                    cached_audit = aud
-                if hist is not None:
-                    cached_dn_hist = hist
+                try:
+                    lt_tr_obj = read_json_safe("/tmp/lighter_trades.json", {})
+                    lt_tr_list = lt_tr_obj.get("trades", []) if isinstance(lt_tr_obj, dict) else []
+                    aud, hist = fetch_binance_income_and_reconstruct(
+                        fapi,
+                        lt_tr_list,
+                        read_dn_history(),
+                        cached_wallet,
+                        cached_futures.get("unrealizedProfit", 0.0),
+                    )
+                    if aud is not None:
+                        cached_audit = aud
+                    if hist is not None:
+                        cached_dn_hist = hist
+                except Exception as inc_err:
+                    append_log(f"[INC_RECON_ERR] {inc_err}")
 
             if now - last_s3_push >= 1.0:
                 last_s3_push = now

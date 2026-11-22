@@ -29,10 +29,12 @@ jobs:
             "sudo cp /opt/crypto-arb-bot/telemetry_sync.py /opt/crypto-arb-bot/_legacy_archive_do_not_access/telemetry_sync.bak.$(date +%s) 2>/dev/null || true",
             ("curl -fsSL https://raw.githubusercontent.com/Abishek17703/crypto-arb-bot/" + $sha + "/tokyo_engine/telemetry_sync.py -o /tmp/telemetry_sync_new.py"),
             "sudo python3 -m py_compile /tmp/telemetry_sync_new.py",
+            "sudo systemctl stop tokyo-telemetry.service || true",
+            "sudo pkill -9 -f 'python3.*[t]elemetry_sync' || true",
             "sudo mv /tmp/telemetry_sync_new.py /opt/crypto-arb-bot/telemetry_sync.py && sudo chmod +x /opt/crypto-arb-bot/telemetry_sync.py",
             "sudo curl -fsSL https://github.com/Abishek17703/crypto-arb-bot/releases/download/lighter-go-latest/lighter_go_bot -o /opt/crypto-arb-bot/lighter_go_bot.tmp && sudo mv /opt/crypto-arb-bot/lighter_go_bot.tmp /opt/crypto-arb-bot/lighter_go_bot && sudo chmod +x /opt/crypto-arb-bot/lighter_go_bot",
-            "sudo systemctl restart tokyo-telemetry.service",
-            "sleep 3 && sudo systemctl is-active tokyo-telemetry.service"
+            "sudo systemctl start tokyo-telemetry.service",
+            "sleep 4 && sudo systemctl is-active tokyo-telemetry.service && ps aux | grep '[t]elemetry_sync'"
           ]}')
           CMD_ID=$(aws ssm send-command --instance-ids "$INST_ID" --document-name "AWS-RunShellScript" --parameters "$SSM_JSON" --query "Command.CommandId" --output text)
           echo "SSM CommandId: $CMD_ID"
