@@ -188,6 +188,9 @@ var (
 	dnBlockedSym  = map[string]bool{}
 	dnLevSet      = map[string]bool{}
 	dnSharedAvail float64
+	bnTotalWallet float64
+	bnTotalMargin float64
+	ltCollateral  atomic.Int64
 	activeSlot    = DnSlot{State: "IDLE"}
 
 	bnOrdMu  sync.Mutex
@@ -853,25 +856,26 @@ func runLtWS() {
 		wsMu.Lock()
 		ltConn = conn
 		subbedMids = map[int64]bool{}
+		var midsToSub []int64
 		for _, sp := range dnSnap {
 			if sp.Quote == "USDC" {
 				if m, ok := markets[sp.Sym]; ok && !subbedMids[m.ID] {
-					_ = conn.WriteJSON(map[string]any{"type": "subscribe", "channel": fmt.Sprintf("order_book/%d", m.ID)})
 					subbedMids[m.ID] = true
+					midsToSub = append(midsToSub, m.ID)
 				}
 			}
 		}
 		for _, base := range []string{"BTC", "ETH", "SOL"} {
 			if m, ok := markets[base]; ok && !subbedMids[m.ID] {
-				_ = conn.WriteJSON(map[string]any{"type": "subscribe", "channel": fmt.Sprintf("order_book/%d", m.ID)})
 				subbedMids[m.ID] = true
+				midsToSub = append(midsToSub, m.ID)
 			}
 		}
 		asterMu.Lock()
 		for _, asp := range asterSpecs {
 			if m, ok := markets[asp.Sym]; ok && !subbedMids[m.ID] {
-				_ = conn.WriteJSON(map[string]any{"type": "subscribe", "channel": fmt.Sprintf("order_book/%d", m.ID)})
 				subbedMids[m.ID] = true
+				midsToSub = append(midsToSub, m.ID)
 			}
 		}
 		asterMu.Unlock()
@@ -886,8 +890,20 @@ func runLtWS() {
 			st.lastBookTS = time.Time{}
 			st.mu.Unlock()
 		}
+		for _, mid := range midsToSub {
+			wsMu.Lock()
+			if ltConn == conn {
+				_ = conn.WriteJSON(map[string]any{"type": "subscribe", "channel": fmt.Sprintf("order_book/%d", mid)})
+			}
+			wsMu.Unlock()
+			time.Sleep(12 * time.Millisecond) // CRITICAL 12ms pacing: prevents Lighter WS snapshot drops & ghost levels!
+		}
 		if tok, err := txCli.GetAuthToken(time.Now().Add(6 * time.Hour)); err == nil {
-			_ = conn.WriteJSON(map[string]any{"type": "subscribe", "channel": fmt.Sprintf("account_all/%d", AcctIdx), "auth": tok})
+			wsMu.Lock()
+			if ltConn == conn {
+				_ = conn.WriteJSON(map[string]any{"type": "subscribe", "channel": fmt.Sprintf("account_all/%d", AcctIdx), "auth": tok})
+			}
+			wsMu.Unlock()
 		}
 
 		for {
@@ -1355,9 +1371,13 @@ func syncAccountLoop() {
 					_ = os.Rename("/tmp/lighter_acct.json.tmp", "/tmp/lighter_acct.json")
 				}
 				a := res.Accounts[0]
+				col, _ := strconv.ParseFloat(a.Collateral, 64)
+				if col > 0 {
+					ltCollateral.Store(int64(col * 1e6))
+				}
 				eq, _ := strconv.ParseFloat(a.TotalAssetValue, 64)
 				if eq <= 0 {
-					eq, _ = strconv.ParseFloat(a.Collateral, 64)
+					eq = col
 				}
 				if eq > 0 {
 					eqNow.Store(int64(eq * 1e6))
@@ -1839,22 +1859,29 @@ func fetchBnAccountMargin() (sharedAvail, usdcBal, usdtBal float64, ok bool) {
 		Assets           []struct {
 			Asset         string `json:"asset"`
 			WalletBalance string `json:"walletBalance"`
+			MarginBalance string `json:"marginBalance"`
 		} `json:"assets"`
 	}
 	if json.Unmarshal(body, &acc) != nil {
 		return 0, 0, 0, false
 	}
 	sharedAvail, _ = strconv.ParseFloat(acc.AvailableBalance, 64)
+	var usdcM, usdtM float64
 	for _, a := range acc.Assets {
 		wb, _ := strconv.ParseFloat(a.WalletBalance, 64)
+		mb, _ := strconv.ParseFloat(a.MarginBalance, 64)
 		if a.Asset == "USDC" {
 			usdcBal = wb
+			usdcM = mb
 		} else if a.Asset == "USDT" {
 			usdtBal = wb
+			usdtM = mb
 		}
 	}
 	dnMu.Lock()
 	dnSharedAvail = sharedAvail
+	bnTotalWallet = usdcBal + usdtBal
+	bnTotalMargin = usdcM + usdtM
 	dnMu.Unlock()
 	return sharedAvail, usdcBal, usdtBal, true
 }

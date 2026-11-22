@@ -3,7 +3,9 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"math"
+	"net/http"
 	"net/url"
 	"os"
 	"strconv"
@@ -16,10 +18,11 @@ import (
 )
 
 const (
-	LiveArenaVer       = "LIVE-MICRO-v105.4-ROLLING-4H"
-	StratStopLossUSD   = -1.50 // Auto-halt individual strategy if realized+unrealized drops <= -$1.50 (~3.3x max historical $15 DD)
-	GlobalStopLossUSD  = -6.50 // Auto-flatten & S3-pause ALL live strategies at <= -$6.50 ($300.33 Perp equity floor)
-	MaxLtTxPerMin      = 48    // Strict guard below #770015 Standard 60 tx/min quota
+	LiveArenaVer       = "LIVE-MICRO-v105.5-WALLET-EXACT"
+	Baseline3VenueUSD  = 306.8293 // Exact pre-launch cash ($91.6889 LT + $165.1504 BN Perp + $49.9900 Aster)
+	StratStopLossUSD   = -1.50    // Auto-halt individual strategy if realized+unrealized drops <= -$1.50
+	GlobalStopLossUSD  = -6.50    // Auto-flatten & S3-pause ALL live strategies at <= -$6.50 ($300.33 Perp floor)
+	MaxLtTxPerMin      = 48       // Strict guard below #770015 Standard 60 tx/min quota
 )
 
 type LivePosView struct {
@@ -109,26 +112,30 @@ type LiveSpreadSnap struct {
 }
 
 type LiveArenaTelemetry struct {
-	Version          string              `json:"version"`
-	BootTsMs         int64               `json:"bootTsMs"`
-	NowTsMs          int64               `json:"nowTsMs"`
-	UptimeSec        float64             `json:"uptimeSec"`
-	UptimeHours      float64             `json:"uptimeHours"`
-	Paused           bool                `json:"paused"`
-	LtTxLastMin      int                 `json:"ltTxLastMin"`
-	TotalCapitalUsd  float64             `json:"totalCapitalUsd"`
-	LighterEqUsd     float64             `json:"lighterEqUsd"`
-	BinanceMarginUsd float64             `json:"binanceMarginUsd"`
-	AsterMarginUsd   float64             `json:"asterMarginUsd"`
-	CombinedNetUsd   float64             `json:"combinedNetUsd"`
-	CombinedHourly   float64             `json:"combinedHourlyUsd"`
-	Scaled489BestHr  float64             `json:"scaled489BestHourlyUsd"`
-	BestStratID      string              `json:"bestStratId"`
-	BestHourlyUsd    float64             `json:"bestHourlyUsd"`
-	Strategies       []*LiveStratAccount `json:"strategies"`
-	RecentFills      []LiveFillAudit     `json:"recentFills"`
-	MarketSpreads    []LiveSpreadSnap    `json:"marketSpreads"`
-	SlotSnapshots    []SavedSlotSnap     `json:"slotSnapshots,omitempty"`
+	Version              string              `json:"version"`
+	BootTsMs             int64               `json:"bootTsMs"`
+	NowTsMs              int64               `json:"nowTsMs"`
+	UptimeSec            float64             `json:"uptimeSec"`
+	UptimeHours          float64             `json:"uptimeHours"`
+	Paused               bool                `json:"paused"`
+	LtTxLastMin          int                 `json:"ltTxLastMin"`
+	TotalCapitalUsd      float64             `json:"totalCapitalUsd"`
+	LighterEqUsd         float64             `json:"lighterEqUsd"`
+	BinanceMarginUsd     float64             `json:"binanceMarginUsd"`
+	AsterMarginUsd       float64             `json:"asterMarginUsd"`
+	Real3VenueWalletUsd  float64             `json:"real3VenueWalletUsd"`
+	Real3VenueEquityUsd  float64             `json:"real3VenueEquityUsd"`
+	RealWalletDeltaUsd   float64             `json:"realWalletDeltaUsd"`
+	RealEquityDeltaUsd   float64             `json:"realEquityDeltaUsd"`
+	CombinedNetUsd       float64             `json:"combinedNetUsd"`
+	CombinedHourly       float64             `json:"combinedHourlyUsd"`
+	Scaled489BestHr      float64             `json:"scaled489BestHourlyUsd"`
+	BestStratID          string              `json:"bestStratId"`
+	BestHourlyUsd        float64             `json:"bestHourlyUsd"`
+	Strategies           []*LiveStratAccount `json:"strategies"`
+	RecentFills          []LiveFillAudit     `json:"recentFills"`
+	MarketSpreads        []LiveSpreadSnap    `json:"marketSpreads"`
+	SlotSnapshots        []SavedSlotSnap     `json:"slotSnapshots,omitempty"`
 }
 
 type LiveSlotRuntime struct {
@@ -167,8 +174,9 @@ type LiveSlotRuntime struct {
 	ExitPeerOid int64
 	ExitPeerPx  float64
 	ExitPlaced  time.Time
-	LastOrdPoll time.Time
-	CoolUntil   time.Time
+	LastOrdPoll   time.Time
+	LastLtRestBBO time.Time
+	CoolUntil     time.Time
 
 	// IDLE-Safe Rotation Queue: never swaps symbols/venues mid-position!
 	OrigPeerVenue string
@@ -778,7 +786,98 @@ func closeLtLegGuaranteedSync(sym string, expectedPos float64, lb, la float64) (
 	return exitEstPx, time.Since(t0).Milliseconds()
 }
 
+func fetchExactLtCloseTrade(sym string, minTsMs int64) (vwapPx, realPnl float64, found bool) {
+	hc := &http.Client{Timeout: 3 * time.Second}
+	u := fmt.Sprintf("%s/api/v1/trades?account_index=%d&limit=15&sort_by=timestamp", BaseURL, AcctIdx)
+	resp, err := ltGet(hc, u)
+	if err != nil {
+		return 0, 0, false
+	}
+	b, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	var tr struct {
+		Trades []struct {
+			Sym       string `json:"market_symbol"`
+			MarketID  int64  `json:"market_id"`
+			Timestamp int64  `json:"timestamp"`
+			Price     string `json:"price"`
+			Size      string `json:"size"`
+			BidAcct   int64  `json:"bid_account_id"`
+			AskAcct   int64  `json:"ask_account_id"`
+			BidPnl    string `json:"bid_account_pnl"`
+			AskPnl    string `json:"ask_account_pnl"`
+		} `json:"trades"`
+	}
+	if json.Unmarshal(b, &tr) != nil {
+		return 0, 0, false
+	}
+	m := markets[sym]
+	var cost, totSz, sumPnl float64
+	for _, t := range tr.Trades {
+		ts := t.Timestamp
+		if ts > 0 && ts < 100000000000 {
+			ts *= 1000
+		}
+		if ts < minTsMs-3000 {
+			continue
+		}
+		if t.Sym != sym && t.MarketID != m.ID {
+			continue
+		}
+		var pnlStr string
+		if t.BidAcct == AcctIdx {
+			pnlStr = t.BidPnl
+		} else if t.AskAcct == AcctIdx {
+			pnlStr = t.AskPnl
+		} else {
+			continue
+		}
+		if strings.TrimSpace(pnlStr) == "" {
+			continue // opening fill, not closing fill
+		}
+		px, _ := strconv.ParseFloat(t.Price, 64)
+		sz, _ := strconv.ParseFloat(t.Size, 64)
+		pv, _ := strconv.ParseFloat(pnlStr, 64)
+		if px > 0 && sz > 0 {
+			cost += px * sz
+			totSz += sz
+			sumPnl += pv
+			found = true
+		}
+	}
+	if found && totSz > 0 {
+		vwapPx = cost / totSz
+	}
+	return vwapPx, sumPnl, found
+}
+
+func refreshLtRestBBOIfDue(sym string, last *time.Time, minInterval time.Duration) (lb, la float64) {
+	st := mktStates[sym]
+	m := markets[sym]
+	if st != nil {
+		st.mu.Lock()
+		lb, la = st.ltBid, st.ltAsk
+		st.mu.Unlock()
+	}
+	if time.Since(*last) >= minInterval {
+		*last = time.Now()
+		if rb, ra := fetchLtBookREST(m.ID); rb > 0 && ra > rb {
+			lb, la = rb, ra
+			if st != nil {
+				st.mu.Lock()
+				st.bookBids = map[string]float64{strconv.FormatFloat(rb, 'f', m.PxDec, 64): math.Max(st.ltBidSz, m.MinB*5)}
+				st.bookAsks = map[string]float64{strconv.FormatFloat(ra, 'f', m.PxDec, 64): math.Max(st.ltAskSz, m.MinB*5)}
+				st.ltBid, st.ltAsk = rb, ra
+				st.lastBookTS = time.Now()
+				st.mu.Unlock()
+			}
+		}
+	}
+	return lb, la
+}
+
 func finalizeSlotClose(rt *LiveSlotRuntime, peerExitPx, peerExitFeeBp float64, execType, reason string, exitLatMs int64, now time.Time) {
+	closeStartMs := time.Now().UnixMilli()
 	m := markets[rt.Sym]
 	var lb, la, ltPos float64
 	if st := mktStates[rt.Sym]; st != nil {
@@ -817,6 +916,12 @@ func finalizeSlotClose(rt *LiveSlotRuntime, peerExitPx, peerExitFeeBp float64, e
 		// Long Lighter, Short Peer
 		ltGross = (ltExitPx - rt.EntryLtPx) * qty
 		peerGross = (rt.EntryPeerPx - peerExitPx) * fx * qty
+	}
+	// PENNY-EXACT EXCHANGE RECONCILIATION: Pull exact zkLighter fill price & realized PnL directly from /api/v1/trades!
+	time.Sleep(220 * time.Millisecond)
+	if exPx, exLtPnl, okEx := fetchExactLtCloseTrade(rt.Sym, closeStartMs); okEx {
+		ltExitPx = exPx
+		ltGross = exLtPnl
 	}
 	grossTotal := ltGross + peerGross
 	netUsd := grossTotal - totalFeeUsd
@@ -1127,9 +1232,8 @@ func stepLiveSlot(rt *LiveSlotRuntime, now time.Time) {
 		if st == nil {
 			return
 		}
-		st.mu.Lock()
-		lb, la := st.ltBid, st.ltAsk
-		st.mu.Unlock()
+		// Refresh live Lighter REST BBO every 1.2s while HEDGED so stale WS ghost levels can NEVER trigger fake convergence!
+		lb, la := refreshLtRestBBOIfDue(rt.Sym, &rt.LastLtRestBBO, 1200*time.Millisecond)
 		peerSym, qDec, pxDec, _, _, _, mFeeBp, tFeeBp, pBid, pAsk, _, jumpBps, fx, _, _, okP := getPeerSpecAndBook(rt.PeerVenue, rt.Sym, now)
 		if !okP || lb <= 0 || la <= lb {
 			return
@@ -1172,15 +1276,28 @@ func stepLiveSlot(rt *LiveSlotRuntime, now time.Time) {
 		}
 
 		if combMakerNetBp >= reqNetBp && math.Abs(jumpBps) <= 2.0 {
-			if oid, okE := placePeerMakerExit(rt.PeerVenue, peerSym, closePeerSide, rt.HedgedQty, exitMakerPx, qDec, pxDec); okE {
-				liveMu.Lock()
-				acct.MakerPlaced++
-				rt.State = "PEER_EXIT_OPEN"
-				rt.ExitPeerOid = oid
-				rt.ExitPeerPx = exitMakerPx
-				rt.ExitPlaced = now
-				rt.LastOrdPoll = time.Time{}
-				liveMu.Unlock()
+			// Final live Lighter REST BBO confirmation right before placing Peer GTX exit:
+			m := markets[rt.Sym]
+			if rb, ra := fetchLtBookREST(m.ID); rb > 0 && ra > rb {
+				lb, la = rb, ra
+				if rt.PeerSide == "BUY" {
+					combMakerNetBp = (((exitMakerPx-rt.EntryPeerPx)*fx)+(rt.EntryLtPx-la))/rt.EntryLtPx*10000.0 - rtMakerFeeBp
+				} else {
+					combMakerNetBp = (((rt.EntryPeerPx-exitMakerPx)*fx)+(lb-rt.EntryLtPx))/rt.EntryLtPx*10000.0 - rtMakerFeeBp
+				}
+			}
+			if combMakerNetBp >= reqNetBp {
+				if oid, okE := placePeerMakerExit(rt.PeerVenue, peerSym, closePeerSide, rt.HedgedQty, exitMakerPx, qDec, pxDec); okE {
+					liveMu.Lock()
+					acct.MakerPlaced++
+					rt.State = "PEER_EXIT_OPEN"
+					rt.ExitPeerOid = oid
+					rt.ExitPeerPx = exitMakerPx
+					rt.ExitPlaced = now
+					rt.LastOrdPoll = time.Time{}
+					rt.LastLtRestBBO = now
+					liveMu.Unlock()
+				}
 			}
 		}
 		return
@@ -1194,9 +1311,8 @@ func stepLiveSlot(rt *LiveSlotRuntime, now time.Time) {
 		if st == nil {
 			return
 		}
-		st.mu.Lock()
-		lb, la := st.ltBid, st.ltAsk
-		st.mu.Unlock()
+		// Keep Lighter BBO fresh via REST every 1.0s while Peer Maker exit is resting on the book!
+		lb, la := refreshLtRestBBOIfDue(rt.Sym, &rt.LastLtRestBBO, 1000*time.Millisecond)
 		peerSym, qDec, _, _, _, _, mFeeBp, _, pBid, pAsk, _, _, fx, _, _, okP := getPeerSpecAndBook(rt.PeerVenue, rt.Sym, now)
 		if !okP {
 			peerSym = rt.PeerSym
@@ -1421,12 +1537,32 @@ func writeLiveArenaTelemetry(now time.Time) {
 	denomHr := math.Max(upHr, 0.05) // 3-min floor to prevent early-second extrapolation spikes
 
 	ltEq := float64(eqNow.Load()) / 1e6
+	ltCol := float64(ltCollateral.Load()) / 1e6
+	if ltCol <= 0 {
+		ltCol = ltEq
+	}
 	dnMu.Lock()
-	bnMargin := dnSharedAvail
+	bnMargin := bnTotalMargin
+	bnWallet := bnTotalWallet
+	if bnMargin <= 0 {
+		bnMargin = dnSharedAvail
+	}
 	dnMu.Unlock()
 	asterMu.Lock()
 	asMargin := asterWallet.MarginBalance
+	asWallet := asterWallet.WalletBalance
 	asterMu.Unlock()
+
+	realWallet3 := 0.0
+	realEq3 := 0.0
+	realWalletDelta := 0.0
+	realEqDelta := 0.0
+	if ltCol > 10 && bnWallet > 50 && asWallet > 10 {
+		realWallet3 = roundTo(ltCol+bnWallet+asWallet, 4)
+		realEq3 = roundTo(ltEq+bnMargin+asMargin, 4)
+		realWalletDelta = roundTo(realWallet3-Baseline3VenueUSD, 4)
+		realEqDelta = roundTo(realEq3-Baseline3VenueUSD, 4)
+	}
 
 	liveMu.Lock()
 	txLastMin := countLtTxLastMinLocked(nowMs)
@@ -1584,9 +1720,9 @@ func writeLiveArenaTelemetry(now time.Time) {
 	}
 	liveMu.Unlock()
 
-	// Global -$4.00 combined circuit breaker across all 4 strategies:
-	if combinedNet <= GlobalStopLossUSD && breakerTripped.CompareAndSwap(false, true) {
-		go flattenAndExitPause(fmt.Sprintf("STOP-LOSS Global Micro-Arena PnL=$%+.2f <= $%.2f", combinedNet, GlobalStopLossUSD))
+	// Global -$6.50 ($300.33 Perp floor) circuit breaker verified against BOTH strategy ledger AND true 3-venue wallet equity!
+	if (combinedNet <= GlobalStopLossUSD || (realEq3 > 100 && realEqDelta <= GlobalStopLossUSD)) && breakerTripped.CompareAndSwap(false, true) {
+		go flattenAndExitPause(fmt.Sprintf("STOP-LOSS Global Micro-Arena PnL=$%+.2f (WalletDelta=$%+.2f) <= $%.2f", combinedNet, realEqDelta, GlobalStopLossUSD))
 	}
 
 	// Build live dislocation radar across all 4 strategy symbol sets:
@@ -1664,26 +1800,30 @@ func writeLiveArenaTelemetry(now time.Time) {
 	liveMu.Unlock()
 
 	tel := LiveArenaTelemetry{
-		Version:          LiveArenaVer,
-		BootTsMs:         liveBootMs,
-		NowTsMs:          nowMs,
-		UptimeSec:        roundTo(upSec, 1),
-		UptimeHours:      roundTo(upHr, 3),
-		Paused:           remotePaused.Load(),
-		LtTxLastMin:      txLastMin,
-		TotalCapitalUsd:  roundTo(ltEq+bnMargin+asMargin, 2),
-		LighterEqUsd:     roundTo(ltEq, 2),
-		BinanceMarginUsd: roundTo(bnMargin, 2),
-		AsterMarginUsd:   roundTo(asMargin, 2),
-		CombinedNetUsd:   roundTo(combinedNet, 4),
-		CombinedHourly:   roundTo(combinedNet/denomHr, 3),
-		Scaled489BestHr:  bestScaled489,
-		BestStratID:      bestID,
-		BestHourlyUsd:    roundTo(bestHr, 3),
-		Strategies:       outStrats,
-		RecentFills:      revFills,
-		MarketSpreads:    spreads,
-		SlotSnapshots:    slotSnaps,
+		Version:             LiveArenaVer,
+		BootTsMs:            liveBootMs,
+		NowTsMs:             nowMs,
+		UptimeSec:           roundTo(upSec, 1),
+		UptimeHours:         roundTo(upHr, 3),
+		Paused:              remotePaused.Load(),
+		LtTxLastMin:         txLastMin,
+		TotalCapitalUsd:     roundTo(ltEq+bnMargin+asMargin, 2),
+		LighterEqUsd:        roundTo(ltEq, 2),
+		BinanceMarginUsd:    roundTo(bnMargin, 2),
+		AsterMarginUsd:      roundTo(asMargin, 2),
+		Real3VenueWalletUsd: realWallet3,
+		Real3VenueEquityUsd: realEq3,
+		RealWalletDeltaUsd:  realWalletDelta,
+		RealEquityDeltaUsd:  realEqDelta,
+		CombinedNetUsd:      roundTo(combinedNet, 4),
+		CombinedHourly:      roundTo(combinedNet/denomHr, 3),
+		Scaled489BestHr:     bestScaled489,
+		BestStratID:         bestID,
+		BestHourlyUsd:       roundTo(bestHr, 3),
+		Strategies:          outStrats,
+		RecentFills:         revFills,
+		MarketSpreads:       spreads,
+		SlotSnapshots:       slotSnaps,
 	}
 
 	if raw, err := json.Marshal(tel); err == nil {
