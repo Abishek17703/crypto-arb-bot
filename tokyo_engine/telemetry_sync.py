@@ -486,9 +486,9 @@ def read_s3_pause_state(s3, default_val=True):
     try:
         raw = s3.get_object(Bucket=S3_BUCKET, Key=PAUSE_KEY)["Body"].read().decode("utf-8", errors="replace")
         obj = json.loads(raw)
-        return bool(obj.get("paused", default_val))
+        return bool(obj.get("paused", default_val)), int(obj.get("ts") or 0), str(obj.get("source") or "")
     except Exception:
-        return default_val
+        return default_val, 0, ""
 
 
 def boot_go_bot(state):
@@ -591,9 +591,11 @@ def main():
     spot_api = BinanceSession("api.binance.com")
     fapi = BinanceSession("fapi.binance.com")
 
-    init_paused = read_s3_pause_state(s3, default_val=True)
+    init_paused, init_sig_ts, init_sig_src = read_s3_pause_state(s3, default_val=True)
     state = {
         "user_paused": init_paused,
+        "pause_sig_ts": init_sig_ts,
+        "pause_sig_src": init_sig_src,
         "boot_lock": threading.Lock(),
     }
     write_flag(init_paused)
@@ -625,7 +627,13 @@ def main():
 
             if now - last_pause_poll >= 1.0:
                 last_pause_poll = now
-                want_paused = read_s3_pause_state(s3, default_val=state["user_paused"])
+                want_paused, sig_ts, sig_src = read_s3_pause_state(s3, default_val=state["user_paused"])
+                if sig_ts > state["pause_sig_ts"]:
+                    state["pause_sig_ts"] = sig_ts
+                    state["pause_sig_src"] = sig_src
+                    if want_paused:
+                        write_flag(True)
+                        append_log(f"[UI-PAUSE-SIGNAL ts={sig_ts} src={sig_src}] Pause & flatten confirmed.")
                 if want_paused and not state["user_paused"]:
                     state["user_paused"] = True
                     threading.Thread(target=stop_go_bot_gracefully, daemon=True).start()
@@ -710,6 +718,8 @@ def main():
                         "status": status_msg,
                         "paused": paused,
                         "userPaused": paused,
+                        "pauseSignalTs": state["pause_sig_ts"],
+                        "pauseSource": state["pause_sig_src"],
                     },
                 }
                 s3.put_object(

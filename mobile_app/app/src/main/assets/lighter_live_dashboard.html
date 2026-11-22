@@ -52,6 +52,18 @@
       border-radius: 0.5rem; padding: 0.42rem 0.85rem; font-size: 0.9rem; font-weight: 600; cursor: pointer;
     }
     .btn:hover { border-color: #52525b; }
+    .btn-pause { background: #dc2626; border-color: #ef4444; color: #fff; font-weight: 700; }
+    .btn-pause:hover { background: #b91c1c; border-color: #f87171; }
+    .btn-resume { background: #059669; border-color: #10b981; color: #fff; font-weight: 700; }
+    .btn-resume:hover { background: #047857; border-color: #34d399; }
+    .modal-backdrop {
+      position: fixed; inset: 0; background: rgba(0, 0, 0, 0.78);
+      display: flex; align-items: center; justify-content: center; z-index: 50; padding: 1rem;
+    }
+    .modal-box {
+      background: var(--card); border: 1px solid #3f3f46; border-radius: 1rem;
+      max-width: 460px; width: 100%; padding: 1.35rem 1.5rem; box-shadow: 0 20px 50px rgba(0, 0, 0, 0.65);
+    }
 
     /* Full-Width Hero: Equal-Weight Combined Equity (Top Left) + Live Run Rate (Top Right) + Giant Net P&L */
     .pnl-hero {
@@ -133,6 +145,9 @@
         <input id="seedInput" class="seed-input mono" type="number" step="0.01" value="490.8171" />
         <button class="btn" onclick="saveSeed()">Save</button>
         <button class="btn" onclick="snapBaselineNow()">Zero From Now</button>
+        <span id="pauseAckChip" class="mono" style="font-size:0.82rem;color:var(--muted);"></span>
+        <button id="pauseBtn" class="btn btn-pause" onclick="openPauseModal(true)">⏸ Pause &amp; Flatten</button>
+        <button id="resumeBtn" class="btn btn-resume" style="display:none;" onclick="openPauseModal(false)">▶ Resume</button>
       </div>
     </div>
 
@@ -205,6 +220,17 @@
     </div>
   </div>
 
+  <div id="confirmModal" class="modal-backdrop" style="display:none;">
+    <div class="modal-box">
+      <div id="modalTitle" style="font-size:1.12rem;font-weight:800;margin-bottom:0.55rem;"></div>
+      <div id="modalBody" class="mono" style="font-size:0.96rem;line-height:1.48;color:#d4d4d8;margin-bottom:1.1rem;"></div>
+      <div style="display:flex;justify-content:flex-end;gap:0.65rem;">
+        <button class="btn" onclick="closePauseModal()">Cancel</button>
+        <button id="modalConfirmBtn" class="btn btn-pause" onclick="confirmPauseAction()">Confirm</button>
+      </div>
+    </div>
+  </div>
+
   <script>
     const ACCT_INDEX = 770015;
     const API_URL = "https://crypto-arb-bot-tokyo-bin-767579108352.s3.ap-northeast-1.amazonaws.com/live-telemetry.json?t=";
@@ -251,6 +277,11 @@
 
     let lastTel = null;
     let lastAcct = null;
+    let latestCombPnl = 0;
+    let latestOpenUpnl = 0;
+    let latestOpenCnt = 0;
+    let pendingPauseTarget = true;
+    let lastClickedSigTs = 0;
     let lastBnAudit = null;
     try { lastBnAudit = JSON.parse(lsGet(BN_LAST_AUDIT_KEY, "null") || "null"); } catch (_) {}
     let activeOpenMkts = [];
@@ -633,6 +664,28 @@
       }
 
       const paused = !!(lastTel.hftTest && lastTel.hftTest.userPaused);
+      latestCombPnl = combPnl;
+      let opCnt = 0, opUpnl = 0;
+      for (const p of (lastAcct.positions || [])) {
+        if (Math.abs(parseFloat(p.position || 0)) > 0) {
+          opCnt++;
+          opUpnl += parseFloat(p.unrealized_pnl || 0);
+        }
+      }
+      opUpnl += (lastTel.binanceFutures && typeof lastTel.binanceFutures.unrealizedProfit === "number")
+        ? lastTel.binanceFutures.unrealizedProfit
+        : 0;
+      latestOpenCnt = opCnt;
+      latestOpenUpnl = opUpnl;
+
+      const resumeEl = document.getElementById("resumeBtn");
+      if (resumeEl) resumeEl.style.display = paused ? "inline-block" : "none";
+      const ackEl = document.getElementById("pauseAckChip");
+      if (ackEl && lastClickedSigTs > 0 && lastTel.hftTest && Number(lastTel.hftTest.pauseSignalTs || 0) >= lastClickedSigTs - 1000) {
+        ackEl.textContent = paused ? "✓ Pause Confirmed by Tokyo" : "✓ Live Resumed";
+        ackEl.style.color = "#10b981";
+      }
+
       const badgeEl = document.getElementById("dnEngineBadge");
       badgeEl.textContent = paused ? "PAUSED" : `TOKYO ${parsed.ver} • COMBINED LIVE`;
       badgeEl.style.color = paused ? "#ef4444" : "#10b981";
@@ -736,6 +789,69 @@
         lsSet(RR_KEY, JSON.stringify(rrBase));
       }
       renderAll();
+    }
+
+    function openPauseModal(wantPause) {
+      pendingPauseTarget = !!wantPause;
+      const titleEl = document.getElementById("modalTitle");
+      const bodyEl = document.getElementById("modalBody");
+      const cfmEl = document.getElementById("modalConfirmBtn");
+      if (pendingPauseTarget) {
+        titleEl.textContent = "Confirm Pause & Flatten";
+        cfmEl.className = "btn btn-pause";
+        cfmEl.textContent = "Yes, Pause & Flatten";
+        if (latestOpenCnt > 0 || Math.abs(latestOpenUpnl) > 0.0001) {
+          bodyEl.textContent = "Do you want to pause and flatten " + latestOpenCnt + " open position(s) at " +
+            fmtSigned(latestOpenUpnl, 4) + " " + (latestOpenUpnl >= 0 ? "profit" : "loss") +
+            " (Combined Session P&L: " + fmtSigned(latestCombPnl, 4) + ")?";
+        } else {
+          bodyEl.textContent = "Do you want to pause and flatten at " +
+            fmtSigned(latestCombPnl, 4) + " " + (latestCombPnl >= 0 ? "profit" : "loss") +
+            " ($0.0000 open trade uPnL — 0 open positions)?";
+        }
+      } else {
+        titleEl.textContent = "Confirm Resume Live Trading";
+        cfmEl.className = "btn btn-resume";
+        cfmEl.textContent = "Yes, Resume";
+        bodyEl.textContent = "Do you want to resume live v99.0 trading ($40 zero-fee USDC-M slot)?";
+      }
+      document.getElementById("confirmModal").style.display = "flex";
+    }
+
+    function closePauseModal() {
+      document.getElementById("confirmModal").style.display = "none";
+    }
+
+    async function confirmPauseAction() {
+      closePauseModal();
+      const ackEl = document.getElementById("pauseAckChip");
+      if (!lastTel || !lastTel.pauseControlUrl) {
+        if (ackEl) {
+          ackEl.textContent = "ERR: No S3 control URL yet";
+          ackEl.style.color = "#ef4444";
+        }
+        return;
+      }
+      const clickTs = Date.now();
+      lastClickedSigTs = clickTs;
+      if (ackEl) {
+        ackEl.textContent = "⏳ Sending to Tokyo...";
+        ackEl.style.color = "#f59e0b";
+      }
+      try {
+        const res = await fetch(lastTel.pauseControlUrl, {
+          method: "PUT",
+          headers: { "Content-Type": "text/plain" },
+          body: JSON.stringify({ paused: pendingPauseTarget, ts: clickTs, source: "dashboard_ui" })
+        });
+        if (!res.ok) throw new Error("HTTP " + res.status);
+        setTimeout(poll, 1200);
+      } catch (e) {
+        if (ackEl) {
+          ackEl.textContent = "ERR: " + e.message;
+          ackEl.style.color = "#ef4444";
+        }
+      }
     }
 
     poll();
