@@ -19,57 +19,31 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ap-northeast-1
 
-      - name: Deploy Upgraded telemetry_sync.py to Tokyo EC2 (i-046fed60c07b7a799)
+      - name: Deploy Clean telemetry_sync.py & lighter_go_bot to Tokyo EC2 (i-046fed60c07b7a799)
         run: |
           INST_ID="i-046fed60c07b7a799"
-          SG_ID=$(aws ec2 describe-instances --instance-ids "$INST_ID" --query "Reservations[0].Instances[0].SecurityGroups[0].GroupId" --output text)
-          PUB_IP=$(aws ec2 describe-instances --instance-ids "$INST_ID" --query "Reservations[0].Instances[0].PublicIpAddress" --output text)
-          AZ=$(aws ec2 describe-instances --instance-ids "$INST_ID" --query "Reservations[0].Instances[0].Placement.AvailabilityZone" --output text)
-          RUNNER_IP=$(curl -s https://checkip.amazonaws.com | tr -d '[:space:]')
-
-          ssh-keygen -t ed25519 -f /tmp/ec2_key -N "" -q
-          trap 'aws ec2 revoke-security-group-ingress --group-id "$SG_ID" --protocol tcp --port 22 --cidr "$RUNNER_IP/32" >/dev/null 2>&1 || true' EXIT
-          aws ec2 authorize-security-group-ingress --group-id "$SG_ID" --protocol tcp --port 22 --cidr "$RUNNER_IP/32" >/dev/null 2>&1 || true
-
-          if aws ec2-instance-connect send-ssh-public-key \
-            --instance-id "$INST_ID" \
-            --availability-zone "$AZ" \
-            --instance-os-user ec2-user \
-            --ssh-public-key file:///tmp/ec2_key.pub && \
-            scp -i /tmp/ec2_key -o StrictHostKeyChecking=no -o ConnectTimeout=15 tokyo_engine/telemetry_sync.py ec2-user@"$PUB_IP":/tmp/telemetry_sync_new.py; then
-            ssh -i /tmp/ec2_key -o StrictHostKeyChecking=no -o ConnectTimeout=15 ec2-user@"$PUB_IP" 'set -e
-              sudo mkdir -p /opt/crypto-arb-bot/_legacy_archive_do_not_access
-              sudo cp /opt/crypto-arb-bot/telemetry_sync.py /opt/crypto-arb-bot/_legacy_archive_do_not_access/telemetry_sync.bak.$(date +%s) || true
-              sudo mv /opt/crypto-arb-bot/telemetry_sync.bak.* /opt/crypto-arb-bot/_legacy_archive_do_not_access/ 2>/dev/null || true
-              sudo mv /tmp/telemetry_sync_new.py /opt/crypto-arb-bot/telemetry_sync.py && sudo chmod +x /opt/crypto-arb-bot/telemetry_sync.py
-              sudo python3 -m py_compile /opt/crypto-arb-bot/telemetry_sync.py
-              sudo curl -fsSL https://github.com/Abishek17703/crypto-arb-bot/releases/download/lighter-go-latest/lighter_go_bot -o /opt/crypto-arb-bot/lighter_go_bot.tmp && sudo mv /opt/crypto-arb-bot/lighter_go_bot.tmp /opt/crypto-arb-bot/lighter_go_bot && sudo chmod +x /opt/crypto-arb-bot/lighter_go_bot
-              sudo systemctl restart tokyo-telemetry.service
-              sleep 4
-              sudo systemctl is-active tokyo-telemetry.service
-              sudo systemctl status tokyo-telemetry.service --no-pager -n 12'
-          else
-            echo "SSH deploy failed, falling back to AWS SSM..."
-            SSM_JSON=$(jq -nc '{commands:[
-              "set -e",
-              "sudo mkdir -p /opt/crypto-arb-bot/_legacy_archive_do_not_access",
-              "sudo cp /opt/crypto-arb-bot/telemetry_sync.py /opt/crypto-arb-bot/_legacy_archive_do_not_access/telemetry_sync.bak.$(date +%s) || true",
-              "sudo mv /opt/crypto-arb-bot/telemetry_sync.bak.* /opt/crypto-arb-bot/_legacy_archive_do_not_access/ 2>/dev/null || true",
-              "curl -fsSL https://raw.githubusercontent.com/Abishek17703/crypto-arb-bot/main/tokyo_engine/telemetry_sync.py -o /tmp/telemetry_sync_new.py",
-              "sudo mv /tmp/telemetry_sync_new.py /opt/crypto-arb-bot/telemetry_sync.py && sudo chmod +x /opt/crypto-arb-bot/telemetry_sync.py",
-              "sudo python3 -m py_compile /opt/crypto-arb-bot/telemetry_sync.py",
-              "sudo curl -fsSL https://github.com/Abishek17703/crypto-arb-bot/releases/download/lighter-go-latest/lighter_go_bot -o /opt/crypto-arb-bot/lighter_go_bot.tmp && sudo mv /opt/crypto-arb-bot/lighter_go_bot.tmp /opt/crypto-arb-bot/lighter_go_bot && sudo chmod +x /opt/crypto-arb-bot/lighter_go_bot",
-              "sudo systemctl restart tokyo-telemetry.service",
-              "sleep 4",
-              "sudo systemctl is-active tokyo-telemetry.service"
-            ]}')
-            CMD_ID=$(aws ssm send-command --instance-ids "$INST_ID" --document-name "AWS-RunShellScript" --parameters "$SSM_JSON" --query "Command.CommandId" --output text)
-            echo "SSM CommandId: $CMD_ID"
-            sleep 12
-            STATUS=$(aws ssm get-command-invocation --command-id "$CMD_ID" --instance-id "$INST_ID" --query "Status" --output text)
-            echo "SSM Status: $STATUS"
-            aws ssm get-command-invocation --command-id "$CMD_ID" --instance-id "$INST_ID" --query "[StandardOutputContent,StandardErrorContent]" --output text
-            if [ "$STATUS" != "Success" ]; then
-              exit 1
-            fi
-          fi
+          SSM_JSON=$(jq -nc --arg sha "$GITHUB_SHA" '{commands:[
+            "set -e",
+            "sudo mkdir -p /opt/crypto-arb-bot/_legacy_archive_do_not_access",
+            "for f in /opt/crypto-arb-bot/lighter_tokyo_bot.py /opt/crypto-arb-bot/audit_tiers.py /opt/crypto-arb-bot/telemetry_sync_backup*.py /opt/crypto-arb-bot/telemetry_sync.bak.* /opt/crypto-arb-bot/strategy_journal.log; do sudo mv \"$f\" /opt/crypto-arb-bot/_legacy_archive_do_not_access/ 2>/dev/null || true; done",
+            "sudo cp /opt/crypto-arb-bot/telemetry_sync.py /opt/crypto-arb-bot/_legacy_archive_do_not_access/telemetry_sync.bak.$(date +%s) 2>/dev/null || true",
+            ("curl -fsSL https://raw.githubusercontent.com/Abishek17703/crypto-arb-bot/" + $sha + "/tokyo_engine/telemetry_sync.py -o /tmp/telemetry_sync_new.py"),
+            "sudo python3 -m py_compile /tmp/telemetry_sync_new.py",
+            "sudo mv /tmp/telemetry_sync_new.py /opt/crypto-arb-bot/telemetry_sync.py && sudo chmod +x /opt/crypto-arb-bot/telemetry_sync.py",
+            "sudo curl -fsSL https://github.com/Abishek17703/crypto-arb-bot/releases/download/lighter-go-latest/lighter_go_bot -o /opt/crypto-arb-bot/lighter_go_bot.tmp && sudo mv /opt/crypto-arb-bot/lighter_go_bot.tmp /opt/crypto-arb-bot/lighter_go_bot && sudo chmod +x /opt/crypto-arb-bot/lighter_go_bot",
+            "sudo systemctl restart tokyo-telemetry.service",
+            "sleep 3 && sudo systemctl is-active tokyo-telemetry.service"
+          ]}')
+          CMD_ID=$(aws ssm send-command --instance-ids "$INST_ID" --document-name "AWS-RunShellScript" --parameters "$SSM_JSON" --query "Command.CommandId" --output text)
+          echo "SSM CommandId: $CMD_ID"
+          STATUS="Pending"
+          for i in $(seq 1 20); do
+            sleep 3
+            STATUS=$(aws ssm get-command-invocation --command-id "$CMD_ID" --instance-id "$INST_ID" --query "Status" --output text 2>/dev/null || echo "Pending")
+            echo "Poll $i: $STATUS"
+            case "$STATUS" in
+              Success|Failed|Cancelled|TimedOut) break ;;
+            esac
+          done
+          aws ssm get-command-invocation --command-id "$CMD_ID" --instance-id "$INST_ID" --query "[StandardOutputContent,StandardErrorContent]" --output text || true
+          [ "$STATUS" = "Success" ]
