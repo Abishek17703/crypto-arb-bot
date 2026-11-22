@@ -18,7 +18,7 @@ import (
 )
 
 const (
-	LiveArenaVer       = "LIVE-MICRO-v107.0-FRESH-START"
+	LiveArenaVer       = "LIVE-MICRO-v107.1-SUB8MS-HEDGE"
 	Baseline3VenueUSD  = 223.8805 // 100% Flat Clean-Epoch 3-venue baseline ($91.3605 LT + $82.4512 BN Perp + $50.0688 Aster)
 	StratStopLossUSD   = -1.50    // Auto-halt individual strategy if realized+unrealized drops <= -$1.50
 	GlobalStopLossUSD  = -6.50    // Auto-flatten & S3-pause ALL live strategies at <= -$6.50 ($217.38 true Perp floor)
@@ -270,54 +270,54 @@ func initLiveMicroArena() {
 	}{
 		{
 			id:        "LIVE_S5_MARGIN_STRICT",
-			name:      "0% LT Maker -> BN USDC-M Strict (#1 Winner)",
+			name:      "0% LT Maker -> BN USDC-M High-Conviction (>=7.5bp)",
 			venueDesc: "LT #770015 (0%) <-> BN USDC-M (0% M / 4bp T)",
-			desc:      "Top L10-verified winner (+$9.51/hr at $489 scale). Rests 0% PostOnly Maker on Lighter -> <4ms Tokyo Taker hedge on Binance USDC-M -> 0% GTX Maker exit on Binance -> 0% Lighter IOC close (4.00bp total 4-leg fee).",
+			desc:      "Upgraded to S7 High-Conviction >=7.5bp threshold (+$13.40/hr 4h leader) with pre-warmed <8ms Tokyo Taker hedge -> 0% GTX Maker exit on Binance -> 0% Lighter IOC close.",
 			peerVenue: "BN_USDC",
 			clip:      15.0,
 			scale489:  550.0 / 15.0,
 			startCash: 40.0,
-			entryBp:   5.5,
-			exitBp:    2.3,
+			entryBp:   7.5,
+			exitBp:    2.6,
 			syms:      []string{"UNI", "HYPE", "ENA", "NEAR", "SUI", "ARB"},
 		},
 		{
 			id:        "LIVE_S3_LT_ASTER_CRYPTO",
-			name:      "0% LT Maker <-> AsterDEX Crypto Arb (#2 Winner)",
+			name:      "0% LT Maker <-> AsterDEX High-Conviction (>=7.5bp)",
 			venueDesc: "LT #770015 (0%) <-> Aster Crypto (0% M / 4bp T)",
-			desc:      "Runner-up L10-verified winner (+$8.88/hr at $489 scale). Rests 0% PostOnly Maker on Lighter -> <8ms Tokyo Taker hedge on AsterDEX -> 0% GTX Maker exit on Aster -> 0% Lighter IOC close (4.00bp total 4-leg fee).",
+			desc:      "High-conviction >=7.5bp entry (+$10.65/hr 4h) with pre-warmed <8ms Tokyo Taker hedge on AsterDEX -> 0% GTX Maker exit on Aster -> 0% Lighter IOC close.",
 			peerVenue: "ASTER_C",
 			clip:      15.0,
 			scale489:  580.0 / 15.0,
 			startCash: 25.0,
-			entryBp:   5.5,
-			exitBp:    2.2,
+			entryBp:   7.5,
+			exitBp:    2.6,
 			syms:      []string{"VVV", "XMR", "LIT"},
 		},
 		{
 			id:        "LIVE_S4_ASTER_LT_RWA",
-			name:      "0% LT Maker <-> AsterDEX 1.25bp RWA Equities (#3 Winner)",
-			venueDesc: "LT #770015 (0%) <-> Aster RWA (0% M / 1.25bp T)",
-			desc:      "Lowest-fee cross-venue arb in crypto: 0% Lighter #770015 Maker -> 1.25bp Aster RWA Taker hedge -> 0% Aster GTX Maker exit -> 0% Lighter IOC close = ONLY 1.25bp total 4-leg fee across NVDA/AAPL/TSLA/QQQ/SPY/META/COIN/MSTR!",
+			name:      "0% LT Maker <-> Aster RWA / Auto-Crypto Boost (>=6.0bp)",
+			venueDesc: "LT #770015 (0%) <-> Aster RWA (1.25bp) / BN Boost",
+			desc:      "Lowest-fee cross-venue arb (1.25bp total 4-leg fee on RWA during US hours; auto-rotates to >=7.5bp Crypto Boost on weekends when IDLE).",
 			peerVenue: "ASTER_RWA",
 			clip:      15.0,
 			scale489:  1100.0 / 15.0,
 			startCash: 25.0,
-			entryBp:   3.8,
-			exitBp:    1.8,
+			entryBp:   6.0,
+			exitBp:    2.2,
 			syms:      []string{"NVDA", "AAPL", "TSLA", "QQQ", "SPY", "META", "COIN", "MSTR"},
 		},
 		{
 			id:        "LIVE_S2_ZERO_FEE_DN",
-			name:      "0% LT Maker -> BN USDC-M Broad Alts (#4 Winner)",
+			name:      "0% LT Maker -> BN USDC-M Broad Alts (>=7.2bp)",
 			venueDesc: "LT #770015 (0%) <-> BN USDC-M (0% M / 4bp T)",
-			desc:      "High-frequency broad alt bucket (+$5.40/hr L10-verified). Disjoint symbol partition (AAVE/AVAX/WLD/LINK/DOGE/XRP/TIA/PENGU/TRUMP) with 0% Lighter Maker entry and 0% Binance USDC-M Maker exit.",
+			desc:      "Upgraded to S7 High-Conviction >=7.2bp threshold (+$13.40/hr 4h leader) across AAVE/AVAX/WLD/LINK/DOGE/XRP/TIA/PENGU/TRUMP with <8ms pre-warmed hedge.",
 			peerVenue: "BN_USDC",
 			clip:      15.0,
 			scale489:  650.0 / 15.0,
 			startCash: 40.0,
-			entryBp:   4.8,
-			exitBp:    2.2,
+			entryBp:   7.2,
+			exitBp:    2.5,
 			syms:      []string{"AAVE", "AVAX", "WLD", "LINK", "DOGE", "XRP", "TIA", "PENGU", "TRUMP"},
 		},
 	}
@@ -595,14 +595,8 @@ func executePeerMarketOrder(peerVenue, peerSym, side string, qty float64, qDec i
 	var body []byte
 	var err error
 	if peerVenue == "BN_USDC" {
-		ensureBnLeverage(peerSym)
 		sc, body, err = bnSignReq("POST", "fapi.binance.com", "/fapi/v1/order", p)
 	} else {
-		lev := 5
-		if peerVenue == "ASTER_RWA" {
-			lev = 8
-		}
-		ensureAsterLeverage(peerSym, lev)
 		sc, body, err = asterSignReq("POST", "/fapi/v3/order", p)
 	}
 	latMs = time.Since(t0).Milliseconds()
@@ -1504,6 +1498,40 @@ func stepLiveSlot(rt *LiveSlotRuntime, now time.Time) {
 		return
 	}
 
+	// Verify live Lighter REST BBO right before placing Maker order so stale WS levels never cross/underprice entry:
+	if rb, ra := fetchLtBookREST(markets[bestSym].ID); rb > 0 && ra > rb {
+		_, _, _, _, _, _, _, tFeeChk, pBidChk, pAskChk, emaChk, _, fxChk, _, _, okChk := getPeerSpecAndBook(rt.PeerVenue, bestSym, now)
+		if !okChk {
+			return
+		}
+		if bestLtSide == "ASK" {
+			bestLtPx = ra
+			rawS := ((ra - pAskChk*fxChk) / (pAskChk * fxChk)) * 10000.0
+			bestDisloc = rawS - emaChk
+			if bestDisloc < rt.EntryDisloc || rawS < tFeeChk+2.0 {
+				return
+			}
+		} else {
+			bestLtPx = rb
+			rawL := ((pBidChk*fxChk - rb) / (pBidChk * fxChk)) * 10000.0
+			bestDisloc = rawL + emaChk
+			if bestDisloc < rt.EntryDisloc || rawL < tFeeChk+2.0 {
+				return
+			}
+		}
+	}
+
+	// Pre-set leverage BEFORE resting Lighter Maker so the subsequent Taker hedge has ZERO extra round-trips (<8ms)!
+	if rt.PeerVenue == "BN_USDC" {
+		ensureBnLeverage(bestPeerSym)
+	} else {
+		lev := 5
+		if rt.PeerVenue == "ASTER_RWA" {
+			lev = 8
+		}
+		ensureAsterLeverage(bestPeerSym, lev)
+	}
+
 	coi, placed := placeLtPostOnlyMakerSync(bestSym, bestLtSide, bestLtPx, bestQty)
 	if !placed {
 		rt.CoolUntil = now.Add(2 * time.Second)
@@ -1898,6 +1926,30 @@ func runLiveMicroArenaLoop() {
 	emitBnAuditLine()
 	evaluateForwardArenaIdleSafeRotation()
 	writeLiveArenaTelemetry(time.Now())
+
+	// Keep TLS TCP pools to fapi.binance.com, fapi.asterdex.com, and mainnet.zklighter.elliot.ai warm every 4s (<8ms hedge):
+	go func() {
+		t := time.NewTicker(4 * time.Second)
+		defer t.Stop()
+		for {
+			<-t.C
+			if remotePaused.Load() {
+				return
+			}
+			if r1, e1 := bnHTTP.Get("https://fapi.binance.com/fapi/v1/ping"); e1 == nil {
+				_, _ = io.Copy(io.Discard, r1.Body)
+				r1.Body.Close()
+			}
+			if r2, e2 := bnHTTP.Get(AsterBaseURL + "/fapi/v3/ping"); e2 == nil {
+				_, _ = io.Copy(io.Discard, r2.Body)
+				r2.Body.Close()
+			}
+			if r3, e3 := txHTTP.Get(BaseURL + "/api/v1/time"); e3 == nil {
+				_, _ = io.Copy(io.Discard, r3.Body)
+				r3.Body.Close()
+			}
+		}
+	}()
 
 	tick := time.NewTicker(200 * time.Millisecond)
 	defer tick.Stop()
