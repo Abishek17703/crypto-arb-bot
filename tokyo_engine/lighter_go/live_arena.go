@@ -18,7 +18,7 @@ import (
 )
 
 const (
-	LiveArenaVer       = "LIVE-MICRO-v107.2-2SLOT-S9"
+	LiveArenaVer       = "LIVE-MICRO-v107.3-GAP-MAX"
 	Baseline3VenueUSD  = 223.8805 // 100% Flat Clean-Epoch 3-venue baseline ($91.3605 LT + $82.4512 BN Perp + $50.0688 Aster)
 	StratStopLossUSD   = -1.50    // Auto-halt individual strategy if realized+unrealized drops <= -$1.50
 	GlobalStopLossUSD  = -6.50    // Auto-flatten & S3-pause ALL live strategies at <= -$6.50 ($217.38 true Perp floor)
@@ -280,53 +280,53 @@ func initLiveMicroArena() {
 			id:        "LIVE_S5_MARGIN_STRICT",
 			name:      "0% LT Maker -> BN USDC-M High-Conviction (2x $15 Slots)",
 			venueDesc: "LT #770015 (0%) <-> BN USDC-M (0% M / 4bp T)",
-			desc:      "2 concurrent $15 slots (>=7.5bp S7 threshold) with <8ms pre-warmed Tokyo Taker hedge -> 0% GTX Maker exit on Binance -> 0% Lighter IOC close.",
+			desc:      "2 concurrent $15 slots (>=7.5bp S7 threshold) with <8ms pre-warmed Tokyo Taker hedge -> 0% GTX Maker exit -> 0% Lighter PostOnly/Bounded-IOC close.",
 			peerVenue: "BN_USDC",
 			clip:      15.0,
 			scale489:  550.0 / 30.0,
 			startCash: 40.0,
 			entryBp:   7.5,
-			exitBp:    2.6,
+			exitBp:    3.5,
 			syms:      []string{"UNI", "HYPE", "ENA", "NEAR", "SUI", "ARB"},
 		},
 		{
 			id:        "LIVE_S3_LT_ASTER_CRYPTO",
-			name:      "0% LT Maker <-> AsterDEX High-Conviction (2x $15 Slots)",
+			name:      "0% LT Maker <-> AsterDEX Depth-Guarded (2x $15 Slots)",
 			venueDesc: "LT #770015 (0%) <-> Aster Crypto (0% M / 4bp T)",
-			desc:      "2 concurrent $15 slots (>=7.5bp threshold, +$11.34/hr 4h) with <8ms Tokyo Taker hedge on AsterDEX -> 0% GTX Maker exit on Aster -> 0% Lighter IOC close.",
+			desc:      "2 concurrent $15 slots (>=8.5bp + 2.5x top-of-book depth guard) with <8ms Aster hedge -> 0% GTX Maker exit -> 0% Lighter PostOnly/Bounded-IOC close.",
 			peerVenue: "ASTER_C",
 			clip:      15.0,
 			scale489:  580.0 / 30.0,
 			startCash: 25.0,
-			entryBp:   7.5,
-			exitBp:    2.6,
+			entryBp:   8.5,
+			exitBp:    4.0,
 			syms:      []string{"VVV", "XMR", "LIT"},
 		},
 		{
 			id:          "LIVE_S4_ASTER_LT_RWA",
-			name:        "S9 Instant Taker-Grab (>=11bp Cross-Spike, 2x $15 Slots)",
-			venueDesc:   "LT #770015 0% IOC <-> BN USDC-M (+$23/hr S9 Leader!)",
-			desc:        "Promoted #1 Forward-Test leader (+$23.09/hr, 35/52 wins): instantly grabs >=11.0bp crossed dislocations via 0% Lighter IOC -> <8ms BN USDC-M Taker hedge -> 0% Maker exit (auto-restores RWA on US open).",
+			name:        "S9 Instant Taker-Grab (>=11bp Full-Universe, 2x $15 Slots)",
+			venueDesc:   "LT #770015 0% IOC <-> BN USDC-M (+$13.43/hr 10h Leader!)",
+			desc:        "Full 19-symbol S9 Taker-Grab universe: instantly grabs >=11.0bp crossed dislocations via 0% Lighter IOC -> <8ms BN USDC-M hedge -> 0% Maker exit (auto-restores RWA on US open).",
 			peerVenue:   "BN_USDC",
 			clip:        15.0,
 			scale489:    550.0 / 30.0,
 			startCash:   25.0,
 			entryBp:     8.0,
 			takerGrabBp: 11.0,
-			exitBp:      2.2,
-			syms:        []string{"KAITO", "CRV", "ETHFI", "WLFI"},
+			exitBp:      3.2,
+			syms:        []string{"UNI", "HYPE", "ENA", "NEAR", "WLD", "AAVE", "SUI", "ARB", "AVAX", "PENGU", "TRUMP", "TIA", "WLFI", "KAITO", "CRV", "ETHFI", "LINK", "DOGE", "XRP"},
 		},
 		{
 			id:        "LIVE_S2_ZERO_FEE_DN",
 			name:      "0% LT Maker -> BN USDC-M Broad Alts (2x $15 Slots)",
 			venueDesc: "LT #770015 (0%) <-> BN USDC-M (0% M / 4bp T)",
-			desc:      "2 concurrent $15 slots (>=7.2bp S7 threshold) across AAVE/AVAX/WLD/LINK/DOGE/XRP/TIA/PENGU/TRUMP so 1 slow coin never blocks new opportunities.",
+			desc:      "2 concurrent $15 slots (>=7.5bp S7 threshold) across AAVE/AVAX/WLD/LINK/DOGE/XRP/TIA/PENGU/TRUMP with 2.5x depth guard and 0% PostOnly/Bounded-IOC close.",
 			peerVenue: "BN_USDC",
 			clip:      15.0,
 			scale489:  650.0 / 30.0,
 			startCash: 40.0,
-			entryBp:   7.2,
-			exitBp:    2.5,
+			entryBp:   7.5,
+			exitBp:    3.5,
 			syms:      []string{"AAVE", "AVAX", "WLD", "LINK", "DOGE", "XRP", "TIA", "PENGU", "TRUMP"},
 		},
 	}
@@ -523,6 +523,10 @@ func appendLiveFillLocked(f LiveFillAudit) {
 }
 
 func placeLtPostOnlyMakerSync(sym, side string, px, qty float64) (coi int64, ok bool) {
+	return placeLtPostOnlyOrderSync(sym, side, px, qty, false)
+}
+
+func placeLtPostOnlyOrderSync(sym, side string, px, qty float64, reduceOnly bool) (coi int64, ok bool) {
 	m, exists := markets[sym]
 	if !exists || px <= 0 || qty < m.MinB {
 		return 0, false
@@ -533,13 +537,16 @@ func placeLtPostOnlyMakerSync(sym, side string, px, qty float64) (coi int64, ok 
 	if baseInt <= 0 || pxInt == 0 {
 		return 0, false
 	}
-	var isAsk uint8
+	var isAsk, ro uint8
 	if side == "ASK" {
 		isAsk = 1
 	}
+	if reduceOnly {
+		ro = 1
+	}
 	coi = coiSeq.Add(1)
 	exp := time.Now().Add(24 * time.Hour).UnixMilli()
-	dbg := fmt.Sprintf("LT_PO_%s_%s px=%.5f sz=%.5f", sym, side, pxF, qty)
+	dbg := fmt.Sprintf("LT_PO_%s_%s px=%.5f sz=%.5f ro=%d", sym, side, pxF, qty, ro)
 	err := sendSignedTx(fmt.Sprintf("po_%d", coi), dbg, func(opts *types.TransactOpts) (uint8, string, error) {
 		ti, e := txCli.GetCreateOrderTransaction(&types.CreateOrderTxReq{
 			MarketIndex:      m.ID,
@@ -549,7 +556,7 @@ func placeLtPostOnlyMakerSync(sym, side string, px, qty float64) (coi int64, ok 
 			IsAsk:            isAsk,
 			Type:             0, // LIMIT
 			TimeInForce:      2, // POST_ONLY (0% Maker strictly!)
-			ReduceOnly:       0,
+			ReduceOnly:       ro,
 			OrderExpiry:      exp,
 		}, opts)
 		if e != nil {
@@ -580,6 +587,35 @@ func cancelLtOrderByCOISync(sym string, coi int64) {
 		s, e := ti.GetTxInfo()
 		return ti.GetTxType(), s, e
 	})
+}
+
+func peerTopDepthUsd(peerVenue, peerSym, hedgeSide string) float64 {
+	if peerVenue == "BN_USDC" {
+		dnMu.Lock()
+		db := dnBooks[peerSym]
+		var usd float64
+		if db != nil {
+			if hedgeSide == "BUY" {
+				usd = db.Ask * db.AskQ
+			} else {
+				usd = db.Bid * db.BidQ
+			}
+		}
+		dnMu.Unlock()
+		return usd
+	}
+	asterMu.Lock()
+	db := asterBooks[peerSym]
+	var usd float64
+	if db != nil {
+		if hedgeSide == "BUY" {
+			usd = db.Ask * db.AskQ
+		} else {
+			usd = db.Bid * db.BidQ
+		}
+	}
+	asterMu.Unlock()
+	return usd
 }
 
 func getPeerSpecAndBook(peerVenue, sym string, now time.Time) (peerSym string, qDec, pxDec int, step, tick, minNot, mFeeBp, tFeeBp, bid, ask, emaBps, jumpBps, fx float64, warmTicks int, bookAge time.Duration, ok bool) {
@@ -762,17 +798,69 @@ func closeLtLegGuaranteedSync(sym string, expectedPos float64, lb, la float64) (
 	if lb <= 0 || la <= 0 {
 		lb, la = fetchLtBookREST(m.ID)
 	}
-	closeSide := "BID"
-	closePx := roundTo(la*1.005, m.PxDec)
-	exitEstPx = la
-	if curPos > 0 {
-		closeSide = "ASK"
-		closePx = roundTo(lb*0.995, m.PxDec)
-		exitEstPx = lb
-	}
 	qty := math.Abs(curPos)
 	if qty < m.MinB {
 		return exitEstPx, 0
+	}
+
+	// STAGE 0 (0ms speed-bump, 0% Maker, +spread bonus!):
+	// Try 550ms ReduceOnly PostOnly Maker close on Lighter BBO first before paying any IOC crossing spread!
+	poSide := "BID"
+	poPx := roundTo(lb, m.PxDec)
+	if curPos > 0 {
+		poSide = "ASK"
+		poPx = roundTo(la, m.PxDec)
+	}
+	if poPx > 0 {
+		liveMu.Lock()
+		allowPO := canSendLtTxLocked(time.Now().UnixMilli(), false)
+		if allowPO {
+			recordLtTxLocked(time.Now().UnixMilli())
+		}
+		liveMu.Unlock()
+		if allowPO {
+			if poCoi, okPO := placeLtPostOnlyOrderSync(sym, poSide, poPx, qty, true); okPO {
+				poDeadline := time.Now().Add(550 * time.Millisecond)
+				for time.Now().Before(poDeadline) {
+					if st := mktStates[sym]; st != nil {
+						st.mu.Lock()
+						pNow := st.pos
+						st.mu.Unlock()
+						if math.Abs(pNow) < m.MinB {
+							return poPx, time.Since(t0).Milliseconds()
+						}
+					}
+					select {
+					case <-ltFillCh:
+					case <-time.After(30 * time.Millisecond):
+					}
+				}
+				cancelLtOrderByCOISync(sym, poCoi)
+				liveMu.Lock()
+				recordLtTxLocked(time.Now().UnixMilli())
+				liveMu.Unlock()
+				time.Sleep(80 * time.Millisecond)
+				if rp, _ := fetchLtPosREST(sym); math.Abs(rp) < m.MinB {
+					return poPx, time.Since(t0).Milliseconds()
+				} else {
+					curPos = rp
+					qty = math.Abs(rp)
+				}
+			}
+		}
+	}
+
+	// STAGE 1: Tightly-bounded (8bp max slip) ReduceOnly IOC sweep — NEVER 50bp/150bp!
+	if rb, ra := fetchLtBookREST(m.ID); rb > 0 && ra > rb {
+		lb, la = rb, ra
+	}
+	closeSide := "BID"
+	closePx := roundTo(la*1.0008, m.PxDec)
+	exitEstPx = la
+	if curPos > 0 {
+		closeSide = "ASK"
+		closePx = roundTo(lb*0.9992, m.PxDec)
+		exitEstPx = lb
 	}
 
 	liveMu.Lock()
@@ -781,7 +869,7 @@ func closeLtLegGuaranteedSync(sym string, expectedPos float64, lb, la float64) (
 
 	placeLtHedgeIOC(sym, closeSide, closePx, qty, true)
 
-	cDeadline := time.Now().Add(1100 * time.Millisecond)
+	cDeadline := time.Now().Add(950 * time.Millisecond)
 	restChecked := false
 	for time.Now().Before(cDeadline) {
 		if st := mktStates[sym]; st != nil {
@@ -792,7 +880,7 @@ func closeLtLegGuaranteedSync(sym string, expectedPos float64, lb, la float64) (
 				return exitEstPx, time.Since(t0).Milliseconds()
 			}
 		}
-		if !restChecked && time.Since(t0) >= 600*time.Millisecond {
+		if !restChecked && time.Since(t0) >= 550*time.Millisecond {
 			restChecked = true
 			if rp, _ := fetchLtPosREST(sym); math.Abs(rp) < m.MinB {
 				return exitEstPx, time.Since(t0).Milliseconds()
@@ -800,21 +888,21 @@ func closeLtLegGuaranteedSync(sym string, expectedPos float64, lb, la float64) (
 		}
 		select {
 		case <-ltFillCh:
-		case <-time.After(45 * time.Millisecond):
+		case <-time.After(40 * time.Millisecond):
 		}
 	}
 
-	// Verify via REST and fire 1.5% wide sweep if still non-zero:
+	// STAGE 2: Final 20bp-bounded fallback (replaces destructive 150bp market sweep):
 	if remPos, _ := fetchLtPosREST(sym); math.Abs(remPos) >= m.MinB {
 		lb2, la2 := fetchLtBookREST(m.ID)
 		if lb2 <= 0 || la2 <= 0 {
 			lb2, la2 = lb, la
 		}
 		rSide := "BID"
-		rPx := roundTo(la2*1.015, m.PxDec)
+		rPx := roundTo(la2*1.0020, m.PxDec)
 		if remPos > 0 {
 			rSide = "ASK"
-			rPx = roundTo(lb2*0.985, m.PxDec)
+			rPx = roundTo(lb2*0.9980, m.PxDec)
 		}
 		liveMu.Lock()
 		recordLtTxLocked(time.Now().UnixMilli())
@@ -1214,9 +1302,9 @@ func stepLiveSlot(rt *LiveSlotRuntime, now time.Time) {
 			return
 		}
 
-		// If CancelSent is already in flight (waiting past 305ms speed-bump), check completion:
+		// If CancelSent is already in flight (wait 1.5s past speed-bump + zkLighter settlement so late fills NEVER escape unhedged!):
 		if rt.CancelSent {
-			if now.Sub(rt.CancelAt) >= 750*time.Millisecond {
+			if now.Sub(rt.CancelAt) >= 1500*time.Millisecond {
 				if rp, _ := fetchLtPosREST(rt.Sym); math.Abs(rp) >= m.MinB {
 					return // next tick will catch math.Abs(ltPos) >= m.MinB and hedge it immediately!
 				}
@@ -1526,7 +1614,7 @@ func stepLiveSlot(rt *LiveSlotRuntime, now time.Time) {
 
 			rawCrossShort := ((lb - pAskUsd) / pAskUsd) * 10000.0
 			crossShortBp := rawCrossShort - emaBps
-			if crossShortBp >= rt.TakerGrabBp && rawCrossShort >= tFeeBp+3.0 && crossShortBp > gCrossBp {
+			if crossShortBp >= rt.TakerGrabBp && rawCrossShort >= tFeeBp+3.0 && crossShortBp > gCrossBp && peerTopDepthUsd(rt.PeerVenue, peerSym, "BUY") >= rt.ClipUsd*2.5 {
 				gCrossBp = crossShortBp
 				gSym, gPeerSym = sym, peerSym
 				gLtSide, gPeerSide = "ASK", "BUY"
@@ -1536,7 +1624,7 @@ func stepLiveSlot(rt *LiveSlotRuntime, now time.Time) {
 
 			rawCrossLong := ((pBidUsd - la) / pBidUsd) * 10000.0
 			crossLongBp := rawCrossLong + emaBps
-			if crossLongBp >= rt.TakerGrabBp && rawCrossLong >= tFeeBp+3.0 && crossLongBp > gCrossBp {
+			if crossLongBp >= rt.TakerGrabBp && rawCrossLong >= tFeeBp+3.0 && crossLongBp > gCrossBp && peerTopDepthUsd(rt.PeerVenue, peerSym, "SELL") >= rt.ClipUsd*2.5 {
 				gCrossBp = crossLongBp
 				gSym, gPeerSym = sym, peerSym
 				gLtSide, gPeerSide = "BID", "SELL"
@@ -1772,20 +1860,20 @@ func stepLiveSlot(rt *LiveSlotRuntime, now time.Time) {
 			continue
 		}
 
-		// Candidate A: SELL PostOnly Maker on Lighter @ la, BUY Taker Hedge on Peer @ pAsk
+		// Candidate A: SELL PostOnly Maker on Lighter @ la, BUY Taker Hedge on Peer @ pAsk (requires >= 2.5x top-of-book depth!)
 		rawShortBp := ((la - pAskUsd) / pAskUsd) * 10000.0
 		shortDislocBp := rawShortBp - emaBps
-		if shortDislocBp >= rt.EntryDisloc && rawShortBp >= tFeeBp+1.0 && shortDislocBp > bestDisloc {
+		if shortDislocBp >= rt.EntryDisloc && rawShortBp >= tFeeBp+1.5 && shortDislocBp > bestDisloc && peerTopDepthUsd(rt.PeerVenue, peerSym, "BUY") >= rt.ClipUsd*2.5 {
 			bestDisloc = shortDislocBp
 			bestSym, bestPeerSym = sym, peerSym
 			bestLtSide, bestPeerSide = "ASK", "BUY"
 			bestLtPx, bestQty = la, qty
 		}
 
-		// Candidate B: BUY PostOnly Maker on Lighter @ lb, SELL Taker Hedge on Peer @ pBid
+		// Candidate B: BUY PostOnly Maker on Lighter @ lb, SELL Taker Hedge on Peer @ pBid (requires >= 2.5x top-of-book depth!)
 		rawLongBp := ((pBidUsd - lb) / pBidUsd) * 10000.0
 		longDislocBp := rawLongBp + emaBps
-		if longDislocBp >= rt.EntryDisloc && rawLongBp >= tFeeBp+1.0 && longDislocBp > bestDisloc {
+		if longDislocBp >= rt.EntryDisloc && rawLongBp >= tFeeBp+1.5 && longDislocBp > bestDisloc && peerTopDepthUsd(rt.PeerVenue, peerSym, "SELL") >= rt.ClipUsd*2.5 {
 			bestDisloc = longDislocBp
 			bestSym, bestPeerSym = sym, peerSym
 			bestLtSide, bestPeerSide = "BID", "SELL"
@@ -2084,14 +2172,20 @@ func writeLiveArenaTelemetry(now time.Time) {
 		go flattenAndExitPause(fmt.Sprintf("STOP-LOSS Global Micro-Arena PnL=$%+.2f (WalletDelta=$%+.2f) <= $%.2f", combinedNet, realEqDelta, GlobalStopLossUSD))
 	}
 
-	// Build live dislocation radar across all 4 strategy symbol sets:
+	// Build live dislocation radar across all 4 strategy symbol sets (deduplicated by symbol+peerVenue):
 	spreads := make([]LiveSpreadSnap, 0, 26)
+	seenRadar := map[string]bool{}
 	for _, id := range liveStratOrder {
 		rt := liveSlots[id+":0"]
 		if rt == nil {
 			continue
 		}
 		for _, sym := range rt.Symbols {
+			rk := sym + ":" + rt.PeerVenue
+			if seenRadar[rk] {
+				continue
+			}
+			seenRadar[rk] = true
 			st := mktStates[sym]
 			if st == nil {
 				continue
@@ -2237,7 +2331,7 @@ func evaluateForwardArenaIdleSafeRotation() {
 		}
 		// Never swap mid-position! Queue into PendingSyms so it only applies when State == "IDLE"!
 		if s4Hr < 4.50 && topCryptoHr >= 6.50 {
-			wantSyms := []string{"KAITO", "CRV", "ETHFI", "WLFI"} // strictly disjoint from S5/S3/S2!
+			wantSyms := []string{"UNI", "HYPE", "ENA", "NEAR", "WLD", "AAVE", "SUI", "ARB", "AVAX", "PENGU", "TRUMP", "TIA", "WLFI", "KAITO", "CRV", "ETHFI", "LINK", "DOGE", "XRP"}
 			if rt4.PeerVenue != "BN_USDC" && len(rt4.PendingSyms) == 0 {
 				rt4.PendingVenue = "BN_USDC"
 				rt4.PendingSyms = wantSyms
@@ -2253,6 +2347,62 @@ func evaluateForwardArenaIdleSafeRotation() {
 	}
 }
 
+func sweepUntrackedLtOrphansSync() {
+	if remotePaused.Load() || breakerTripped.Load() {
+		return
+	}
+	hc := &http.Client{Timeout: 3 * time.Second}
+	resp, err := ltGet(hc, fmt.Sprintf("%s/api/v1/account?by=index&value=%d", BaseURL, AcctIdx))
+	if err != nil {
+		return
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	var res struct {
+		Accounts []struct {
+			Positions []struct {
+				MarketID int64  `json:"market_id"`
+				Position string `json:"position"`
+				Sign     int    `json:"sign"`
+			} `json:"positions"`
+		} `json:"accounts"`
+	}
+	if json.Unmarshal(body, &res) != nil || len(res.Accounts) == 0 {
+		return
+	}
+	for _, p := range res.Accounts[0].Positions {
+		sym, ok := idToSym[p.MarketID]
+		if !ok {
+			continue
+		}
+		m, okM := markets[sym]
+		if !okM {
+			continue
+		}
+		sz, _ := strconv.ParseFloat(p.Position, 64)
+		if p.Sign < 0 && sz > 0 {
+			sz = -sz
+		}
+		if math.Abs(sz) < m.MinB {
+			continue
+		}
+		liveMu.Lock()
+		tracked := false
+		for _, rt := range liveSlots {
+			if rt != nil && rt.State != "IDLE" && rt.Sym == sym {
+				tracked = true
+				break
+			}
+		}
+		liveMu.Unlock()
+		if !tracked {
+			lb, la := fetchLtBookREST(m.ID)
+			fmt.Printf("[ORPHAN_SWEEP] Flattening untracked Lighter position %s sz=%.4f cleanly!\n", sym, sz)
+			_, _ = closeLtLegGuaranteedSync(sym, sz, lb, la)
+		}
+	}
+}
+
 func runLiveMicroArenaLoop() {
 	initLiveMicroArena()
 	time.Sleep(4 * time.Second)
@@ -2261,6 +2411,7 @@ func runLiveMicroArenaLoop() {
 	}
 	_, _, _ = fetchAsterAccountMargin()
 	emitBnAuditLine()
+	sweepUntrackedLtOrphansSync()
 	evaluateForwardArenaIdleSafeRotation()
 	writeLiveArenaTelemetry(time.Now())
 
@@ -2292,6 +2443,7 @@ func runLiveMicroArenaLoop() {
 	defer tick.Stop()
 	lastMarginPoll := time.Now()
 	lastRotCheck := time.Now()
+	lastOrphanCheck := time.Now()
 	lastTelWrite := time.Time{}
 
 	for {
@@ -2309,6 +2461,10 @@ func runLiveMicroArenaLoop() {
 				_, _, _, _ = fetchBnAccountMargin()
 				_, _, _ = fetchAsterAccountMargin()
 			}()
+		}
+		if now.Sub(lastOrphanCheck) >= 30*time.Second {
+			lastOrphanCheck = now
+			go sweepUntrackedLtOrphansSync()
 		}
 		if now.Sub(lastRotCheck) >= 60*time.Second {
 			lastRotCheck = now

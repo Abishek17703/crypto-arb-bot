@@ -30,7 +30,7 @@ import (
 )
 
 const (
-	BotVersion = "v107.2"
+	BotVersion = "v107.3"
 	BaseURL    = "https://mainnet.zklighter.elliot.ai"
 	WsURL      = "wss://mainnet.zklighter.elliot.ai/stream"
 	AcctIdx    = int64(770015)
@@ -1135,7 +1135,7 @@ func onBnAnyBookTick(bnSym, baseSym string, b, a, bq, aq float64) {
 			ltSp := (ltA - ltB) / ltMid * 10000.0
 			bnSp := (a - b) / bnMid * 10000.0
 			rawBasis := (ltMid - bnMidUsd) / bnMidUsd * 10000.0
-			if ltSp <= 7.0 && bnSp <= 5.5 && (db.WarmTicks == 0 || now.Sub(db.LastEmaTS) >= 500*time.Millisecond) {
+			if ltSp <= 28.0 && bnSp <= 20.0 && (db.WarmTicks == 0 || now.Sub(db.LastEmaTS) >= 500*time.Millisecond) {
 				if db.WarmTicks == 0 {
 					db.EmaBps = rawBasis
 				} else {

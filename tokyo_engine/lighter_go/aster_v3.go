@@ -451,7 +451,7 @@ func runAsterBookTickerWS() {
 					asSp := (a - b) / mid * 10000.0
 					rawBasis := (ltMid - asMidUsd) / asMidUsd * 10000.0
 					asterMu.Lock()
-					if ltSp <= 12.0 && asSp <= 8.0 && (db.WarmTicks == 0 || now.Sub(db.LastEmaTS) >= 500*time.Millisecond) {
+					if ltSp <= 25.0 && asSp <= 18.0 && (db.WarmTicks == 0 || now.Sub(db.LastEmaTS) >= 500*time.Millisecond) {
 						if db.WarmTicks == 0 {
 							db.EmaBps = rawBasis
 						} else {
