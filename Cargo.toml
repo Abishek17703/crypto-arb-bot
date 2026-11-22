@@ -21,10 +21,6 @@ libc = "0.2"
 sha2 = "0.10"
 
 [[bin]]
-name = "crypto-arb-bot"
-path = "src/main.rs"
-
-[[bin]]
 name = "carbon_ctl"
 path = "src/bin/carbon_ctl.rs"
 

@@ -216,19 +216,7 @@
     const BN_LAST_AUDIT_KEY = "bn_last_audit_v7_" + ACCT_INDEX;
     const BN_OVERRIDE_KEY = "bn_manual_usd_v6_" + ACCT_INDEX;
     const RR_KEY = "comb_rr_base_v7_" + ACCT_INDEX;
-    const DN_TRADES_KEY = "dn_comb_trades_v6_" + ACCT_INDEX;
-
-    // Seed verified dual-venue trades from today so trade ledger always shows TRUE combined (Binance + Lighter) P&L across engine restarts!
-    const SEED_DN_TRADES = [
-      { id: 1795285437850, strat: "ZERO_FEE_DN", legs: "BN_XRPUSDC_SELL+LT_BID", usd: 24.23, holdS: 406.3, pnlBps: 2.00, pnlUsd: 0.0048, bnLegUsd: -0.0048, ltLegUsd: 0.0096, status: "CLOSED", reason: "ZERO_FEE_4LEG_TP" },
-      { id: 1795284955227, strat: "ZERO_FEE_DN", legs: "BN_SOLUSDC_BUY+LT_ASK", usd: 24.73, holdS: 469.7, pnlBps: 1.90, pnlUsd: 0.0047, bnLegUsd: 0.0131, ltLegUsd: -0.0084, status: "CLOSED", reason: "ZERO_FEE_4LEG_TP" },
-      { id: 1795284766201, strat: "ZERO_FEE_DN", legs: "BN_ZECUSDC_SELL+LT_BID", usd: 24.44, holdS: 51.0, pnlBps: 1.78, pnlUsd: 0.0044, bnLegUsd: 0.0153, ltLegUsd: -0.0109, status: "CLOSED", reason: "ZERO_FEE_4LEG_TP" },
-      { id: 1795283160496, strat: "ZERO_FEE_DN", legs: "BN_ZECUSDC_BUY+LT_ASK", usd: 24.30, holdS: 471.5, pnlBps: -5.22, pnlUsd: -0.0127, bnLegUsd: 0.0957, ltLegUsd: -0.1084, status: "CLOSED", reason: "PRE_V96_SL" },
-      { id: 1795282159715, strat: "ZERO_FEE_DN", legs: "BN_ZECUSDC_BUY+LT_ASK", usd: 24.45, holdS: 9.7, pnlBps: 1.90, pnlUsd: 0.0046, bnLegUsd: 0.0000, ltLegUsd: 0.0046, status: "CLOSED", reason: "ZERO_FEE_TP" },
-      { id: 1795281670044, strat: "ZERO_FEE_DN", legs: "LT_ENA_ASK+BN_ENAUSDC_BUY", usd: 24.87, holdS: 0.5, pnlBps: 4.17, pnlUsd: 0.0104, bnLegUsd: 0.0180, ltLegUsd: -0.0076, status: "CLOSED", reason: "ZERO_FEE_TP" },
-      { id: 1795277709119, strat: "ZERO_FEE_DN", legs: "BN_ENAUSDT_BUY+LT_ASK", usd: 24.95, holdS: 12.6, pnlBps: -15.07, pnlUsd: -0.0376, bnLegUsd: -0.0452, ltLegUsd: 0.0076, status: "CLOSED", reason: "PRE_SWAP_USDT" },
-      { id: 1795276643663, strat: "ZERO_FEE_DN", legs: "BN_ENAUSDC_BUY+LT_ASK", usd: 24.91, holdS: 8.4, pnlBps: -9.07, pnlUsd: -0.0226, bnLegUsd: -0.0226, ltLegUsd: 0.0000, status: "CLOSED", reason: "PRE_SWAP_TAKER" }
-    ];
+    const DN_TRADES_KEY = "dn_comb_trades_v7_" + ACCT_INDEX;
 
     let startLtUsd = parseFloat(localStorage.getItem(LT_START_KEY) || "93.0426");
     let startBnUsd = parseFloat(localStorage.getItem(BN_START_KEY) || "397.7745");
@@ -241,7 +229,6 @@
     let eqHist = JSON.parse(localStorage.getItem(STORE_KEY) || "[]");
     let rrBase = JSON.parse(localStorage.getItem(RR_KEY) || "null");
     let savedDnMap = new Map();
-    for (const s of SEED_DN_TRADES) savedDnMap.set(String(s.id), s);
     try {
       const persisted = JSON.parse(localStorage.getItem(DN_TRADES_KEY) || "[]");
       if (Array.isArray(persisted)) {
@@ -296,13 +283,15 @@
       if (!isNaN(bnManualOverride) && bnManualOverride > 0) {
         return bnManualOverride;
       }
-      // 1) Prefer exact Binance Asset Overview wallet reported directly by GO-TOKYO BN_AUDIT (/sapi/v1/asset/wallet/balance already includes Futures uPnL!):
-      if (lastBnAudit && isFinite(lastBnAudit.wallet) && lastBnAudit.wallet > 100) {
+      // 1) Prefer live rawWalletUsd from telemetry_sync.py when valid (<460), else BN_AUDIT.wallet:
+      const liveWallet = lastTel && (typeof lastTel.rawWalletUsd === "number" ? lastTel.rawWalletUsd : lastTel.totalLiveUsd);
+      if (typeof liveWallet === "number" && liveWallet > 0 && liveWallet < 460) {
+        return liveWallet;
+      }
+      if (lastBnAudit && isFinite(lastBnAudit.wallet) && lastBnAudit.wallet > 0) {
         return lastBnAudit.wallet;
       }
-      // 2) Else use true post-transfer rawWalletUsd / totalLiveUsd from telemetry_sync.py (~$397.73, reject stale pre-transfer $498.445):
-      const liveWallet = lastTel && (typeof lastTel.rawWalletUsd === "number" ? lastTel.rawWalletUsd : lastTel.totalLiveUsd);
-      if (typeof liveWallet === "number" && liveWallet > 100 && liveWallet < 460) {
+      if (typeof liveWallet === "number" && liveWallet > 0) {
         return liveWallet;
       }
       // 3) Else sum reported Binance balances directly (free + locked - borrowed):
@@ -426,12 +415,25 @@
     function parseTelemetryLog(data) {
       const logTxt = String(data.lighterLog || "").replace(/\0/g, "");
       const lines = logTxt.split("\n");
-      let ver = "v97.0";
+      let ver = "v98.0";
       let scanTxt = "";
       let readyTxt = "";
       let audit = null;
       const byId = new Map(savedDnMap);
       let mapDirty = false;
+
+      if (Array.isArray(data.dnTradesHistory)) {
+        for (const h of data.dnTradesHistory) {
+          if (h && h.id) {
+            const key = String(h.id);
+            const cur = byId.get(key);
+            if (!cur || cur.status !== "CLOSED" || h.status === "CLOSED") {
+              byId.set(key, h);
+              mapDirty = true;
+            }
+          }
+        }
+      }
 
       for (const ln of lines) {
         const vm = ln.match(/GO-TOKYO (v[0-9.]+) LIVE/);
@@ -482,6 +484,16 @@
           byId.set(cm[1], prev);
           mapDirty = true;
         }
+        const lm = ln.match(/\[DN_LEGS id=(\d+) coin=([A-Z0-9]+) bn=([+-]?[0-9.]+) lt=([+-]?[0-9.]+) fee=\$([0-9.]+)\]/);
+        if (lm && byId.has(lm[1])) {
+          const prev = byId.get(lm[1]);
+          prev.coin = lm[2];
+          prev.bnLegUsd = parseFloat(lm[3]);
+          prev.ltLegUsd = parseFloat(lm[4]);
+          prev.feeUsd = parseFloat(lm[5]);
+          byId.set(lm[1], prev);
+          mapDirty = true;
+        }
       }
 
       // Also synthesize any currently LIVE open position on Lighter so LIVE badge ALWAYS shows even if lighterLog rolled over!
@@ -507,49 +519,17 @@
           }
         }
       }
-      // Auto-close any OPEN row whose coin is now 100% flat on Lighter!
+      // Close any stale OPEN row whose coin is now flat on Lighter without inventing fake profit:
       for (const [k, r] of byId.entries()) {
         if (r.status === "OPEN") {
-          const cSym = humanizeLegs(r.legs).coin;
+          const cSym = r.coin || humanizeLegs(r.legs).coin;
           if (!livePosSet.has(cSym)) {
             if (String(k).startsWith("live_")) {
               byId.delete(k);
             } else {
               r.status = "CLOSED";
               r.holdS = Math.max(1.0, (Date.now() - r.id) / 1000.0);
-              r.pnlBps = r.edgeBps || 1.80;
-              r.pnlUsd = r.usd * (r.pnlBps / 10000.0);
-              r.reason = "ZERO_FEE_4LEG_TP";
-              mapDirty = true;
-            }
-          }
-        }
-      }
-
-      // Auto-pair any post-v96 Lighter open->close fills that rolled out of the 3.2KB S3 log slice!
-      const openFillBySym = new Map();
-      for (const ft of rawLtTrades) {
-        if (ft.ts < 1795284700000) continue;
-        if (ft.pnl === null) {
-          openFillBySym.set(ft.sym, ft);
-        } else {
-          const op = openFillBySym.get(ft.sym);
-          if (op) {
-            openFillBySym.delete(ft.sym);
-            const alreadyRecorded = Array.from(byId.values()).some(r =>
-              humanizeLegs(r.legs).coin === ft.sym && Math.abs(r.id - op.ts) < 12000
-            );
-            if (!alreadyRecorded) {
-              const bnSide = op.isBid ? "SELL" : "BUY";
-              const ltSide = op.isBid ? "BID" : "ASK";
-              const estPnlBps = 1.90;
-              const estNetUsd = op.usd * (estPnlBps / 10000.0);
-              byId.set(String(op.ts), {
-                id: op.ts, strat: "ZERO_FEE_DN", legs: `BN_${ft.sym}USDC_${bnSide}+LT_${ltSide}`,
-                usd: op.usd, holdS: Math.max(0.5, (ft.ts - op.ts) / 1000.0),
-                pnlBps: estPnlBps, pnlUsd: estNetUsd, bnLegUsd: estNetUsd - ft.pnl, ltLegUsd: ft.pnl,
-                status: "CLOSED", reason: "ZERO_FEE_4LEG_TP"
-              });
+              r.reason = r.reason || "CLOSED_UNTRACKED";
               mapDirty = true;
             }
           }
@@ -670,13 +650,13 @@
           }
 
           let pnlCell = "";
-          if (r.pnlUsd !== null) {
+          if (typeof r.pnlUsd === "number" && isFinite(r.pnlUsd)) {
             const bnLegNet = (typeof r.bnLegUsd === "number") ? r.bnLegUsd : (matchedLt ? (r.pnlUsd - ltLegPnl) : (r.pnlUsd * 0.5));
-            const ltLegVal = matchedLt ? ltLegPnl : (r.pnlUsd - bnLegNet);
+            const ltLegVal = (typeof r.ltLegUsd === "number") ? r.ltLegUsd : (matchedLt ? ltLegPnl : (r.pnlUsd - bnLegNet));
             pnlCell = `
-              <div><b class="${colorCls(r.pnlUsd)}" style="font-size:1.1rem;">${fmtSigned(r.pnlUsd, 4)}</b> <span class="usd-sub">(${r.pnlBps >= 0 ? "+" : ""}${r.pnlBps.toFixed(2)}bp)</span></div>
+              <div><b class="${colorCls(r.pnlUsd)}" style="font-size:1.1rem;">${fmtSigned(r.pnlUsd, 4)}</b> <span class="usd-sub">(${(r.pnlBps || 0) >= 0 ? "+" : ""}${(r.pnlBps || 0).toFixed(2)}bp)</span></div>
               <div style="font-size:0.86rem;color:var(--muted);margin-top:0.18rem;">(Binance <span class="${colorCls(bnLegNet)}">${fmtSigned(bnLegNet, 4)}</span> &bull; Lighter <span class="${colorCls(ltLegVal)}">${fmtSigned(ltLegVal, 4)}</span>)</div>`;
-          } else {
+          } else if (r.status === "OPEN") {
             const openUpnl = (() => {
               const op = (lastAcct.positions || []).find(p => p.symbol === h.coin);
               return op ? parseFloat(op.unrealized_pnl || 0) : 0;
@@ -687,6 +667,8 @@
             pnlCell = `
               <div><b class="${colorCls(liveComb)}" style="font-size:1.1rem;">${fmtSigned(liveComb, 4)}</b> <span class="usd-sub">(Locked ${r.edgeBps >= 0 ? "+" : ""}${(r.edgeBps || 0).toFixed(2)}bp)</span></div>
               <div style="font-size:0.86rem;color:var(--muted);margin-top:0.18rem;">(Binance <span class="${colorCls(bnUpnl)}">${fmtSigned(bnUpnl, 4)}</span> &bull; Lighter <span class="${colorCls(openUpnl)}">${fmtSigned(openUpnl, 4)}</span>)</div>`;
+          } else {
+            pnlCell = `<div class="usd-sub">— (${r.reason || "CLOSED"})</div>`;
           }
 
           const stBadge = r.status === "OPEN"

@@ -4,3 +4,5 @@ telemetry.json
 .env
 .agents/
 AGENTS.md
+_legacy_archive_do_not_access/
+.agent/
