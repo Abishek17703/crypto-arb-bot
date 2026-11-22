@@ -29,7 +29,7 @@ import (
 )
 
 const (
-	BotVersion = "v100.0"
+	BotVersion = "v101.0"
 	BaseURL    = "https://mainnet.zklighter.elliot.ai"
 	WsURL      = "wss://mainnet.zklighter.elliot.ai/stream"
 	AcctIdx    = int64(770015)
@@ -65,6 +65,8 @@ type MarketState struct {
 	ltBidSz      float64
 	ltAsk        float64
 	ltAskSz      float64
+	ltBidBandUsd float64
+	ltAskBandUsd float64
 	lastBookTS   time.Time
 	pos          float64
 	avgEntry     float64
@@ -119,12 +121,13 @@ type DnSlot struct {
 	EntryLtPx  float64
 	EntryFx    float64
 	EntryFeeBp float64
-	TradeID    int64
-	OpenedAt   time.Time
-	RefLtPx    float64
-	RefUsdtMid float64
-	RefBtcMid  float64
-	LastPoll   time.Time
+	TradeID     int64
+	OpenedAt    time.Time
+	RefLtPx     float64
+	RefUsdtMid  float64
+	RefBtcMid   float64
+	EntryEmaBps float64
+	LastPoll    time.Time
 }
 
 type DnTradeRecord struct {
@@ -749,8 +752,29 @@ func recomputeBBO(st *MarketState) {
 			}
 		}
 	}
-	st.ltBid, st.ltBidSz = bestB, bestBSz
-	st.ltAsk, st.ltAskSz = bestA, bestASz
+	bidBand, askBand := 0.0, 0.0
+	if bestB > 0 {
+		minB := bestB * (1.0 - 0.00015)
+		for ps, sz := range st.bookBids {
+			if sz > 0 {
+				if p, err := strconv.ParseFloat(ps, 64); err == nil && p >= minB {
+					bidBand += p * sz
+				}
+			}
+		}
+	}
+	if bestA > 0 {
+		maxA := bestA * (1.0 + 0.00015)
+		for ps, sz := range st.bookAsks {
+			if sz > 0 {
+				if p, err := strconv.ParseFloat(ps, 64); err == nil && p <= maxA {
+					askBand += p * sz
+				}
+			}
+		}
+	}
+	st.ltBid, st.ltBidSz, st.ltBidBandUsd = bestB, bestBSz, bidBand
+	st.ltAsk, st.ltAskSz, st.ltAskBandUsd = bestA, bestASz, askBand
 }
 
 func runTxWS() {
@@ -848,8 +872,9 @@ func runLtWS() {
 			st.mu.Lock()
 			st.bookBids = map[string]float64{}
 			st.bookAsks = map[string]float64{}
-			st.ltBid, st.ltBidSz = 0, 0
-			st.ltAsk, st.ltAskSz = 0, 0
+			st.ltBid, st.ltBidSz, st.ltBidBandUsd = 0, 0, 0
+			st.ltAsk, st.ltAskSz, st.ltAskBandUsd = 0, 0, 0
+			st.lastBookTS = time.Time{}
 			st.mu.Unlock()
 		}
 		if tok, err := txCli.GetAuthToken(time.Now().Add(6 * time.Hour)); err == nil {
@@ -945,34 +970,24 @@ func runLtWS() {
 					}
 					st.mu.Lock()
 					prevB, prevA := st.ltBid, st.ltAsk
-					needRecompute := strings.Contains(m.Type, "subscribed")
-					if needRecompute {
+					if strings.Contains(m.Type, "subscribed") {
 						st.bookBids = map[string]float64{}
 						st.bookAsks = map[string]float64{}
-						st.ltBid, st.ltBidSz = 0, 0
-						st.ltAsk, st.ltAskSz = 0, 0
+						st.ltBid, st.ltBidSz, st.ltBidBandUsd = 0, 0, 0
+						st.ltAsk, st.ltAskSz, st.ltAskBandUsd = 0, 0, 0
 					}
 					for _, b := range m.OrderBook.Bids {
 						sz, _ := strconv.ParseFloat(b.Size, 64)
 						bp, err := strconv.ParseFloat(b.Price, 64)
 						if sz <= 0 {
 							delete(st.bookBids, b.Price)
-							if err == nil && bp >= st.ltBid {
-								needRecompute = true
-							}
 						} else {
 							st.bookBids[b.Price] = sz
-							if err == nil {
-								if bp >= st.ltBid {
-									st.ltBid, st.ltBidSz = bp, sz
-								}
-								if st.ltAsk > 0 && bp >= st.ltAsk {
-									for apStr := range st.bookAsks {
-										if ap, e2 := strconv.ParseFloat(apStr, 64); e2 == nil && ap <= bp {
-											delete(st.bookAsks, apStr)
-										}
+							if err == nil && st.ltAsk > 0 && bp >= st.ltAsk {
+								for apStr := range st.bookAsks {
+									if ap, e2 := strconv.ParseFloat(apStr, 64); e2 == nil && ap <= bp {
+										delete(st.bookAsks, apStr)
 									}
-									needRecompute = true
 								}
 							}
 						}
@@ -982,29 +997,18 @@ func runLtWS() {
 						ap, err := strconv.ParseFloat(a.Price, 64)
 						if sz <= 0 {
 							delete(st.bookAsks, a.Price)
-							if err == nil && ap <= st.ltAsk {
-								needRecompute = true
-							}
 						} else {
 							st.bookAsks[a.Price] = sz
-							if err == nil {
-								if st.ltAsk == 0 || ap <= st.ltAsk {
-									st.ltAsk, st.ltAskSz = ap, sz
-								}
-								if st.ltBid > 0 && ap <= st.ltBid {
-									for bpStr := range st.bookBids {
-										if bp, e2 := strconv.ParseFloat(bpStr, 64); e2 == nil && bp >= ap {
-											delete(st.bookBids, bpStr)
-										}
+							if err == nil && st.ltBid > 0 && ap <= st.ltBid {
+								for bpStr := range st.bookBids {
+									if bp, e2 := strconv.ParseFloat(bpStr, 64); e2 == nil && bp >= ap {
+										delete(st.bookBids, bpStr)
 									}
-									needRecompute = true
 								}
 							}
 						}
 					}
-					if needRecompute {
-						recomputeBBO(st)
-					}
+					recomputeBBO(st)
 					if st.ltBid > 0 && st.ltAsk > 0 {
 						st.lastBookTS = time.Now()
 					}
@@ -1086,7 +1090,7 @@ func onBnAnyBookTick(bnSym, baseSym string, b, a, bq, aq float64) {
 	}
 
 	// Continuously update 90s EWMA equilibrium basis (LtMid - BnMidUsd) regardless of active slot state:
-	if (isUsdc || bnSym == "BTCUSDT") && ltB > 0 && ltA > ltB && now.Sub(ltTS) < 6*time.Second {
+	if (isUsdc || bnSym == "BTCUSDT") && ltB > 0 && ltA > ltB && now.Sub(ltTS) < 20*time.Second {
 		quote := "USDT"
 		if exists {
 			quote = sp.Quote
@@ -2227,7 +2231,7 @@ func processActiveSlot(now time.Time) {
 		return
 	}
 	st.mu.Lock()
-	lb, la, lbSz, laSz, ltPos, ltAvg := st.ltBid, st.ltAsk, st.ltBidSz, st.ltAskSz, st.pos, st.avgEntry
+	lb, la, lbBand, laBand, ltPos, ltAvg := st.ltBid, st.ltAsk, st.ltBidBandUsd, st.ltAskBandUsd, st.pos, st.avgEntry
 	st.mu.Unlock()
 
 	eFx := sl.EntryFx
@@ -2245,17 +2249,25 @@ func processActiveSlot(now time.Time) {
 
 	if sl.State == "BN_ENTRY_OPEN" {
 		eUsd := sl.EntryBnPx * fx
+		emaBps := sl.EntryEmaBps
+		dnMu.Lock()
+		if db := dnBooks[actSp.BnSym]; db != nil && db.WarmTicks >= 15 {
+			emaBps = db.EmaBps
+		}
+		dnMu.Unlock()
 		curNetEdge := (lb-eUsd)/eUsd*10000.0 - rtMakerFeeBp
+		curDisloc := curNetEdge - emaBps
 		ltMoved := lb < sl.RefLtPx*(1.0-0.5/10000.0)
-		ltHedgeDepth := lb * lbSz
+		ltHedgeDepth := lbBand
 		if sl.BnSide == "SELL" {
 			curNetEdge = (eUsd-la)/eUsd*10000.0 - rtMakerFeeBp
+			curDisloc = curNetEdge + emaBps
 			ltMoved = la > sl.RefLtPx*(1.0+0.5/10000.0)
-			ltHedgeDepth = la * laSz
+			ltHedgeDepth = laBand
 		}
 		curUsdtMid, curBtcMid, _, _ := leadMidAndJumps(actSp.Sym, now)
 		leadAdverse := hasAdverseLeadMove(sl.BnSide, sl.RefUsdtMid, sl.RefBtcMid, curUsdtMid, curBtcMid)
-		needCancel := leadAdverse || ltMoved || ltHedgeDepth < 60.0 || curNetEdge < 3.50 || now.Sub(sl.OpenedAt) >= 4*time.Second
+		needCancel := leadAdverse || ltMoved || ltHedgeDepth < 60.0 || curDisloc < 5.00 || now.Sub(sl.OpenedAt) >= 8*time.Second
 		status, exQ, avgP, polled, ok := queryBnOrder(actSp.BnSym, sl.EntryOid, sl.LastPoll, needCancel)
 		if polled {
 			dnMu.Lock()
@@ -2396,7 +2408,7 @@ func processActiveSlot(now time.Time) {
 			minSell := math.Ceil((bb*(1.0+0.00015))/actSp.Tick-1e-9) * actSp.Tick
 			makerExitBnPx = roundTo(math.Max(ba, minSell), actSp.PxDec)
 			takerExitLtPx = la
-			ltExitDepthUsd = la * laSz
+			ltExitDepthUsd = laBand
 			combNetMakerBps = (((makerExitBnPx-sl.EntryBnPx)*fx)+(eLt-takerExitLtPx))/eUsd*10000.0 - rtMakerFeeBp
 			combTakerNetBps = (((bb-sl.EntryBnPx)*fx)+(eLt-la))/eUsd*10000.0 - rtMixedFeeBp
 		} else {
@@ -2404,7 +2416,7 @@ func processActiveSlot(now time.Time) {
 			maxBuy := math.Floor((ba*(1.0-0.00015))/actSp.Tick+1e-9) * actSp.Tick
 			makerExitBnPx = roundTo(math.Min(bb, maxBuy), actSp.PxDec)
 			takerExitLtPx = lb
-			ltExitDepthUsd = lb * lbSz
+			ltExitDepthUsd = lbBand
 			combNetMakerBps = (((sl.EntryBnPx-makerExitBnPx)*fx)+(takerExitLtPx-eLt))/eUsd*10000.0 - rtMakerFeeBp
 			combTakerNetBps = (((sl.EntryBnPx-ba)*fx)+(lb-eLt))/eUsd*10000.0 - rtMixedFeeBp
 		}
@@ -2500,11 +2512,11 @@ func processActiveSlot(now time.Time) {
 		} else {
 			curComb := (((exP-sl.EntryBnPx)*fx)+(eLt-la))/eUsd*10000.0 - rtMakerFeeBp
 			closeBnSide := "SELL"
-			ltExitDepthUsd := la * laSz
+			ltExitDepthUsd := laBand
 			if sl.BnSide == "SELL" {
 				curComb = (((sl.EntryBnPx-exP)*fx)+(lb-eLt))/eUsd*10000.0 - rtMakerFeeBp
 				closeBnSide = "BUY"
-				ltExitDepthUsd = lb * lbSz
+				ltExitDepthUsd = lbBand
 			}
 			holdS := now.Sub(sl.OpenedAt).Seconds()
 			minKeepBps := 2.00
@@ -2582,7 +2594,7 @@ func scanAndOpenSlot(now time.Time, sharedAvail float64, specsSnap []DnSpec, las
 	}
 	var bestSp DnSpec
 	bestBnSide, bestLtSide := "", ""
-	bestRawEdge, bestDisloc, bestBnPx, bestLtPx, bestFx, bestUsdtMid, bestBtcMid := -999.0, -999.0, 0.0, 0.0, 1.0, 0.0, 0.0
+	bestRawEdge, bestDisloc, bestBnPx, bestLtPx, bestFx, bestUsdtMid, bestBtcMid, bestEmaBps := -999.0, -999.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0
 
 	for _, sp := range specsSnap {
 		if sp.Quote != "USDC" {
@@ -2604,7 +2616,7 @@ func scanAndOpenSlot(now time.Time, sharedAvail float64, specsSnap []DnSpec, las
 			emaBps, wTicks, bTS, jumpBps = db.EmaBps, db.WarmTicks, db.TS, db.LastJumpBps
 		}
 		dnMu.Unlock()
-		if !okFx || blocked || bb <= 0 || ba <= bb || wTicks < 15 || now.Sub(bTS) > 3*time.Second || math.Abs(jumpBps) > 1.8 {
+		if !okFx || blocked || bb <= 0 || ba <= bb || wTicks < 15 || now.Sub(bTS) > 15*time.Second || math.Abs(emaBps) > 25.0 || math.Abs(jumpBps) > 1.8 {
 			continue
 		}
 		uMid, bMid, uJump, bJump := leadMidAndJumps(sp.Sym, now)
@@ -2617,9 +2629,9 @@ func scanAndOpenSlot(now time.Time, sharedAvail float64, specsSnap []DnSpec, las
 			continue
 		}
 		st.mu.Lock()
-		lb, la, lbSz, laSz, ltPos, lTS := st.ltBid, st.ltAsk, st.ltBidSz, st.ltAskSz, st.pos, st.lastBookTS
+		lb, la, lbBand, laBand, ltPos, lTS := st.ltBid, st.ltAsk, st.ltBidBandUsd, st.ltAskBandUsd, st.pos, st.lastBookTS
 		st.mu.Unlock()
-		if math.Abs(ltPos) >= m.MinB || lb <= 0 || la <= lb || now.Sub(lTS) > 4*time.Second {
+		if math.Abs(ltPos) >= m.MinB || lb <= 0 || la <= lb || now.Sub(lTS) > 15*time.Second {
 			continue
 		}
 		ltSp := (la - lb) / lb * 10000.0
@@ -2628,7 +2640,7 @@ func scanAndOpenSlot(now time.Time, sharedAvail float64, specsSnap []DnSpec, las
 			continue
 		}
 
-		// Side A: BUY Maker Binance + SELL IOC Lighter (recessed >=1.5bp from BnAsk, depth >= $100)
+		// Side A: BUY Maker Binance + SELL IOC Lighter (recessed >=1.5bp from BnAsk, 1.5bp LT band depth >= $100)
 		maxBuy := math.Floor((ba*(1.0-0.00015))/sp.Tick+1e-9) * sp.Tick
 		bnBuyPx := roundTo(math.Min(bb, maxBuy), sp.PxDec)
 		bnBuyUsd := bnBuyPx * fx
@@ -2636,12 +2648,12 @@ func scanAndOpenSlot(now time.Time, sharedAvail float64, specsSnap []DnSpec, las
 		rawEdgeA := (lb - bnBuyUsd) / bnBuyUsd * 10000.0
 		dislocA := rawEdgeA - emaBps
 		bboDislocA := ((lb - bboBuyUsd) / bboBuyUsd * 10000.0) - emaBps
-		if lb*lbSz >= 100.0 && bb*bq*fx >= 100.0 && bboDislocA >= 5.50 && rawEdgeA >= 4.00 && dislocA > bestDisloc {
-			bestDisloc, bestRawEdge, bestSp, bestBnSide, bestLtSide, bestBnPx, bestLtPx, bestFx, bestUsdtMid, bestBtcMid =
-				dislocA, rawEdgeA, sp, "BUY", "ASK", bnBuyPx, lb, fx, uMid, bMid
+		if lbBand >= 100.0 && bb*bq*fx >= 35.0 && bboDislocA >= 5.50 && dislocA >= 6.50 && dislocA > bestDisloc {
+			bestDisloc, bestRawEdge, bestSp, bestBnSide, bestLtSide, bestBnPx, bestLtPx, bestFx, bestUsdtMid, bestBtcMid, bestEmaBps =
+				dislocA, rawEdgeA, sp, "BUY", "ASK", bnBuyPx, lb, fx, uMid, bMid, emaBps
 		}
 
-		// Side B: SELL Maker Binance + BUY IOC Lighter (recessed >=1.5bp from BnBid, depth >= $100)
+		// Side B: SELL Maker Binance + BUY IOC Lighter (recessed >=1.5bp from BnBid, 1.5bp LT band depth >= $100)
 		minSell := math.Ceil((bb*(1.0+0.00015))/sp.Tick-1e-9) * sp.Tick
 		bnSellPx := roundTo(math.Max(ba, minSell), sp.PxDec)
 		bnSellUsd := bnSellPx * fx
@@ -2649,9 +2661,9 @@ func scanAndOpenSlot(now time.Time, sharedAvail float64, specsSnap []DnSpec, las
 		rawEdgeB := (bnSellUsd - la) / bnSellUsd * 10000.0
 		dislocB := rawEdgeB + emaBps
 		bboDislocB := ((bboSellUsd - la) / bboSellUsd * 10000.0) + emaBps
-		if la*laSz >= 100.0 && ba*aq*fx >= 100.0 && bboDislocB >= 5.50 && rawEdgeB >= 4.00 && dislocB > bestDisloc {
-			bestDisloc, bestRawEdge, bestSp, bestBnSide, bestLtSide, bestBnPx, bestLtPx, bestFx, bestUsdtMid, bestBtcMid =
-				dislocB, rawEdgeB, sp, "SELL", "BID", bnSellPx, la, fx, uMid, bMid
+		if laBand >= 100.0 && ba*aq*fx >= 35.0 && bboDislocB >= 5.50 && dislocB >= 6.50 && dislocB > bestDisloc {
+			bestDisloc, bestRawEdge, bestSp, bestBnSide, bestLtSide, bestBnPx, bestLtPx, bestFx, bestUsdtMid, bestBtcMid, bestEmaBps =
+				dislocB, rawEdgeB, sp, "SELL", "BID", bnSellPx, la, fx, uMid, bMid, emaBps
 		}
 	}
 
@@ -2660,7 +2672,7 @@ func scanAndOpenSlot(now time.Time, sharedAvail float64, specsSnap []DnSpec, las
 		fmt.Printf("[DN_SCAN] best=%s bnMaker=%s->ltZeroFee=%s netAfterFee=%+.2fbp (disloc=%+.2fbp fee=0.0bp clip=$%.0f) bnPx=%.5f ltPx=%.5f\n",
 			bestSp.BnSym, bestBnSide, bestLtSide, bestRawEdge, bestDisloc, ClipUSD, bestBnPx, bestLtPx)
 	}
-	if bestSp.BnSym == "" || bestRawEdge < 4.00 || bestDisloc < 6.50 {
+	if bestSp.BnSym == "" || bestDisloc < 6.50 {
 		return
 	}
 	m := markets[bestSp.Sym]
@@ -2696,7 +2708,7 @@ func scanAndOpenSlot(now time.Time, sharedAvail float64, specsSnap []DnSpec, las
 				State: "BN_ENTRY_OPEN", Spec: bestSp, BnSide: bestBnSide, LtSide: bestLtSide,
 				EntryOid: or.OrderID, Qty: qty, EntryBnPx: bestBnPx, EntryFx: bestFx,
 				EntryFeeBp: bestSp.MakerFeeBp, TradeID: tid, OpenedAt: now, RefLtPx: bestLtPx,
-				RefUsdtMid: bestUsdtMid, RefBtcMid: bestBtcMid,
+				RefUsdtMid: bestUsdtMid, RefBtcMid: bestBtcMid, EntryEmaBps: bestEmaBps,
 			}
 			dnMu.Unlock()
 			fmt.Printf("[DN_ZERO_FEE_MAKER id=%d sym=%s bn=%s qty=%.4f @ %.5f raw=%+.2fbp disloc=%+.2fbp fee=0.0bp]\n",
