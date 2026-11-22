@@ -1,17 +1,47 @@
-name: Deploy Live Tokyo Engine v4.3
+name: KISS Tokyo Build & Deploy
 
 on:
   push:
-    branches: [main, probe-aws-tokyo]
+    branches: [main]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
-  deploy-tokyo-engine:
+  build-and-verify:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
+      - name: Check Python Syntax
+        run: python3 -m py_compile tokyo_engine/telemetry_sync.py tokyo_engine/instant_pause.py
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      - name: Build lighter_go_bot (linux/amd64)
+        working-directory: tokyo_engine/lighter_go
+        run: |
+          go mod tidy
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o lighter_go_bot .
+
+      - name: Upload Binary to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: lighter-go-latest
+          files: tokyo_engine/lighter_go/lighter_go_bot
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  deploy-tokyo:
+    needs: build-and-verify
+    runs-on: ubuntu-latest
+    steps:
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -19,14 +49,13 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ap-northeast-1
 
-      - name: Deploy Clean telemetry_sync.py & lighter_go_bot to Tokyo EC2 (i-046fed60c07b7a799)
+      - name: Deploy Clean Binary & Telemetry via SSM
         run: |
           INST_ID="i-046fed60c07b7a799"
           SSM_JSON=$(jq -nc --arg sha "$GITHUB_SHA" '{commands:[
             "set -e",
             "sudo mkdir -p /opt/crypto-arb-bot/_legacy_archive_do_not_access",
-            "for f in /opt/crypto-arb-bot/lighter_tokyo_bot.py /opt/crypto-arb-bot/audit_tiers.py /opt/crypto-arb-bot/telemetry_sync_backup*.py /opt/crypto-arb-bot/telemetry_sync.bak.* /opt/crypto-arb-bot/strategy_journal.log; do sudo mv \"$f\" /opt/crypto-arb-bot/_legacy_archive_do_not_access/ 2>/dev/null || true; done",
-            "sudo cp /opt/crypto-arb-bot/telemetry_sync.py /opt/crypto-arb-bot/_legacy_archive_do_not_access/telemetry_sync.bak.$(date +%s) 2>/dev/null || true",
+            "for p in /opt/crypto-arb-bot/*; do b=$(basename \"$p\"); case \"$b\" in telemetry_sync.py|lighter_go_bot|dn_trades_history.json|_legacy_archive_do_not_access) ;; *) sudo mv \"$p\" /opt/crypto-arb-bot/_legacy_archive_do_not_access/ 2>/dev/null || true ;; esac; done",
             ("curl -fsSL https://raw.githubusercontent.com/Abishek17703/crypto-arb-bot/" + $sha + "/tokyo_engine/telemetry_sync.py -o /tmp/telemetry_sync_new.py"),
             "sudo python3 -m py_compile /tmp/telemetry_sync_new.py",
             "sudo systemctl stop tokyo-telemetry.service || true",
@@ -50,3 +79,43 @@ jobs:
           done
           aws ssm get-command-invocation --command-id "$CMD_ID" --instance-id "$INST_ID" --query "[StandardOutputContent,StandardErrorContent]" --output text || true
           [ "$STATUS" = "Success" ]
+
+  build-apk:
+    needs: build-and-verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Check mobile_app Changes
+        id: chg
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] || git diff --name-only HEAD~1 HEAD | grep -q '^mobile_app/'; then
+            echo "run_apk=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run_apk=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/setup-java@v4
+        if: steps.chg.outputs.run_apk == 'true'
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+        if: steps.chg.outputs.run_apk == 'true'
+        with:
+          gradle-version: '8.9'
+
+      - name: Build Debug APK
+        if: steps.chg.outputs.run_apk == 'true'
+        working-directory: mobile_app
+        run: gradle assembleDebug --no-daemon --max-workers=2
+
+      - name: Upload APK Artifact
+        if: steps.chg.outputs.run_apk == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: lighter-live-apk
+          path: mobile_app/app/build/outputs/apk/debug/app-debug.apk

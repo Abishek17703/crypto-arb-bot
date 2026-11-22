@@ -1,37 +1,20 @@
-# ⚡ `crypto-arb-bot` — Ultra-Low Latency Rust Crypto Arbitrage Engine (`110 ns` SeqLock)
+# Crypto Arb Bot — GO-TOKYO v99.0 (KISS Core)
 
-An institutional-grade, zero-allocation Rust cryptocurrency arbitrage engine built for **365-Day $0.00 Cloud Operation** on **AWS Tokyo (`ap-northeast-1`)** or **Oracle Cloud Tokyo (`ap-tokyo-1`)**, complete with **$10.00 Micro-Capital Support**, **Binance Zero-Fee `FDUSD` Triangular Loops**, and a **$9.60 Hard-Stop Safety Circuit Breaker**.
+Single-workflow **0%-fee delta-neutral engine** trading Binance Futures (`USDC-M`, 0.00% Maker) vs Lighter Perps (0.00% fee) from AWS Tokyo (`ap-northeast-1`).
 
----
+## Core Architecture
+- [main.go](tokyo_engine/lighter_go/main.go): Single-slot `$40` KISS Go engine featuring:
+  - Event-driven `<1.5ms` Binance Futures User Data WS (`listenKey` `ORDER_TRADE_UPDATE`) + Lighter WS.
+  - Continuous 90s EWMA basis dislocation filter (`rawEdge >= 2.2bp` & `disloc >= 3.2bp`), `$250` BBO depth floor, and `500ms` jump anti-pickoff guard.
+  - Verified 2-stage Lighter IOC hedge guard with instant Binance `UNHEDGED_ABORT` unwind if unhedged.
+  - Patient 0%-fee GTX Maker convergence exit + `:58` hourly funding check (exits pre-`:00` only when net funding `< -1.5bp`).
+- [telemetry_sync.py](tokyo_engine/telemetry_sync.py): Read-only AWS S3 telemetry publisher, exchange-audited trade reconstructor (`binanceAudit` + `dnTradesHistory`), and pause watchdog.
+- [lighter_live_dashboard.html](tokyo_engine/lighter_live_dashboard.html): Live S3 + Lighter dashboard (mirrored in [mobile_app](mobile_app/app/src/main/assets/lighter_live_dashboard.html)).
+- [deploy.yml](.github/workflows/deploy.yml): Single sequential CI pipeline (`build-and-verify` -> `deploy-tokyo` via SSM -> conditional `build-apk`).
 
-## 🚀 Key Benchmarks & Architecture
-
-* **Lock-Free Cache-Aligned `SeqLock` OrderBook (`src/orderbook.rs`)**:
-  * `#[repr(align(64))]` atomic slots eliminate `Mutex`/`RwLock` syscalls and false sharing.
-  * **Measured Hot-Path Speed**: **`110 ns p50` / `114 ns p99` (`7.13M scans/sec`)** with live detections down to **`62 ns`**.
-* **Zero-Allocation `HMAC-SHA256` Binance WS v3 Order Signer (`src/live_order.rs`)**:
-  * Signs all 3 legs of a Binance `FDUSD` triangular loop (`USDT -> FDUSD -> Coin -> USDT`) in **`~53 microseconds`**.
-* **Hardened `$10.00` Safety Circuit Breaker**:
-  * Automatically halts execution if account equity ever dips below **`$9.60 USDT`** (`-4%` max drawdown = **40 cents max risk**) or hits **3 consecutive legged-out unwinds**.
-* **365-Day `$0.00` Cloud Cost Protection (`deploy_tokyo_zero_cost.sh` & `aws-tokyo-zero-cost-stack.yaml`)**:
-  * Enforces Free-Tier `t3.micro` shape, locks `CPUCredits: standard` (`$0.00` burst overage), caps storage at `20 GB gp3` (`<= 30 GB` Free Tier), and registers a **`$0.01` Monthly AWS Zero-Spend Budget Alert**.
-
----
-
-## 🛠️ Option 1: Automated GitHub Actions Deployment to AWS Tokyo (`$0.00` Verified)
-
-1. In this GitHub repository, go to **Settings $\rightarrow$ Secrets and variables $\rightarrow$ Actions** and add:
-   * `AWS_ACCESS_KEY_ID` & `AWS_SECRET_ACCESS_KEY`
-   * *(Optional)* `BINANCE_API_KEY` & `BINANCE_API_SECRET` (Spot-Only permissions; leave blank to run in Live-Signed Shadow Mode first)
-2. Go to the **Actions** tab $\rightarrow$ **Deploy Zero-Cost Tokyo Arbitrage Bot to AWS** $\rightarrow$ click **Run workflow**.
-3. GitHub Actions automatically verifies that no extra EC2 instances are running in Tokyo, deploys the CloudFormation stack (`t3.micro` + `CPUCredits=standard` + `$0.01` Budget Guardrail), compiles the native Rust binary (`-C target-cpu=native`), and starts the `crypto-arb-bot` `systemd` service!
-
----
-
-## 🖥️ Option 2: One-Command Setup on Any Tokyo VM (AWS or Oracle Cloud Always-Free)
-
+## Controls
 ```bash
-git clone https://github.com/Abishek17703/crypto-arb-bot.git
-cd crypto-arb-bot
-./deploy_tokyo_zero_cost.sh
+python3 tokyo_engine/instant_pause.py status
+python3 tokyo_engine/instant_pause.py pause
+python3 tokyo_engine/instant_pause.py resume
 ```
