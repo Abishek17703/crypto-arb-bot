@@ -709,7 +709,7 @@ def main():
                 status_msg = (
                     f"PAUSED BY USER — 100% FLAT (Binance Wallet ${cached_wallet:.4f})"
                     if paused
-                    else f"GO-TOKYO v99.0 KISS LIVE | Binance Wallet ${cached_wallet:.4f} | Avail ${cached_futures.get('availableBalance', 0):.2f}"
+                    else f"GO-TOKYO v100.0 KISS LIVE | Binance Wallet ${cached_wallet:.4f} | Avail ${cached_futures.get('availableBalance', 0):.2f}"
                 )
                 lt_acct = read_json_safe("/tmp/lighter_acct.json")
                 lt_trades_obj = read_json_safe("/tmp/lighter_trades.json", {})
