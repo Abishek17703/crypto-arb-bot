@@ -427,7 +427,7 @@
     function parseTelemetryLog(data) {
       const logTxt = String(data.lighterLog || "").replace(/\0/g, "");
       const lines = logTxt.split("\n");
-      let ver = "v96.1";
+      let ver = "v97.0";
       let scanTxt = "";
       let readyTxt = "";
       let audit = null;
@@ -440,8 +440,8 @@
         if (ln.includes("[DN_READY]")) readyTxt = ln.replace(/^.*\[DN_READY\]\s*/, "").trim();
         if (ln.includes("[DN_SCAN]")) {
           const sm = ln.match(/best=([A-Z0-9]+).*?(?:netAfterFee|netEdge)=([+-]?[0-9.]+bp)(?:.*?fee=([0-9.]+bp))?/);
-          const feeLbl = sm && sm[3] === "4.0bp" ? "4bp fee cleared" : "$0.00 fee";
-          scanTxt = sm ? `Best spread right now: ${sm[1]} (${sm[2]} AFTER fees • triggers at +2.50bp, ${feeLbl})` : ln.replace(/^.*\[DN_SCAN\]\s*/, "").trim();
+          const feeLbl = sm && sm[3] === "4.0bp" ? "4bp fee cleared" : "$0.00 fee • $55x3";
+          scanTxt = sm ? `Best 0%-fee spread: ${sm[1]} (${sm[2]} AFTER fees • triggers at +2.50bp, ${feeLbl})` : ln.replace(/^.*\[DN_SCAN\]\s*/, "").trim();
         }
         const am = ln.match(/\[BN_AUDIT real=([+-]?[0-9.]+) fee=([+-]?[0-9.]+) fund=([+-]?[0-9.]+) upnl=([+-]?[0-9.]+) net=([+-]?[0-9.]+) trades=(\d+)(?:\s+wallet=([0-9.]+))?\]/);
         if (am) {
@@ -642,14 +642,14 @@
       badgeEl.style.color = paused ? "#ef4444" : "#10b981";
       document.getElementById("acctSub").textContent = `Binance + Lighter • Updated ${fmtIST(nowTs)} IST`;
       document.getElementById("dnScanLine").textContent =
-        parsed.scanTxt || parsed.readyTxt || "Scanning 164 pairs (33 0% USDC-M + 131 fee-cleared USDT-M) + :54–:00 Funding Guard...";
+        parsed.scanTxt || parsed.readyTxt || "3 Parallel Zero-Fee USDC-M Slots ($55 x 3, 1.8x Safe Lev) + :00 Hourly Funding Arbs...";
 
       // Unified Dual-Venue Trade Table: Actual Combined Net P&L from BOTH Platforms + (Binance • Lighter) Breakdown Underneath
       const bodyEl = document.getElementById("dnArbBody");
       document.getElementById("dnTradeMeta").textContent =
         `${parsed.rows.length} trade${parsed.rows.length === 1 ? "" : "s"} • Actual Combined P&L (Both Platforms)`;
       if (!parsed.rows.length) {
-        bodyEl.innerHTML = `<tr><td colspan="7" style="color:var(--muted);">Armed &amp; scanning 164 pairs (33 0% USDC-M + 131 fee-cleared USDT-M, +2.50bp net trigger)...</td></tr>`;
+        bodyEl.innerHTML = `<tr><td colspan="7" style="color:var(--muted);">Armed across 3 parallel $55 Zero-Fee USDC-M slots (+2.50bp net trigger, $0.00 fee)...</td></tr>`;
       } else {
         let html = "";
         for (const r of parsed.rows) {
