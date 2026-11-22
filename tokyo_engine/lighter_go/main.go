@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -29,7 +30,7 @@ import (
 )
 
 const (
-	BotVersion = "v104.0"
+	BotVersion = "v105.0"
 	BaseURL    = "https://mainnet.zklighter.elliot.ai"
 	WsURL      = "wss://mainnet.zklighter.elliot.ai/stream"
 	AcctIdx    = int64(770015)
@@ -866,6 +867,14 @@ func runLtWS() {
 				subbedMids[m.ID] = true
 			}
 		}
+		asterMu.Lock()
+		for _, asp := range asterSpecs {
+			if m, ok := markets[asp.Sym]; ok && !subbedMids[m.ID] {
+				_ = conn.WriteJSON(map[string]any{"type": "subscribe", "channel": fmt.Sprintf("order_book/%d", m.ID)})
+				subbedMids[m.ID] = true
+			}
+		}
+		asterMu.Unlock()
 		wsMu.Unlock()
 
 		for _, st := range mktStates {
@@ -1018,7 +1027,10 @@ func runLtWS() {
 						dnMu.Lock()
 						isUsdc := dnUsdcBySym[sym]
 						dnMu.Unlock()
-						if isUsdc {
+						asterMu.Lock()
+						_, isAster := asterSpecs[sym+"USDT"]
+						asterMu.Unlock()
+						if isUsdc || isAster {
 							wakeEngine()
 						}
 					}
@@ -1728,7 +1740,7 @@ func flattenAndExitPause(reason string) {
 	}
 	useWsSend = false
 	var wg sync.WaitGroup
-	wg.Add(2)
+	wg.Add(3)
 	go func() {
 		defer wg.Done()
 		cancelAll()
@@ -1738,7 +1750,14 @@ func flattenAndExitPause(reason string) {
 		defer wg.Done()
 		flattenBnDnAndSweep()
 	}()
+	go func() {
+		defer wg.Done()
+		flattenAsterAllSync()
+	}()
 	wg.Wait()
+	if liveInitDone.Load() {
+		writeLiveArenaTelemetry(time.Now())
+	}
 	emitBnAuditLine()
 	time.Sleep(150 * time.Millisecond)
 	os.Exit(0)
@@ -2843,7 +2862,19 @@ func runZeroFeeKISS() {
 }
 
 func main() {
+	debug.SetMemoryLimit(200 << 20)
+	debug.SetGCPercent(40)
+
+	if err := initAsterEIP712(); err != nil {
+		fmt.Printf("[ASTER_INIT_ERR] %v\n", err)
+	}
+	initLiveMicroArena()
+	_, _, _ = fetchAsterAccountMargin()
+	writeLiveArenaTelemetry(time.Now())
+
 	if _, err := os.Stat(PauseFlagPath); err == nil {
+		remotePaused.Store(true)
+		writeLiveArenaTelemetry(time.Now())
 		fmt.Println("[PAUSED] /tmp/lighter_pause.flag active; exiting.")
 		os.Exit(0)
 	}
@@ -2866,10 +2897,12 @@ func main() {
 
 	discoverCommonAssets()
 	autoDiscoverAllCommonDnPairs()
+	discoverAsterMarkets()
 
 	go runTxWorker()
 	go runTxWS()
 	go runBnAllBookTickerWS()
+	go runAsterBookTickerWS()
 	go runLtWS()
 	go runPauseWatchdog()
 	time.Sleep(1500 * time.Millisecond)
@@ -2877,6 +2910,7 @@ func main() {
 	cancelAll()
 	flattenAllLtPositionsSync("boot_flat_")
 	flattenBnDnAndSweep()
+	flattenAsterAllSync()
 	emitBnAuditLine()
 
 	if rawPC, ePC := readPauseControlJSON(); ePC == nil && len(rawPC) > 0 {
@@ -2884,6 +2918,8 @@ func main() {
 			Paused bool `json:"paused"`
 		}
 		if json.Unmarshal(rawPC, &pcCheck) == nil && pcCheck.Paused {
+			remotePaused.Store(true)
+			writeLiveArenaTelemetry(time.Now())
 			_ = os.WriteFile(PauseFlagPath, []byte("1"), 0644)
 			fmt.Println("[PAUSED] Remote pause-control.json paused=true; staying halted.")
 			os.Exit(0)
@@ -2891,8 +2927,9 @@ func main() {
 	}
 
 	go runBnUserWS()
-	go runZeroFeeKISS()
-	fmt.Printf("GO-TOKYO %s LIVE | KISS 0%%-FEE USDC ARB | Clip=$%.0f | Stop=$%.2f\n", BotVersion, ClipUSD, StopEqUSD)
+	go runAsterUserWS()
+	go runLiveMicroArenaLoop()
+	fmt.Printf("GO-TOKYO %s LIVE | 4-STRATEGY MICRO-CAPITAL ARENA | Lighter+Binance+AsterDEX | Stop=$%.2f\n", BotVersion, StopEqUSD)
 	go syncAccountLoop()
 	select {}
 }

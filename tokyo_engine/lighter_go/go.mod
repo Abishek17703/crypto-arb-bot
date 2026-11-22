@@ -4,5 +4,6 @@ go 1.23
 
 require (
 	github.com/elliottech/lighter-go v1.0.13
+	github.com/ethereum/go-ethereum v1.14.8
 	github.com/gorilla/websocket v1.5.3
 )

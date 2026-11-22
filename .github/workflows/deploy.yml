@@ -69,7 +69,7 @@ jobs:
           SSM_JSON=$(jq -nc --arg sha "$GITHUB_SHA" '{commands:[
             "set -e",
             "sudo mkdir -p /opt/crypto-arb-bot/_legacy_archive_do_not_access",
-            "for p in /opt/crypto-arb-bot/*; do b=$(basename \"$p\"); case \"$b\" in telemetry_sync.py|lighter_go_bot|arena_go|dn_trades_history.json|forward_arena_state.json|_legacy_archive_do_not_access) ;; *) sudo mv \"$p\" /opt/crypto-arb-bot/_legacy_archive_do_not_access/ 2>/dev/null || true ;; esac; done",
+            "for p in /opt/crypto-arb-bot/*; do b=$(basename \"$p\"); case \"$b\" in telemetry_sync.py|lighter_go_bot|arena_go|dn_trades_history.json|forward_arena_state.json|live_arena_state.json|_legacy_archive_do_not_access) ;; *) sudo mv \"$p\" /opt/crypto-arb-bot/_legacy_archive_do_not_access/ 2>/dev/null || true ;; esac; done",
             ("curl -fsSL https://raw.githubusercontent.com/Abishek17703/crypto-arb-bot/" + $sha + "/tokyo_engine/telemetry_sync.py -o /tmp/telemetry_sync_new.py"),
             "sudo python3 -m py_compile /tmp/telemetry_sync_new.py",
             "sudo systemctl stop tokyo-telemetry.service || true",
@@ -80,6 +80,7 @@ jobs:
             "sudo curl -fsSL https://github.com/Abishek17703/crypto-arb-bot/releases/download/lighter-go-latest/lighter_go_bot -o /opt/crypto-arb-bot/lighter_go_bot.tmp && sudo mv /opt/crypto-arb-bot/lighter_go_bot.tmp /opt/crypto-arb-bot/lighter_go_bot && sudo chmod +x /opt/crypto-arb-bot/lighter_go_bot",
             "sudo curl -fsSL https://github.com/Abishek17703/crypto-arb-bot/releases/download/lighter-go-latest/arena_go -o /opt/crypto-arb-bot/arena_go.tmp && sudo mv /opt/crypto-arb-bot/arena_go.tmp /opt/crypto-arb-bot/arena_go && sudo chmod +x /opt/crypto-arb-bot/arena_go",
             "sudo rm -f /tmp/lighter_trades.json /tmp/forward_arena.json",
+            "sudo touch /tmp/lighter_pause.flag && sudo /opt/crypto-arb-bot/lighter_go_bot || true",
             "sudo systemctl start tokyo-telemetry.service",
             "sleep 6 && sudo systemctl is-active tokyo-telemetry.service && ps aux | grep '[t]elemetry_sync'"
           ]}')

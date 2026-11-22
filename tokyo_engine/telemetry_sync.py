@@ -27,6 +27,8 @@ LIGHTER_GO_BIN = "/opt/crypto-arb-bot/lighter_go_bot"
 LIGHTER_GO_URL = "https://github.com/Abishek17703/crypto-arb-bot/releases/download/lighter-go-latest/lighter_go_bot"
 ARENA_GO_BIN = "/opt/crypto-arb-bot/arena_go"
 ARENA_JSON_PATH = "/tmp/forward_arena.json"
+LIVE_ARENA_JSON_PATH = "/tmp/live_arena.json"
+ASTER_ACCT_JSON_PATH = "/tmp/aster_acct.json"
 ARENA_S3_KEY = "forward-arena.json"
 ARENA_LOG_PATH = "/tmp/forward_arena.log"
 PAUSE_FLAG_PATH = "/tmp/lighter_pause.flag"
@@ -735,12 +737,14 @@ def main():
                 status_msg = (
                     f"PAUSED BY USER — 100% FLAT (Binance Wallet ${cached_wallet:.4f})"
                     if paused
-                    else f"GO-TOKYO v104.0 KISS LIVE | Binance Wallet ${cached_wallet:.4f} | Avail ${cached_futures.get('availableBalance', 0):.2f}"
+                    else f"GO-TOKYO v105.0 LIVE MICRO-ARENA | Binance Wallet ${cached_wallet:.4f} | Avail ${cached_futures.get('availableBalance', 0):.2f}"
                 )
                 lt_acct = read_json_safe("/tmp/lighter_acct.json")
                 lt_trades_obj = read_json_safe("/tmp/lighter_trades.json", {})
                 lt_trades = lt_trades_obj.get("trades", []) if isinstance(lt_trades_obj, dict) else []
                 arena_obj = read_json_safe(ARENA_JSON_PATH)
+                live_arena_obj = read_json_safe(LIVE_ARENA_JSON_PATH)
+                aster_acct_obj = read_json_safe(ASTER_ACCT_JSON_PATH)
 
                 payload = {
                     "ts": int(now * 1000),
@@ -753,9 +757,11 @@ def main():
                     "balances": cached_balances,
                     "lighterAccount": lt_acct,
                     "lighterTrades": lt_trades,
+                    "asterAccount": aster_acct_obj,
                     "dnTradesHistory": cached_dn_hist,
                     "lighterLog": read_log_tail(8000),
                     "forwardArena": arena_obj,
+                    "liveArena": live_arena_obj,
                     "pauseControlUrl": pause_url,
                     "pauseControlPost": pause_post,
                     "hftTest": {
