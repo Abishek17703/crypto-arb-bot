@@ -29,7 +29,7 @@ import (
 )
 
 const (
-	BotVersion = "v101.0"
+	BotVersion = "v102.0"
 	BaseURL    = "https://mainnet.zklighter.elliot.ai"
 	WsURL      = "wss://mainnet.zklighter.elliot.ai/stream"
 	AcctIdx    = int64(770015)
@@ -2257,12 +2257,12 @@ func processActiveSlot(now time.Time) {
 		dnMu.Unlock()
 		curNetEdge := (lb-eUsd)/eUsd*10000.0 - rtMakerFeeBp
 		curDisloc := curNetEdge - emaBps
-		ltMoved := lb < sl.RefLtPx*(1.0-0.5/10000.0)
+		ltMoved := lb < sl.RefLtPx*(1.0-2.5/10000.0)
 		ltHedgeDepth := lbBand
 		if sl.BnSide == "SELL" {
 			curNetEdge = (eUsd-la)/eUsd*10000.0 - rtMakerFeeBp
 			curDisloc = curNetEdge + emaBps
-			ltMoved = la > sl.RefLtPx*(1.0+0.5/10000.0)
+			ltMoved = la > sl.RefLtPx*(1.0+2.5/10000.0)
 			ltHedgeDepth = laBand
 		}
 		curUsdtMid, curBtcMid, _, _ := leadMidAndJumps(actSp.Sym, now)
@@ -2608,11 +2608,11 @@ func scanAndOpenSlot(now time.Time, sharedAvail float64, specsSnap []DnSpec, las
 		fx, okFx := dnQuoteFxToUsdtLocked(sp.Quote, now)
 		blocked := dnBlockedSym[sp.BnSym]
 		db := dnBooks[sp.BnSym]
-		var bb, ba, bq, aq, emaBps, jumpBps float64
+		var bb, ba, emaBps, jumpBps float64
 		var wTicks int
 		var bTS time.Time
 		if db != nil {
-			bb, ba, bq, aq = db.Bid, db.Ask, db.BidQ, db.AskQ
+			bb, ba = db.Bid, db.Ask
 			emaBps, wTicks, bTS, jumpBps = db.EmaBps, db.WarmTicks, db.TS, db.LastJumpBps
 		}
 		dnMu.Unlock()
@@ -2648,7 +2648,7 @@ func scanAndOpenSlot(now time.Time, sharedAvail float64, specsSnap []DnSpec, las
 		rawEdgeA := (lb - bnBuyUsd) / bnBuyUsd * 10000.0
 		dislocA := rawEdgeA - emaBps
 		bboDislocA := ((lb - bboBuyUsd) / bboBuyUsd * 10000.0) - emaBps
-		if lbBand >= 100.0 && bb*bq*fx >= 35.0 && bboDislocA >= 5.50 && dislocA >= 6.50 && dislocA > bestDisloc {
+		if lbBand >= 100.0 && bboDislocA >= 5.50 && dislocA >= 6.50 && dislocA > bestDisloc {
 			bestDisloc, bestRawEdge, bestSp, bestBnSide, bestLtSide, bestBnPx, bestLtPx, bestFx, bestUsdtMid, bestBtcMid, bestEmaBps =
 				dislocA, rawEdgeA, sp, "BUY", "ASK", bnBuyPx, lb, fx, uMid, bMid, emaBps
 		}
@@ -2661,7 +2661,7 @@ func scanAndOpenSlot(now time.Time, sharedAvail float64, specsSnap []DnSpec, las
 		rawEdgeB := (bnSellUsd - la) / bnSellUsd * 10000.0
 		dislocB := rawEdgeB + emaBps
 		bboDislocB := ((bboSellUsd - la) / bboSellUsd * 10000.0) + emaBps
-		if laBand >= 100.0 && ba*aq*fx >= 35.0 && bboDislocB >= 5.50 && dislocB >= 6.50 && dislocB > bestDisloc {
+		if laBand >= 100.0 && bboDislocB >= 5.50 && dislocB >= 6.50 && dislocB > bestDisloc {
 			bestDisloc, bestRawEdge, bestSp, bestBnSide, bestLtSide, bestBnPx, bestLtPx, bestFx, bestUsdtMid, bestBtcMid, bestEmaBps =
 				dislocB, rawEdgeB, sp, "SELL", "BID", bnSellPx, la, fx, uMid, bMid, emaBps
 		}
