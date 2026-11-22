@@ -296,15 +296,14 @@
       if (!isNaN(bnManualOverride) && bnManualOverride > 0) {
         return bnManualOverride;
       }
-      // 1) Prefer exact Binance Asset Overview wallet + Futures uPnL reported directly by GO-TOKYO BN_AUDIT:
+      // 1) Prefer exact Binance Asset Overview wallet reported directly by GO-TOKYO BN_AUDIT (/sapi/v1/asset/wallet/balance already includes Futures uPnL!):
       if (lastBnAudit && isFinite(lastBnAudit.wallet) && lastBnAudit.wallet > 100) {
-        return lastBnAudit.wallet + (isFinite(lastBnAudit.upnl) ? lastBnAudit.upnl : 0);
+        return lastBnAudit.wallet;
       }
       // 2) Else use true post-transfer rawWalletUsd / totalLiveUsd from telemetry_sync.py (~$397.73, reject stale pre-transfer $498.445):
       const liveWallet = lastTel && (typeof lastTel.rawWalletUsd === "number" ? lastTel.rawWalletUsd : lastTel.totalLiveUsd);
       if (typeof liveWallet === "number" && liveWallet > 100 && liveWallet < 460) {
-        const upnl = (lastBnAudit && isFinite(lastBnAudit.upnl)) ? lastBnAudit.upnl : 0;
-        return liveWallet + upnl;
+        return liveWallet;
       }
       // 3) Else sum reported Binance balances directly (free + locked - borrowed):
       if (lastTel && Array.isArray(lastTel.balances) && lastTel.balances.length) {

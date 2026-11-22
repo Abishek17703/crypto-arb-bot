@@ -1860,7 +1860,8 @@ func rebalanceFromTrades(tb []byte) {
 	}
 	sessionRealizedMicroUSD.Store(int64(sessionPairPnl * 1e6))
 	sessionNetWins.Store(netWins)
-	if !breakerTripped.Load() && (consecPairLosses >= 3 || sessionPairPnl <= -0.55) {
+	tn := getTune()
+	if !breakerTripped.Load() && (tn.AllowLag || tn.AllowMom) && (consecPairLosses >= 3 || sessionPairPnl <= -0.55) {
 		breakerTripped.Store(true)
 		_ = os.WriteFile("/tmp/lighter_pause.flag", []byte("1"), 0644)
 		reason := fmt.Sprintf("AUTO-BREAKER losses=%d pnl=$%.4f", consecPairLosses, sessionPairPnl)
@@ -3836,16 +3837,25 @@ func flattenAndExitPause(reason string) {
 	if !remotePaused.CompareAndSwap(false, true) {
 		return
 	}
-	fmt.Printf("[INSTANT-PAUSE] %s — canceling orders & flattening in <1s!\n", reason)
+	fmt.Printf("[INSTANT-PAUSE] %s — canceling orders & flattening BOTH venues in <500ms!\n", reason)
 	if strings.HasPrefix(reason, "AUTO-BREAKER") || strings.HasPrefix(reason, "GOAL") || strings.HasPrefix(reason, "STOP-LOSS") {
 		triggerS3Pause(reason)
 	}
-	// Flatten Lighter positions FIRST (<150ms) before 2.5s telemetry_sync pkill timer!
+	// Flatten Lighter AND Binance Futures concurrently before 1.2s telemetry_sync pkill timer!
 	useWsSend = false
-	cancelAll()
-	flattenAllLtPositionsSync("pause_flat_")
-	flattenBnDnAndSweep()
-	time.Sleep(200 * time.Millisecond)
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		cancelAll()
+		flattenAllLtPositionsSync("pause_flat_")
+	}()
+	go func() {
+		defer wg.Done()
+		flattenBnDnAndSweep()
+	}()
+	wg.Wait()
+	time.Sleep(100 * time.Millisecond)
 	os.Exit(0)
 }
 
@@ -6394,10 +6404,17 @@ func flattenBnDnAndSweep() {
 	dnFundingActive.Store(false)
 	dnBusyFlag.Store(false)
 
+	var oWg sync.WaitGroup
+	canceledMap := map[string]bool{}
 	for _, sym := range activeSyms {
-		p := url.Values{}
-		p.Set("symbol", sym)
-		_, _, _ = bnSignReq("DELETE", "fapi.binance.com", "/fapi/v1/allOpenOrders", p)
+		canceledMap[sym] = true
+		oWg.Add(1)
+		go func(s string) {
+			defer oWg.Done()
+			p := url.Values{}
+			p.Set("symbol", s)
+			_, _, _ = bnSignReq("DELETE", "fapi.binance.com", "/fapi/v1/allOpenOrders", p)
+		}(sym)
 	}
 	if ooSc, ooB, ooE := bnSignReq("GET", "fapi.binance.com", "/fapi/v1/openOrders", nil); ooE == nil && ooSc == 200 {
 		var oos []struct {
@@ -6405,45 +6422,70 @@ func flattenBnDnAndSweep() {
 		}
 		if json.Unmarshal(ooB, &oos) == nil {
 			for _, oo := range oos {
-				if oo.Symbol != "" {
-					cp := url.Values{}
-					cp.Set("symbol", oo.Symbol)
-					_, _, _ = bnSignReq("DELETE", "fapi.binance.com", "/fapi/v1/allOpenOrders", cp)
+				if oo.Symbol != "" && !canceledMap[oo.Symbol] {
+					canceledMap[oo.Symbol] = true
+					oWg.Add(1)
+					go func(s string) {
+						defer oWg.Done()
+						cp := url.Values{}
+						cp.Set("symbol", s)
+						_, _, _ = bnSignReq("DELETE", "fapi.binance.com", "/fapi/v1/allOpenOrders", cp)
+					}(oo.Symbol)
 				}
 			}
 		}
 	}
+	oWg.Wait()
+
 	if sc, b, err := bnSignReq("GET", "fapi.binance.com", "/fapi/v2/positionRisk", nil); err == nil && sc == 200 {
 		var prs []struct {
 			Symbol string `json:"symbol"`
 			Amt    string `json:"positionAmt"`
 		}
 		if json.Unmarshal(b, &prs) == nil {
+			var pWg sync.WaitGroup
 			for _, pr := range prs {
 				amt, _ := strconv.ParseFloat(pr.Amt, 64)
 				if math.Abs(amt) > 1e-6 {
-					p := url.Values{}
-					p.Set("symbol", pr.Symbol)
-					_, _, _ = bnSignReq("DELETE", "fapi.binance.com", "/fapi/v1/allOpenOrders", p)
-					cSide := "SELL"
-					if amt < 0 {
-						cSide = "BUY"
-					}
-					qDec := 3
-					dnMu.Lock()
-					if sp, ok := dnByBnSym[pr.Symbol]; ok {
-						qDec = sp.QDec
-					}
-					dnMu.Unlock()
-					cp := url.Values{}
-					cp.Set("symbol", pr.Symbol)
-					cp.Set("side", cSide)
-					cp.Set("type", "MARKET")
-					cp.Set("reduceOnly", "true")
-					cp.Set("quantity", strconv.FormatFloat(math.Abs(amt), 'f', qDec, 64))
-					_, _, _ = bnSignReq("POST", "fapi.binance.com", "/fapi/v1/order", cp)
+					pWg.Add(1)
+					go func(sym, amtStr string, aVal float64) {
+						defer pWg.Done()
+						if !canceledMap[sym] {
+							p := url.Values{}
+							p.Set("symbol", sym)
+							_, _, _ = bnSignReq("DELETE", "fapi.binance.com", "/fapi/v1/allOpenOrders", p)
+						}
+						cSide := "SELL"
+						if aVal < 0 {
+							cSide = "BUY"
+						}
+						rawQ := strings.TrimPrefix(strings.TrimSpace(amtStr), "-")
+						if strings.Contains(rawQ, ".") {
+							rawQ = strings.TrimRight(rawQ, "0")
+							rawQ = strings.TrimRight(rawQ, ".")
+						}
+						cp := url.Values{}
+						cp.Set("symbol", sym)
+						cp.Set("side", cSide)
+						cp.Set("type", "MARKET")
+						cp.Set("reduceOnly", "true")
+						cp.Set("quantity", rawQ)
+						fSc, fB, fE := bnSignReq("POST", "fapi.binance.com", "/fapi/v1/order", cp)
+						if fE != nil || fSc != 200 {
+							dnMu.Lock()
+							sp, ok := dnByBnSym[sym]
+							dnMu.Unlock()
+							if ok {
+								cp.Set("quantity", strconv.FormatFloat(math.Abs(aVal), 'f', sp.QDec, 64))
+								fSc, fB, fE = bnSignReq("POST", "fapi.binance.com", "/fapi/v1/order", cp)
+							}
+						}
+						fmt.Printf("[BN_FLAT_SYNC sym=%s side=%s qty=%s sc=%d err=%v body=%s]\n",
+							sym, cSide, cp.Get("quantity"), fSc, fE, string(fB))
+					}(pr.Symbol, pr.Amt, amt)
 				}
 			}
+			pWg.Wait()
 		}
 	}
 }
@@ -7458,6 +7500,20 @@ func main() {
 	time.Sleep(1500 * time.Millisecond)
 	cancelAll()
 	flattenAllLtPositionsSync("boot_flat_")
+	flattenBnDnAndSweep()
+	emitBnAuditLine()
+	if rawPC, ePC := readPauseControlJSON(); ePC == nil && len(rawPC) > 0 {
+		var pcCheck struct {
+			Paused     bool        `json:"paused"`
+			CarbonTune *CarbonTune `json:"carbonTune"`
+		}
+		if json.Unmarshal(rawPC, &pcCheck) == nil && (pcCheck.Paused || (pcCheck.CarbonTune != nil && pcCheck.CarbonTune.Note == "EMERGENCY_FLAT_PAUSE")) {
+			_ = os.WriteFile("/tmp/lighter_pause.flag", []byte("1"), 0644)
+			triggerS3Pause("EMERGENCY_FLAT_PAUSE")
+			fmt.Println("[PAUSED] Boot flatten complete across Binance + Lighter; staying halted.")
+			os.Exit(0)
+		}
+	}
 	if trResp, e := (&http.Client{Timeout: 5 * time.Second}).Get(fmt.Sprintf("%s/api/v1/trades?account_index=%d&limit=100&sort_by=timestamp", BaseURL, AcctIdx)); e == nil {
 		tb, _ := io.ReadAll(trResp.Body)
 		trResp.Body.Close()
@@ -7471,7 +7527,7 @@ func main() {
 	go runCarbonScanner()
 	go runCarbonCommandLoop()
 	go runZeroFeeDnLoop()
-	fmt.Printf("GO-TOKYO v97.0 LIVE | 3-SLOT PARALLEL 0%%-FEE USDC ARB ($55x3 SAFE 1.8x LEV) | Stop=$%.2f\n", StopEqUSD)
+	fmt.Printf("GO-TOKYO v97.1 LIVE | 3-SLOT PARALLEL 0%%-FEE USDC ARB + CONCURRENT FLATTEN | Stop=$%.2f\n", StopEqUSD)
 	go syncAccountLoop()
 	select {}
 }
