@@ -2232,6 +2232,9 @@ func runLtWS() {
 			continue
 		}
 		setConnNoDelay(conn)
+		dnMu.Lock()
+		dnSnap := append([]DnSpec(nil), dnSpecs...)
+		dnMu.Unlock()
 		wsMu.Lock()
 		ltConn = conn
 		subbedMids = map[int64]bool{}
@@ -2241,6 +2244,12 @@ func runLtWS() {
 				if m.Sym == "BTC" || m.Sym == "ETH" || m.Sym == "SOL" || m.Sym == "PAXG" || m.Sym == "XAU" || m.Sym == "SPY" || m.Sym == "US500" {
 					_ = conn.WriteJSON(map[string]any{"type": "subscribe", "channel": fmt.Sprintf("trade/%d", m.ID)})
 				}
+				subbedMids[m.ID] = true
+			}
+		}
+		for _, sp := range dnSnap {
+			if m, ok := markets[sp.Sym]; ok && !subbedMids[m.ID] {
+				_ = conn.WriteJSON(map[string]any{"type": "subscribe", "channel": fmt.Sprintf("order_book/%d", m.ID)})
 				subbedMids[m.ID] = true
 			}
 		}
@@ -3777,7 +3786,7 @@ func runL2TickRecorder() {
 			if gw != nil {
 				_, _ = gw.Write([]byte(line + "\n"))
 				n := l2TicksRecorded.Add(1)
-				if n%5000 == 0 || time.Since(lastLogR) >= 10*time.Minute {
+				if n%50000 == 0 || time.Since(lastLogR) >= 10*time.Minute {
 					lastLogR = time.Now()
 					fmt.Printf("[L2_REC] dir=%s day=%s ticks=%d\n", dir, curDay, n)
 				}
@@ -4538,7 +4547,6 @@ func runCarbonScanner() {
 					k+1, r.sym, r.side, r.score, r.slBps, r.tpBps, r.ltSp, r.diff, r.r5m, r.r15m, r.r1h, r.atr, r.cvd, r.volR, r.oi15m, r.topLS, r.globLS, r.fund, r.obi))
 			}
 			if len(parts) > 0 {
-				fmt.Printf("[CARBON_SCAN seq=%d com=%d] %s\n", seq, len(commonList), strings.Join(parts, " | "))
 				topR := results[0]
 				snapMu.Lock()
 				snapMomDesc = topR.sym + " " + topR.side
@@ -4546,8 +4554,11 @@ func runCarbonScanner() {
 				lDesc, lEdge := snapLagDesc, snapLagEdge
 				snapMu.Unlock()
 				tn := getTune()
-				fmt.Printf("[STRAT_SCAN seq=%d gate=%v] LAG_BEST=%s %+.2fbp/%.1f | MOM_BEST=%s %s sc=%d/%d\n",
-					seq, awaitingReview.Load(), lDesc, lEdge, tn.MinLagBps, topR.sym, topR.side, topR.score, tn.MinScore)
+				if tn.AllowLag || tn.AllowMom || seq%10 == 0 {
+					fmt.Printf("[CARBON_SCAN seq=%d com=%d] %s\n", seq, len(commonList), strings.Join(parts, " | "))
+					fmt.Printf("[STRAT_SCAN seq=%d gate=%v] LAG_BEST=%s %+.2fbp/%.1f | MOM_BEST=%s %s sc=%d/%d\n",
+						seq, awaitingReview.Load(), lDesc, lEdge, tn.MinLagBps, topR.sym, topR.side, topR.score, tn.MinScore)
+				}
 				if tn.AllowMom && canOpenNewStrat() {
 					firedMom := false
 					if topR.score >= tn.MinScore && topR.ltSp <= 1.8 && topR.diff <= 0.6 && topR.volR >= 0.85 && topR.depth >= 150.0 {
@@ -5066,13 +5077,15 @@ func recordStratClose(id int64, strat, legs string, usd, holdSec, pnlBps, pnlUSD
 	}
 	st.PnlUSD += pnlUSD
 	stratMu.Unlock()
-	// Auto-compound clean green wins continuously; only gate for manual review if a trade closes red!
-	if pnlUSD < 0 {
+	// Auto-compound clean green wins continuously; only gate ZERO_FEE_DN if session realized drops below -$0.35!
+	sessUsd := float64(sessionRealizedMicroUSD.Load()) / 1e6
+	needGate := pnlUSD < 0 && (strat != "ZERO_FEE_DN" || sessUsd < -0.35)
+	if needGate {
 		awaitingReview.Store(true)
 	}
 	fmt.Printf("[STRAT_CLOSE id=%d strat=%s legs=%q usd=$%.2f hold=%.1fs pnl=%+.2fbp($%+.4f) reason=%s]\n",
 		id, strat, legs, usd, holdSec, pnlBps, pnlUSD, reason)
-	if pnlUSD < 0 {
+	if needGate {
 		fmt.Printf("[STRAT_REVIEW_DUE id=%d strat=%s legs=%q pnl=%+.2fbp($%+.4f) reason=%s eq=$%.4f]\n",
 			id, strat, legs, pnlBps, pnlUSD, reason, float64(eqNow.Load())/1e6)
 	}
@@ -5091,6 +5104,7 @@ func recordStratClose(id int64, strat, legs string, usd, holdSec, pnlBps, pnlUSD
 }
 
 func printStratBoard() {
+	emitBnAuditLine()
 	upM := math.Max(0.05, time.Since(bootTS).Minutes())
 	mult, curEq := calcCapMult()
 	stratMu.Lock()
@@ -6141,10 +6155,8 @@ func autoDiscoverAllCommonDnPairs() {
 		}
 		discovered = append(discovered, sp)
 		byBn[s.Symbol] = sp
-		// Subscribe all 0%-fee USDC pairs + top liquid markets to Lighter L2 WS immediately:
-		if s.QuoteAsset == "USDC" || m.AllowEntry {
-			ensureLtSubscribed(m.ID)
-		}
+		// Subscribe ALL 164 auto-discovered common contracts (USDC-M + USDT-M) to Lighter L2 WS immediately:
+		ensureLtSubscribed(m.ID)
 	}
 	dnMu.Lock()
 	dnSpecs = discovered
@@ -6316,12 +6328,21 @@ func setupBnUsdcMargin() bool {
 	pmP := url.Values{}
 	pmP.Set("dualSidePosition", "false")
 	_, _, _ = bnSignReq("POST", "fapi.binance.com", "/fapi/v1/positionSide/dual", pmP)
-	// Cancel any stale open orders across all USDC-M specs on boot so 100% of USDC margin is unlocked!
-	for _, sp := range dnSpecs {
-		if sp.Quote == "USDC" {
-			cp := url.Values{}
-			cp.Set("symbol", sp.BnSym)
-			_, _, _ = bnSignReq("DELETE", "fapi.binance.com", "/fapi/v1/allOpenOrders", cp)
+	// Cancel any stale open orders across ALL futures contracts (USDC-M + USDT-M) in 1 fast query so 100% margin is unlocked!
+	if ooSc, ooB, ooE := bnSignReq("GET", "fapi.binance.com", "/fapi/v1/openOrders", nil); ooE == nil && ooSc == 200 {
+		var oos []struct {
+			Symbol string `json:"symbol"`
+		}
+		if json.Unmarshal(ooB, &oos) == nil {
+			canceledSyms := map[string]bool{}
+			for _, oo := range oos {
+				if oo.Symbol != "" && !canceledSyms[oo.Symbol] {
+					canceledSyms[oo.Symbol] = true
+					cp := url.Values{}
+					cp.Set("symbol", oo.Symbol)
+					_, _, _ = bnSignReq("DELETE", "fapi.binance.com", "/fapi/v1/allOpenOrders", cp)
+				}
+			}
 		}
 	}
 	fmt.Printf("[DN_READY] Binance UMFUTURE USDC=$%.2f + USDT=$%.2f ready across %d auto-discovered contracts!\n", usdcBal, usdtFut, len(dnSpecs))
@@ -6329,12 +6350,12 @@ func setupBnUsdcMargin() bool {
 }
 
 func emitBnAuditLine() {
-	// Query exact Binance /fapi/v1/income today for REALIZED_PNL + COMMISSION + FUNDING_FEE so dashboard matches Binance Trade History 1:1!
+	// Query exact Binance /fapi/v1/income (last 72h) + Asset Overview wallet balance + Futures uPnL so dashboard never resets at 00:00 UTC!
 	nowU := time.Now().UTC()
-	dayStartMS := time.Date(nowU.Year(), nowU.Month(), nowU.Day(), 0, 0, 0, 0, time.UTC).UnixMilli()
+	dayStartMS := nowU.Add(-72 * time.Hour).UnixMilli()
 	ip := url.Values{}
 	ip.Set("startTime", strconv.FormatInt(dayStartMS, 10))
-	ip.Set("limit", "200")
+	ip.Set("limit", "1000")
 	sc, body, err := bnSignReq("GET", "fapi.binance.com", "/fapi/v1/income", ip)
 	var realPnl, comm, fund float64
 	var cnt int
@@ -6367,13 +6388,30 @@ func emitBnAuditLine() {
 			upnl, _ = strconv.ParseFloat(acc.TotalUnPnl, 64)
 		}
 	}
+	var walletUsd float64
+	wp := url.Values{}
+	wp.Set("quoteAsset", "USDT")
+	if sc3, b3, e3 := bnSignReq("GET", "api.binance.com", "/sapi/v1/asset/wallet/balance", wp); e3 == nil && sc3 == 200 {
+		var wrows []struct {
+			Activate bool   `json:"activate"`
+			Balance  string `json:"balance"`
+		}
+		if json.Unmarshal(b3, &wrows) == nil {
+			for _, wr := range wrows {
+				if wr.Activate {
+					v, _ := strconv.ParseFloat(wr.Balance, 64)
+					walletUsd += v
+				}
+			}
+		}
+	}
 	netBn := realPnl + comm + fund + upnl
 	dnMu.Lock()
 	dnBnRealPnlUsd = realPnl
 	dnBnFeesPaidUsd = comm
 	dnMu.Unlock()
-	fmt.Printf("[BN_AUDIT real=%+.4f fee=%+.4f fund=%+.4f upnl=%+.4f net=%+.4f trades=%d]\n",
-		realPnl, comm, fund, upnl, netBn, cnt)
+	fmt.Printf("[BN_AUDIT real=%+.4f fee=%+.4f fund=%+.4f upnl=%+.4f net=%+.4f trades=%d wallet=%.4f]\n",
+		realPnl, comm, fund, upnl, netBn, cnt, walletUsd)
 }
 
 func flattenBnDnAndSweep() {
@@ -6899,10 +6937,13 @@ func runZeroFeeDnLoop() {
 		actSp := dnActiveSpec
 		specsSnap := dnSpecs
 		usdcAv := dnUsdcAvail
+		usdtAv := dnUsdtAvail
 		dnMu.Unlock()
 
 		if stNow == "IDLE" {
-			if awaitingReview.Load() || anyOpenAcctPos() || now.UnixMilli() < stratCoolUntilMS.Load() {
+			utcNow := now.UTC()
+			if awaitingReview.Load() || anyOpenAcctPos() || now.UnixMilli() < stratCoolUntilMS.Load() ||
+				utcNow.Minute() >= 54 || (utcNow.Minute() == 0 && utcNow.Second() < 10) {
 				continue
 			}
 			var bestSp DnSpec
@@ -6911,24 +6952,24 @@ func runZeroFeeDnLoop() {
 			bestNetEdge := -999.0
 			bestBnPx := 0.0
 			bestLtPx := 0.0
-			bestEma := 0.0
+			bestRawEdge := 0.0
 
 			for _, sp := range specsSnap {
-				// 100% ZERO-FEE ARBITRAGE: Only 0.00% Maker USDC-M contracts on Binance <-> 0.00% Maker/Taker Lighter ($0.0000 fee on ALL 4 legs)!
-				if sp.Quote != "USDC" || usdcAv < 10.0 {
+				// Scan ALL 164 pairs: USDC-M ($0.00 fee, +2.5bp+ trigger) + USDT-M (4.0bp RT fee, +6.5bp+ raw trigger)!
+				if (sp.Quote == "USDC" && usdcAv < 10.0) || (sp.Quote == "USDT" && usdtAv < 12.0) || (sp.Quote != "USDC" && sp.Quote != "USDT") {
 					continue
 				}
 				dnMu.Lock()
 				blocked := dnBlockedSym[sp.BnSym]
 				db := dnBooks[sp.BnSym]
-				var bb, ba, ema float64
+				var bb, ba float64
 				var wTicks int
 				var bTS time.Time
 				if db != nil {
-					bb, ba, ema, wTicks, bTS = db.Bid, db.Ask, db.EmaBps, db.WarmTicks, db.TS
+					bb, ba, wTicks, bTS = db.Bid, db.Ask, db.WarmTicks, db.TS
 				}
 				dnMu.Unlock()
-				if blocked || bb <= 0 || ba <= bb || wTicks < 18 || now.Sub(bTS) > 4*time.Second {
+				if blocked || bb <= 0 || ba <= bb || wTicks < 2 || now.Sub(bTS) > 4*time.Second {
 					continue
 				}
 				st := mktStates[sp.Sym]
@@ -6943,17 +6984,18 @@ func runZeroFeeDnLoop() {
 				}
 				ltSp := (la - lb) / lb * 10000.0
 				bnSp := (ba - bb) / bb * 10000.0
-				if ltSp > 3.5 || bnSp > 2.2 {
+				if ltSp > 6.0 || bnSp > 4.0 {
 					continue
 				}
+				rtMakerFeeBp := 2.0 * sp.MakerFeeBp
 
-				// Case A: Lighter Bid > Binance Buy Maker + EMA -> Leg 1: 0.00% GTX Maker BUY on Binance + Leg 2: 0.00% IOC SELL on Lighter! ($0.00 fee!)
+				// Case A: Strict Raw Price Arb (Lighter Bid > Binance Buy Maker + RT Fees) -> Buy Binance Maker + Sell Lighter 0% IOC!
 				bnBuyPx := bb
 				if ba-bb >= sp.Tick*1.9 {
 					bnBuyPx = roundTo(ba-sp.Tick, sp.PxDec)
 				}
-				basisA := (lb - bnBuyPx) / bnBuyPx * 10000.0
-				netEdgeA := basisA - ema
+				rawEdgeA := (lb - bnBuyPx) / bnBuyPx * 10000.0
+				netEdgeA := rawEdgeA - rtMakerFeeBp
 				if netEdgeA > bestNetEdge && lb*lbSz >= 55.0 {
 					bestNetEdge = netEdgeA
 					bestSp = sp
@@ -6961,16 +7003,16 @@ func runZeroFeeDnLoop() {
 					bestLtSide = "ASK"
 					bestBnPx = bnBuyPx
 					bestLtPx = lb
-					bestEma = ema
+					bestRawEdge = rawEdgeA
 				}
 
-				// Case B: Lighter Ask < Binance Sell Maker + EMA -> Leg 1: 0.00% GTX Maker SELL on Binance + Leg 2: 0.00% IOC BUY on Lighter! ($0.00 fee!)
+				// Case B: Strict Raw Price Arb (Binance Sell Maker > Lighter Ask + RT Fees) -> Sell Binance Maker + Buy Lighter 0% IOC!
 				bnSellPx := ba
 				if ba-bb >= sp.Tick*1.9 {
 					bnSellPx = roundTo(bb+sp.Tick, sp.PxDec)
 				}
-				basisB := (la - bnSellPx) / bnSellPx * 10000.0
-				netEdgeB := ema - basisB
+				rawEdgeB := (bnSellPx - la) / bnSellPx * 10000.0
+				netEdgeB := rawEdgeB - rtMakerFeeBp
 				if netEdgeB > bestNetEdge && la*laSz >= 55.0 {
 					bestNetEdge = netEdgeB
 					bestSp = sp
@@ -6978,18 +7020,18 @@ func runZeroFeeDnLoop() {
 					bestLtSide = "BID"
 					bestBnPx = bnSellPx
 					bestLtPx = la
-					bestEma = ema
+					bestRawEdge = rawEdgeB
 				}
 			}
 
 			if now.Sub(lastScanLog) >= 12*time.Second && bestSp.BnSym != "" {
 				lastScanLog = now
-				fmt.Printf("[DN_SCAN] best=%s bnMaker=%s->ltZeroFee=%s netAfterFee=%+.2fbp (ema=%+.2fbp fee=0.0bp) bnPx=%.5f ltPx=%.5f\n",
-					bestSp.BnSym, bestBnSide, bestLtSide, bestNetEdge, bestEma, bestBnPx, bestLtPx)
+				fmt.Printf("[DN_SCAN] best=%s bnMaker=%s->ltZeroFee=%s netAfterFee=%+.2fbp (rawEdge=%+.2fbp fee=%.1fbp) bnPx=%.5f ltPx=%.5f\n",
+					bestSp.BnSym, bestBnSide, bestLtSide, bestNetEdge, bestRawEdge, 2.0*bestSp.MakerFeeBp, bestBnPx, bestLtPx)
 			}
 
-			// Enter at >= +2.60 bps pure zero-fee spread!
-			if bestSp.BnSym != "" && bestNetEdge >= 2.60 {
+			// Enter strictly when net spread AFTER round-trip maker fees >= +2.50 bps!
+			if bestSp.BnSym != "" && bestNetEdge >= 2.50 {
 				m := markets[bestSp.Sym]
 				ensureLtSubscribed(m.ID)
 				ensureBnLeverage(bestSp.BnSym)
@@ -7007,7 +7049,7 @@ func runZeroFeeDnLoop() {
 				p.Set("symbol", bestSp.BnSym)
 				p.Set("side", bestBnSide)
 				p.Set("type", "LIMIT")
-				p.Set("timeInForce", "GTX") // Strictly 0.00% PostOnly Maker on Binance USDC-M!
+				p.Set("timeInForce", "GTX") // PostOnly Maker on Binance
 				p.Set("quantity", strconv.FormatFloat(qty, 'f', bestSp.QDec, 64))
 				p.Set("price", strconv.FormatFloat(bestBnPx, 'f', bestSp.PxDec, 64))
 				sc, body, err := bnSignReq("POST", "fapi.binance.com", "/fapi/v1/order", p)
@@ -7032,9 +7074,13 @@ func runZeroFeeDnLoop() {
 						dnMu.Unlock()
 						dnBusyFlag.Store(true)
 						lastOrderPoll = time.Time{}
-						fmt.Printf("[DN_ZERO_FEE_MAKER id=%d sym=%s bn=%s qty=%.4f @ %.5f netEdge=%+.2fbp fee=$0.00]\n",
-							tid, bestSp.BnSym, bestBnSide, qty, bestBnPx, bestNetEdge)
+						fmt.Printf("[DN_ZERO_FEE_MAKER id=%d sym=%s bn=%s qty=%.4f @ %.5f netEdge=%+.2fbp fee=%.1fbp]\n",
+							tid, bestSp.BnSym, bestBnSide, qty, bestBnPx, bestNetEdge, 2.0*bestSp.MakerFeeBp)
 					}
+				} else if strings.Contains(string(body), "-4411") {
+					dnMu.Lock()
+					dnBlockedSym[bestSp.BnSym] = true
+					dnMu.Unlock()
 				}
 			}
 
@@ -7045,24 +7091,20 @@ func runZeroFeeDnLoop() {
 			lb, la := st.ltBid, st.ltAsk
 			st.mu.Unlock()
 			dnMu.Lock()
-			db := dnBooks[actSp.BnSym]
-			ema := 0.0
-			if db != nil {
-				ema = db.EmaBps
-			}
 			bSide, lSide, oid, ePx, refLt, openT, tid := dnBnSide, dnLtSide, dnEntryOid, dnEntryBnPx, dnRefLtPx, dnOpenedAt, dnTradeID
 			dnMu.Unlock()
 
+			rtMakerFeeBp := 2.0 * actSp.MakerFeeBp
 			curNetEdge := 0.0
 			ltMoved := false
 			if bSide == "BUY" {
-				curNetEdge = (lb-ePx)/ePx*10000.0 - ema
+				curNetEdge = (lb-ePx)/ePx*10000.0 - rtMakerFeeBp
 				ltMoved = lb < refLt*(1.0-0.6/10000.0)
 			} else {
-				curNetEdge = ema - (la-ePx)/ePx*10000.0
+				curNetEdge = (ePx-la)/ePx*10000.0 - rtMakerFeeBp
 				ltMoved = la > refLt*(1.0+0.6/10000.0)
 			}
-			needCancel := ltMoved || curNetEdge < 1.10 || now.Sub(openT) >= 10*time.Second
+			needCancel := ltMoved || curNetEdge < 1.20 || now.Sub(openT) >= 8*time.Second
 			if !needCancel && now.Sub(lastOrderPoll) < 90*time.Millisecond {
 				continue
 			}
@@ -7107,7 +7149,7 @@ func runZeroFeeDnLoop() {
 					ltIocPx = roundTo(la*1.004, m.PxDec)
 					ltRefFill = la
 				}
-				// Leg 2: 0.00% fee IOC on Lighter! Total entry fees = $0.0000!
+				// Leg 2: 0.00% fee IOC on Lighter!
 				placeLtHedgeIOC(actSp.Sym, lSide, ltIocPx, tMid, exQ, false)
 				time.Sleep(80 * time.Millisecond)
 				st.mu.Lock()
@@ -7115,19 +7157,19 @@ func runZeroFeeDnLoop() {
 					ltRefFill = st.avgEntry
 				}
 				st.mu.Unlock()
-				lockedBps := (ltRefFill-avgP)/avgP*10000.0 - ema
+				lockedBps := (ltRefFill-avgP)/avgP*10000.0 - rtMakerFeeBp
 				if bSide == "SELL" {
-					lockedBps = ema - (ltRefFill-avgP)/avgP*10000.0
+					lockedBps = (avgP-ltRefFill)/avgP*10000.0 - rtMakerFeeBp
 				}
 				dnMu.Lock()
 				dnState = "HEDGED"
 				dnQty = exQ
 				dnEntryBnPx = avgP
 				dnEntryLtPx = ltRefFill
-				dnEntryBnFeeBp = 0.0
+				dnEntryBnFeeBp = actSp.MakerFeeBp
 				dnOpenedAt = time.Now()
 				dnMu.Unlock()
-				recordStratOpen(tid, "ZERO_FEE_DN", fmt.Sprintf("BN_%s_%s+LT_%s", actSp.BnSym, bSide, lSide), exQ*avgP, 1.0, lockedBps, fmt.Sprintf("0pctFee BnMaker@%.5f+Lt0pct@%.5f", avgP, ltRefFill))
+				recordStratOpen(tid, "ZERO_FEE_DN", fmt.Sprintf("BN_%s_%s+LT_%s", actSp.BnSym, bSide, lSide), exQ*avgP, 1.0, lockedBps, fmt.Sprintf("RawArb Fee%.1fbp BnMaker@%.5f+Lt0pct@%.5f", rtMakerFeeBp, avgP, ltRefFill))
 			} else if needCancel || o.Status == "CANCELED" || o.Status == "EXPIRED" {
 				if o.Status == "NEW" || o.Status == "PARTIALLY_FILLED" {
 					_, cb, _ := bnSignReq("DELETE", "fapi.binance.com", "/fapi/v1/order", qp)
@@ -7150,10 +7192,10 @@ func runZeroFeeDnLoop() {
 					dnQty = exQ
 					dnEntryBnPx = avgP
 					dnEntryLtPx = tMid
-					dnEntryBnFeeBp = 0.0
+					dnEntryBnFeeBp = actSp.MakerFeeBp
 					dnOpenedAt = time.Now()
 					dnMu.Unlock()
-					recordStratOpen(tid, "ZERO_FEE_DN", fmt.Sprintf("BN_%s_%s+LT_%s", actSp.BnSym, bSide, lSide), exQ*avgP, 1.0, curNetEdge, "0pctFee_Partial_Hedged")
+					recordStratOpen(tid, "ZERO_FEE_DN", fmt.Sprintf("BN_%s_%s+LT_%s", actSp.BnSym, bSide, lSide), exQ*avgP, 1.0, curNetEdge, "RawArb_Partial_Hedged")
 				} else {
 					dnMu.Lock()
 					dnState = "IDLE"
@@ -7185,7 +7227,9 @@ func runZeroFeeDnLoop() {
 				continue
 			}
 
-			// 100% ZERO-FEE EXIT: Rest 0.00% GTX reduceOnly Maker on Binance USDC-M -> 0.00% IOC close on Lighter! Total fees across ALL 4 legs = $0.0000!
+			// Fee-aware convergence exit: GTX reduceOnly Maker on Binance + 0% IOC close on Lighter!
+			rtMakerFeeBp := 2.0 * actSp.MakerFeeBp
+			rtMixedFeeBp := actSp.MakerFeeBp + actSp.TakerFeeBp
 			var closeBnSide, closeLtSide string
 			var makerExitBnPx, takerExitLtPx, combNetMakerBps, combTakerNetBps float64
 			if bSide == "BUY" {
@@ -7196,8 +7240,8 @@ func runZeroFeeDnLoop() {
 					makerExitBnPx = roundTo(bb+actSp.Tick, actSp.PxDec)
 				}
 				takerExitLtPx = la
-				combNetMakerBps = ((makerExitBnPx - eBn) + (eLt - takerExitLtPx)) / eBn * 10000.0
-				combTakerNetBps = (((bb - eBn) + (eLt - la)) / eBn * 10000.0) - actSp.TakerFeeBp
+				combNetMakerBps = ((makerExitBnPx-eBn)+(eLt-takerExitLtPx))/eBn*10000.0 - rtMakerFeeBp
+				combTakerNetBps = ((bb-eBn)+(eLt-la))/eBn*10000.0 - rtMixedFeeBp
 			} else {
 				closeBnSide = "BUY"
 				closeLtSide = "ASK"
@@ -7206,13 +7250,15 @@ func runZeroFeeDnLoop() {
 					makerExitBnPx = roundTo(ba-actSp.Tick, actSp.PxDec)
 				}
 				takerExitLtPx = lb
-				combNetMakerBps = ((eBn - makerExitBnPx) + (takerExitLtPx - eLt)) / eBn * 10000.0
-				combTakerNetBps = (((eBn - ba) + (lb - eLt)) / eBn * 10000.0) - actSp.TakerFeeBp
+				combNetMakerBps = ((eBn-makerExitBnPx)+(takerExitLtPx-eLt))/eBn*10000.0 - rtMakerFeeBp
+				combTakerNetBps = ((eBn-ba)+(lb-eLt))/eBn*10000.0 - rtMixedFeeBp
 			}
 
 			holdS := now.Sub(openT).Seconds()
-			wantExit := combNetMakerBps >= 1.60 || (holdS >= 60.0 && combNetMakerBps >= 0.40) || (holdS >= 180.0 && combNetMakerBps >= 0.05)
-			emergencyExit := (holdS >= 15.0 && combTakerNetBps <= -25.0) || holdS >= 1800.0
+			utcNow := now.UTC()
+			preHourFlush := (utcNow.Minute() == 58 && utcNow.Second() >= 20) || utcNow.Minute() == 59
+			wantExit := combNetMakerBps >= 1.80 || (holdS >= 45.0 && combNetMakerBps >= 0.60) || (holdS >= 150.0 && combNetMakerBps >= 0.10)
+			emergencyExit := preHourFlush || (holdS >= 20.0 && combTakerNetBps <= -14.0) || holdS >= 600.0
 
 			if emergencyExit {
 				mp := url.Values{}
@@ -7241,12 +7287,18 @@ func runZeroFeeDnLoop() {
 				}
 				var realBps float64
 				if bSide == "BUY" {
-					realBps = (((bnExPx - eBn) + (eLt - ltExitEst)) / eBn * 10000.0) - actSp.TakerFeeBp
+					realBps = ((bnExPx-eBn)+(eLt-ltExitEst))/eBn*10000.0 - rtMixedFeeBp
 				} else {
-					realBps = (((eBn - bnExPx) + (ltExitEst - eLt)) / eBn * 10000.0) - actSp.TakerFeeBp
+					realBps = ((eBn-bnExPx)+(ltExitEst-eLt))/eBn*10000.0 - rtMixedFeeBp
 				}
 				realUSD := (qty * eBn) * (realBps / 10000.0)
-				recordStratClose(tid, "ZERO_FEE_DN", fmt.Sprintf("BN_%s_%s+LT_%s", actSp.BnSym, bSide, lSide), qty*eBn, holdS, realBps, realUSD, "DN_EMERGENCY_SL")
+				exReason := "DN_EMERGENCY_SL"
+				if preHourFlush {
+					exReason = "PRE_HOUR_FUND_GUARD"
+				} else if holdS >= 600.0 {
+					exReason = "DN_MAX_HOLD_10M"
+				}
+				recordStratClose(tid, "ZERO_FEE_DN", fmt.Sprintf("BN_%s_%s+LT_%s", actSp.BnSym, bSide, lSide), qty*eBn, holdS, realBps, realUSD, exReason)
 				emitBnAuditLine()
 				dnMu.Lock()
 				dnPnlSumUSD += realUSD
@@ -7332,11 +7384,12 @@ func runZeroFeeDnLoop() {
 					placeLtHedgeIOC(actSp.Sym, closeLtSide, ltClosePx, 0.5*(lb+la), math.Abs(ltPos), true)
 					time.Sleep(80 * time.Millisecond)
 				}
+				rtMakerFeeBp := 2.0 * actSp.MakerFeeBp
 				var realBps float64
 				if bSide == "BUY" {
-					realBps = ((exP - eBn) + (eLt - ltExitEst)) / eBn * 10000.0
+					realBps = ((exP-eBn)+(eLt-ltExitEst))/eBn*10000.0 - rtMakerFeeBp
 				} else {
-					realBps = ((eBn - exP) + (ltExitEst - eLt)) / eBn * 10000.0
+					realBps = ((eBn-exP)+(ltExitEst-eLt))/eBn*10000.0 - rtMakerFeeBp
 				}
 				realUSD := (qty * eBn) * (realBps / 10000.0)
 				holdS := now.Sub(openT).Seconds()
@@ -7354,13 +7407,16 @@ func runZeroFeeDnLoop() {
 				dnState = "HEDGED"
 				dnMu.Unlock()
 			} else {
+				rtMakerFeeBp := 2.0 * actSp.MakerFeeBp
 				var curComb float64
 				if bSide == "BUY" {
-					curComb = ((exP - eBn) + (eLt - la)) / eBn * 10000.0
+					curComb = ((exP-eBn)+(eLt-la))/eBn*10000.0 - rtMakerFeeBp
 				} else {
-					curComb = ((eBn - exP) + (lb - eLt)) / eBn * 10000.0
+					curComb = ((eBn-exP)+(lb-eLt))/eBn*10000.0 - rtMakerFeeBp
 				}
-				if curComb < 0.25 {
+				utcNow := now.UTC()
+				preHourCancel := (utcNow.Minute() == 58 && utcNow.Second() >= 20) || utcNow.Minute() == 59
+				if preHourCancel || curComb < -0.05 {
 					_, cb, _ := bnSignReq("DELETE", "fapi.binance.com", "/fapi/v1/order", qp)
 					var co struct {
 						Status string `json:"status"`
@@ -7381,9 +7437,9 @@ func runZeroFeeDnLoop() {
 						}
 						var realBps float64
 						if bSide == "BUY" {
-							realBps = ((exP - eBn) + (eLt - ltExitEst)) / eBn * 10000.0
+							realBps = ((exP-eBn)+(eLt-ltExitEst))/eBn*10000.0 - rtMakerFeeBp
 						} else {
-							realBps = ((eBn - exP) + (ltExitEst - eLt)) / eBn * 10000.0
+							realBps = ((eBn-exP)+(ltExitEst-eLt))/eBn*10000.0 - rtMakerFeeBp
 						}
 						realUSD := (qty * eBn) * (realBps / 10000.0)
 						recordStratClose(tid, "ZERO_FEE_DN", fmt.Sprintf("BN_%s_%s+LT_%s", actSp.BnSym, bSide, lSide), qty*eBn, now.Sub(openT).Seconds(), realBps, realUSD, "ZERO_FEE_4LEG_TP")
@@ -7454,7 +7510,7 @@ func main() {
 	go runCarbonScanner()
 	go runCarbonCommandLoop()
 	go runZeroFeeDnLoop()
-	fmt.Printf("GO-TOKYO v96.0 LIVE | 100%% ZERO-FEE 4-LEG ARB (Binance USDC GTX 0%% + Lighter 0%%) | Stop=$%.2f\n", StopEqUSD)
+	fmt.Printf("GO-TOKYO v96.1 LIVE | 164-PAIR RAW ARB + PRE-HOUR FUNDING GUARD | Stop=$%.2f\n", StopEqUSD)
 	go syncAccountLoop()
 	select {}
 }
