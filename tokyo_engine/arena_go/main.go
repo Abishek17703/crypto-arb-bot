@@ -23,7 +23,7 @@ const (
 	TargetHourly   = 5.00
 	ArenaOutPath   = "/tmp/forward_arena.json"
 	ArenaStatePath = "/opt/crypto-arb-bot/forward_arena_state.json"
-	ArenaVer       = "ARENA-v2.0-TOKYO-EVOLVED"
+	ArenaVer       = "ARENA-v2.1-TOKYO-FULLTAPE"
 
 	VenueBnUsdc = "BN_USDC"
 	VenueBnUsdt = "BN_USDT"
@@ -2267,7 +2267,55 @@ func runLighterWS() {
 }
 
 func runBinanceBookAndLiqWS() {
-	url := "wss://fstream.binance.com/stream?streams=!bookTicker/!forceOrder@arr"
+	go func() {
+		liURL := "wss://fstream.binance.com/market/stream?streams=!forceOrder@arr"
+		for {
+			conn, _, err := websocket.DefaultDialer.Dial(liURL, nil)
+			if err != nil {
+				time.Sleep(time.Second)
+				continue
+			}
+			for {
+				_ = conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+				_, raw, err := conn.ReadMessage()
+				if err != nil {
+					break
+				}
+				var env struct {
+					Data struct {
+						Order struct {
+							Sym  string `json:"s"`
+							Side string `json:"S"`
+							Px   string `json:"ap"`
+							Qty  string `json:"q"`
+						} `json:"o"`
+					} `json:"data"`
+				}
+				if json.Unmarshal(raw, &env) == nil && env.Data.Order.Sym != "" {
+					px, _ := strconv.ParseFloat(env.Data.Order.Px, 64)
+					qty, _ := strconv.ParseFloat(env.Data.Order.Qty, 64)
+					if px > 0 && qty > 0 {
+						incFeed("bnLiq")
+						nowMs := time.Now().UnixMilli()
+						mu.Lock()
+						liqRecent[env.Data.Order.Sym] = &ForceLiqEvent{
+							Symbol: env.Data.Order.Sym,
+							Side:   env.Data.Order.Side,
+							Price:  px,
+							Qty:    qty,
+							Usd:    px * qty,
+							TsMs:   nowMs,
+						}
+						mu.Unlock()
+					}
+				}
+			}
+			_ = conn.Close()
+			time.Sleep(time.Second)
+		}
+	}()
+
+	url := "wss://fstream.binance.com/public/stream?streams=!bookTicker"
 	for {
 		conn, _, err := websocket.DefaultDialer.Dial(url, nil)
 		if err != nil {
@@ -2318,32 +2366,6 @@ func runBinanceBookAndLiqWS() {
 						mu.Unlock()
 					}
 				}
-			} else if env.Stream == "!forceOrder@arr" {
-				var fo struct {
-					Order struct {
-						Sym  string `json:"s"`
-						Side string `json:"S"`
-						Px   string `json:"ap"`
-						Qty  string `json:"q"`
-					} `json:"o"`
-				}
-				if json.Unmarshal(env.Data, &fo) == nil && fo.Order.Sym != "" {
-					px, _ := strconv.ParseFloat(fo.Order.Px, 64)
-					qty, _ := strconv.ParseFloat(fo.Order.Qty, 64)
-					if px > 0 && qty > 0 {
-						incFeed("bnLiq")
-						mu.Lock()
-						liqRecent[fo.Order.Sym] = &ForceLiqEvent{
-							Symbol: fo.Order.Sym,
-							Side:   fo.Order.Side,
-							Price:  px,
-							Qty:    qty,
-							Usd:    px * qty,
-							TsMs:   nowMs,
-						}
-						mu.Unlock()
-					}
-				}
 			}
 		}
 		_ = conn.Close()
@@ -2352,7 +2374,7 @@ func runBinanceBookAndLiqWS() {
 }
 
 func runBinanceAggTradeShard(streams []string) {
-	url := "wss://fstream.binance.com/stream?streams=" + strings.Join(streams, "/")
+	url := "wss://fstream.binance.com/market/stream?streams=" + strings.Join(streams, "/")
 	for {
 		conn, _, err := websocket.DefaultDialer.Dial(url, nil)
 		if err != nil {
