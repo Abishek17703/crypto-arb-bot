@@ -16,9 +16,9 @@ import (
 )
 
 const (
-	LiveArenaVer       = "LIVE-MICRO-v105.1-ULTRA-SAFE"
-	StratStopLossUSD   = -0.50 // Auto-halt individual strategy if realized+unrealized drops <= -$0.50
-	GlobalStopLossUSD  = -1.50 // Auto-flatten & S3-pause ALL live strategies if combined PnL <= -$1.50
+	LiveArenaVer       = "LIVE-MICRO-v105.2-PURE-CONVERGE"
+	StratStopLossUSD   = -1.50 // Auto-halt individual strategy if realized+unrealized drops <= -$1.50 (~3.3x max historical $15 DD)
+	GlobalStopLossUSD  = -6.50 // Auto-flatten & S3-pause ALL live strategies at <= -$6.50 ($300.33 Perp equity floor)
 	MaxLtTxPerMin      = 48    // Strict guard below #770015 Standard 60 tx/min quota
 )
 
@@ -1028,32 +1028,29 @@ func stepLiveSlot(rt *LiveSlotRuntime, now time.Time) {
 
 		holdS := now.Sub(rt.OpenedAt).Seconds()
 		rtMakerFeeBp := rt.EntryPeerFee + mFeeBp // 4.0bp (or 1.25bp on RWA!) + 0.0bp = 4.0bp / 1.25bp!
-		rtTakerFeeBp := rt.EntryPeerFee + tFeeBp
 
 		var closePeerSide string
-		var exitMakerPx, combMakerNetBp, combTakerNetBp float64
+		var exitMakerPx, combMakerNetBp float64
 		if rt.PeerSide == "BUY" {
 			// Long Peer, Short Lighter -> rest SELL Maker at pAsk on Peer, close BUY at la on Lighter
 			closePeerSide = "SELL"
 			exitMakerPx = roundTo(pAsk, pxDec)
 			combMakerNetBp = (((exitMakerPx-rt.EntryPeerPx)*fx)+(rt.EntryLtPx-la))/rt.EntryLtPx*10000.0 - rtMakerFeeBp
-			combTakerNetBp = (((pBid-rt.EntryPeerPx)*fx)+(rt.EntryLtPx-la))/rt.EntryLtPx*10000.0 - rtTakerFeeBp
 		} else {
 			// Short Peer, Long Lighter -> rest BUY Maker at pBid on Peer, close SELL at lb on Lighter
 			closePeerSide = "BUY"
 			exitMakerPx = roundTo(pBid, pxDec)
 			combMakerNetBp = (((rt.EntryPeerPx-exitMakerPx)*fx)+(lb-rt.EntryLtPx))/rt.EntryLtPx*10000.0 - rtMakerFeeBp
-			combTakerNetBp = (((rt.EntryPeerPx-pAsk)*fx)+(lb-rt.EntryLtPx))/rt.EntryLtPx*10000.0 - rtTakerFeeBp
 		}
 
-		// Tight per-trade stop-loss (-20bp = ~$0.03 max loss on $15 clip!) or strategy halted:
-		if halted || (holdS >= 20.0 && combTakerNetBp <= -20.0) {
+		// Zero per-trade basis stop-loss (pure 1:1 hedged convergence); only flush if strategy circuit breaker tripped:
+		if halted {
 			_, ap, latMs, okM := executePeerMarketOrder(rt.PeerVenue, peerSym, closePeerSide, rt.HedgedQty, qDec, true)
 			if okM {
 				if ap <= 0 {
 					ap = 0.5 * (pBid + pAsk)
 				}
-				finalizeSlotClose(rt, ap, tFeeBp, "TAKER_SL_EXIT", "STOP_OR_HALT_FLUSH", latMs, now)
+				finalizeSlotClose(rt, ap, tFeeBp, "TAKER_HALT_FLUSH", "STRAT_CIRCUIT_BREAKER_FLUSH", latMs, now)
 			}
 			return
 		}
