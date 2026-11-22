@@ -431,7 +431,16 @@ def fetch_binance_income_and_reconstruct(fapi, lt_trades, disk_hist, cached_wall
             if not d_coin and d.get("legs"):
                 d_coin = d.get("legs", "").replace("BN_", "").split("_")[0].replace("USDC", "").replace("USDT", "")
             d_ts = int(d.get("openTs") or d.get("id") or 0)
-            if d_coin == rec["coin"] and abs(d_ts - rec["openTs"]) < 10000:
+            if d_coin == rec["coin"] and abs(d_ts - rec["openTs"]) < 15000:
+                if d.get("status") == "CLOSED":
+                    d["bnLegUsd"] = rec["bnLegUsd"]
+                    d["ltLegUsd"] = rec["ltLegUsd"]
+                    d["pnlUsd"] = rec["pnlUsd"]
+                    d["pnlBps"] = rec["pnlBps"]
+                    d["feeUsd"] = rec["feeUsd"]
+                    d["closeTs"] = rec["closeTs"]
+                    d["holdS"] = rec["holdS"]
+                    d["reason"] = "EXCHANGE_AUDITED"
                 dup = True
                 break
         if not dup:
@@ -709,7 +718,7 @@ def main():
                 status_msg = (
                     f"PAUSED BY USER — 100% FLAT (Binance Wallet ${cached_wallet:.4f})"
                     if paused
-                    else f"GO-TOKYO v102.0 KISS LIVE | Binance Wallet ${cached_wallet:.4f} | Avail ${cached_futures.get('availableBalance', 0):.2f}"
+                    else f"GO-TOKYO v103.0 KISS LIVE | Binance Wallet ${cached_wallet:.4f} | Avail ${cached_futures.get('availableBalance', 0):.2f}"
                 )
                 lt_acct = read_json_safe("/tmp/lighter_acct.json")
                 lt_trades_obj = read_json_safe("/tmp/lighter_trades.json", {})

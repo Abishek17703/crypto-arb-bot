@@ -29,7 +29,7 @@ import (
 )
 
 const (
-	BotVersion = "v102.0"
+	BotVersion = "v103.0"
 	BaseURL    = "https://mainnet.zklighter.elliot.ai"
 	WsURL      = "wss://mainnet.zklighter.elliot.ai/stream"
 	AcctIdx    = int64(770015)
@@ -1293,6 +1293,15 @@ func runBnUserWS() {
 	}
 }
 
+func ltGet(hc *http.Client, u string) (*http.Response, error) {
+	req, err := http.NewRequest("GET", u, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0")
+	return hc.Do(req)
+}
+
 func syncAccountLoop() {
 	hc := &http.Client{Timeout: 6 * time.Second}
 	accURL := fmt.Sprintf("%s/api/v1/account?by=index&value=%d", BaseURL, AcctIdx)
@@ -1301,7 +1310,7 @@ func syncAccountLoop() {
 	for {
 		loopCnt++
 		if loopCnt%2 == 1 {
-			if trResp, e := hc.Get(trURL); e == nil {
+			if trResp, e := ltGet(hc, trURL); e == nil {
 				tb, _ := io.ReadAll(trResp.Body)
 				trResp.Body.Close()
 				if len(tb) > 20 && strings.Contains(string(tb), `"trades"`) {
@@ -1310,7 +1319,7 @@ func syncAccountLoop() {
 				}
 			}
 		}
-		if resp, err := hc.Get(accURL); err == nil {
+		if resp, err := ltGet(hc, accURL); err == nil {
 			body, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
 			var res struct {
@@ -1409,7 +1418,7 @@ func fetchLtPosREST(sym string) (float64, float64) {
 		return 0, 0
 	}
 	hc := &http.Client{Timeout: 3 * time.Second}
-	resp, err := hc.Get(fmt.Sprintf("%s/api/v1/account?by=index&value=%d", BaseURL, AcctIdx))
+	resp, err := ltGet(hc, fmt.Sprintf("%s/api/v1/account?by=index&value=%d", BaseURL, AcctIdx))
 	if err != nil {
 		return 0, 0
 	}
@@ -1544,7 +1553,7 @@ func triggerS3Pause(reason string) {
 
 func flattenAllLtPositionsSync(prefix string) {
 	hc := &http.Client{Timeout: 3 * time.Second}
-	resp, err := hc.Get(fmt.Sprintf("%s/api/v1/account?by=index&value=%d", BaseURL, AcctIdx))
+	resp, err := ltGet(hc, fmt.Sprintf("%s/api/v1/account?by=index&value=%d", BaseURL, AcctIdx))
 	if err != nil {
 		return
 	}
@@ -2065,8 +2074,10 @@ func queryBnOrder(symbol string, oid int64, lastPoll time.Time, forceREST bool) 
 }
 
 func waitLtPositionFill(sym string, minNeed float64, waitDur time.Duration) (float64, float64) {
-	deadline := time.Now().Add(waitDur)
+	t0 := time.Now()
+	deadline := t0.Add(waitDur)
 	st := mktStates[sym]
+	rest450Done, rest850Done := false, false
 	for time.Now().Before(deadline) {
 		if st != nil {
 			st.mu.Lock()
@@ -2074,6 +2085,19 @@ func waitLtPositionFill(sym string, minNeed float64, waitDur time.Duration) (flo
 			st.mu.Unlock()
 			if math.Abs(pos) >= minNeed {
 				return pos, ae
+			}
+		}
+		el := time.Since(t0)
+		if !rest450Done && el >= 450*time.Millisecond {
+			rest450Done = true
+			if p, ae := fetchLtPosREST(sym); math.Abs(p) >= minNeed {
+				return p, ae
+			}
+		}
+		if !rest850Done && el >= 850*time.Millisecond {
+			rest850Done = true
+			if p, ae := fetchLtPosREST(sym); math.Abs(p) >= minNeed {
+				return p, ae
 			}
 		}
 		select {
@@ -2097,13 +2121,13 @@ func verifyAndHedgeLt(sp DnSpec, sl DnSlot, exQ, bnAvgP, fx float64) (hedged boo
 		lb, la = fetchLtBookREST(m.ID)
 	}
 
-	// Attempt 1: fast 4bp buffer IOC
-	px1, ref1 := roundTo(lb*0.9996, m.PxDec), lb
+	// Attempt 1: 12bp buffer IOC + 1200ms confirmation
+	px1, ref1 := roundTo(lb*0.9988, m.PxDec), lb
 	if sl.LtSide == "BID" {
-		px1, ref1 = roundTo(la*1.0004, m.PxDec), la
+		px1, ref1 = roundTo(la*1.0012, m.PxDec), la
 	}
 	placeLtHedgeIOC(sp.Sym, sl.LtSide, px1, exQ, false)
-	pos, ae := waitLtPositionFill(sp.Sym, m.MinB, 350*time.Millisecond)
+	pos, ae := waitLtPositionFill(sp.Sym, m.MinB, 1200*time.Millisecond)
 	if math.Abs(pos) >= m.MinB {
 		if ae <= 0 {
 			ae = ref1
@@ -2111,7 +2135,7 @@ func verifyAndHedgeLt(sp DnSpec, sl DnSlot, exQ, bnAvgP, fx float64) (hedged boo
 		return true, ae, math.Abs(pos)
 	}
 
-	// Attempt 2: wider 10bp buffer IOC retry
+	// Attempt 2: wider 20bp buffer IOC retry + 1200ms confirmation
 	st.mu.Lock()
 	lb2, la2 := st.ltBid, st.ltAsk
 	st.mu.Unlock()
@@ -2121,12 +2145,12 @@ func verifyAndHedgeLt(sp DnSpec, sl DnSlot, exQ, bnAvgP, fx float64) (hedged boo
 	if lb2 <= 0 || la2 <= 0 {
 		lb2, la2 = lb, la
 	}
-	px2, ref2 := roundTo(lb2*0.9990, m.PxDec), lb2
+	px2, ref2 := roundTo(lb2*0.9980, m.PxDec), lb2
 	if sl.LtSide == "BID" {
-		px2, ref2 = roundTo(la2*1.0010, m.PxDec), la2
+		px2, ref2 = roundTo(la2*1.0020, m.PxDec), la2
 	}
 	placeLtHedgeIOC(sp.Sym, sl.LtSide, px2, exQ, false)
-	pos, ae = waitLtPositionFill(sp.Sym, m.MinB, 250*time.Millisecond)
+	pos, ae = waitLtPositionFill(sp.Sym, m.MinB, 1200*time.Millisecond)
 	if math.Abs(pos) >= m.MinB {
 		if ae <= 0 {
 			ae = ref2
@@ -2153,6 +2177,24 @@ func verifyAndHedgeLt(sp DnSpec, sl DnSlot, exQ, bnAvgP, fx float64) (hedged boo
 	unPx, _ := strconv.ParseFloat(mo.AvgPx, 64)
 	if unPx <= 0 {
 		unPx = bnAvgP
+	}
+	time.Sleep(900 * time.Millisecond)
+	if latePos, _ := fetchLtPosREST(sp.Sym); math.Abs(latePos) >= m.MinB {
+		closeSide := "BID"
+		if latePos > 0 {
+			closeSide = "ASK"
+		}
+		lb3, la3 := fetchLtBookREST(m.ID)
+		if lb3 <= 0 || la3 <= 0 {
+			lb3, la3 = lb2, la2
+		}
+		closePx := roundTo(la3*1.01, m.PxDec)
+		if closeSide == "ASK" {
+			closePx = roundTo(lb3*0.99, m.PxDec)
+		}
+		placeLtHedgeIOC(sp.Sym, closeSide, closePx, math.Abs(latePos), true)
+		fmt.Printf("[POST_ABORT_LT_SWEEP sym=%s side=%s qty=%.5f px=%.4f]\n",
+			sp.Sym, closeSide, math.Abs(latePos), closePx)
 	}
 	bnLeg, _, feeUsd, netUsd, netBps := computeDnLegPnls(
 		sl.BnSide, bnAvgP, unPx, bnAvgP*fx, bnAvgP*fx, fx, exQ, sl.EntryFeeBp, sp.TakerFeeBp)
@@ -2198,7 +2240,46 @@ func closeActiveSlot(sl DnSlot, bnExPx, ltPos, lb, la, fx, exitFeeBp float64, re
 	}
 	if closeQty >= m.MinB {
 		placeLtHedgeIOC(actSp.Sym, closeLtSide, ltClosePx, closeQty, true)
-		time.Sleep(80 * time.Millisecond)
+		stClose := mktStates[actSp.Sym]
+		c0 := time.Now()
+		cDeadline := c0.Add(1000 * time.Millisecond)
+		rest550Done := false
+		for time.Now().Before(cDeadline) {
+			if stClose != nil {
+				stClose.mu.Lock()
+				curPos := stClose.pos
+				stClose.mu.Unlock()
+				if math.Abs(curPos) < m.MinB {
+					break
+				}
+			}
+			if !rest550Done && time.Since(c0) >= 550*time.Millisecond {
+				rest550Done = true
+				if rp, _ := fetchLtPosREST(actSp.Sym); math.Abs(rp) < m.MinB {
+					break
+				}
+			}
+			select {
+			case <-ltFillCh:
+			case <-time.After(50 * time.Millisecond):
+			}
+		}
+		if curPos, _ := fetchLtPosREST(actSp.Sym); math.Abs(curPos) >= m.MinB {
+			retrySide := "BID"
+			if curPos > 0 {
+				retrySide = "ASK"
+			}
+			lbR, laR := fetchLtBookREST(m.ID)
+			if lbR <= 0 || laR <= 0 {
+				lbR, laR = lb, la
+			}
+			retryPx := roundTo(laR*1.01, m.PxDec)
+			if retrySide == "ASK" {
+				retryPx = roundTo(lbR*0.99, m.PxDec)
+			}
+			placeLtHedgeIOC(actSp.Sym, retrySide, retryPx, math.Abs(curPos), true)
+			time.Sleep(600 * time.Millisecond)
+		}
 	}
 	eLt := sl.EntryLtPx
 	if eLt <= 0 {
