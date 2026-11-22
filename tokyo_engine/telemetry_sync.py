@@ -12,6 +12,7 @@ import urllib.parse
 import urllib.request
 
 import boto3
+from botocore.config import Config
 
 API_KEY = "I4IImhi629VlyPD28pnIkveLZsAwH5yf0COTtmJQuYiGFICACdCS03HEXz2OCti4"
 API_SEC = b"ng4mncCOkk5DvRJxPARevMGoDACQBEpzWBqh5XJ8TlEYCxR0TWpSp8vKVitg3U4D"
@@ -473,13 +474,22 @@ def ensure_s3_cors_and_presign(s3):
     except Exception:
         pass
     try:
-        return s3.generate_presigned_url(
+        put_url = s3.generate_presigned_url(
             "put_object",
             Params={"Bucket": S3_BUCKET, "Key": PAUSE_KEY, "ContentType": "text/plain"},
             ExpiresIn=604800,
         )
     except Exception:
-        return ""
+        put_url = ""
+    try:
+        post_data = s3.generate_presigned_post(
+            Bucket=S3_BUCKET,
+            Key=PAUSE_KEY,
+            ExpiresIn=604800,
+        )
+    except Exception:
+        post_data = None
+    return put_url, post_data
 
 
 def read_s3_pause_state(s3, default_val=True):
@@ -587,7 +597,12 @@ def fetch_binance_snapshot(spot_api, fapi):
 
 
 def main():
-    s3 = boto3.client("s3", region_name=AWS_REGION)
+    s3 = boto3.client(
+        "s3",
+        region_name=AWS_REGION,
+        endpoint_url=f"https://s3.{AWS_REGION}.amazonaws.com",
+        config=Config(signature_version="s3v4"),
+    )
     spot_api = BinanceSession("api.binance.com")
     fapi = BinanceSession("fapi.binance.com")
 
@@ -604,7 +619,7 @@ def main():
     else:
         threading.Thread(target=boot_go_bot, args=(state,), daemon=True).start()
 
-    pause_url = ensure_s3_cors_and_presign(s3)
+    pause_url, pause_post = ensure_s3_cors_and_presign(s3)
     last_presign = time.time()
     cached_wallet = 0.0
     cached_futures = {"marginBalance": 0.0, "availableBalance": 0.0, "initialMargin": 0.0, "unrealizedProfit": 0.0}
@@ -622,7 +637,7 @@ def main():
         now = time.time()
         try:
             if now - last_presign >= 21600.0:
-                pause_url = ensure_s3_cors_and_presign(s3)
+                pause_url, pause_post = ensure_s3_cors_and_presign(s3)
                 last_presign = now
 
             if now - last_pause_poll >= 1.0:
@@ -714,6 +729,7 @@ def main():
                     "dnTradesHistory": cached_dn_hist,
                     "lighterLog": read_log_tail(8000),
                     "pauseControlUrl": pause_url,
+                    "pauseControlPost": pause_post,
                     "hftTest": {
                         "status": status_msg,
                         "paused": paused,

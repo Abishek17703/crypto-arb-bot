@@ -838,15 +838,28 @@
         ackEl.textContent = "⏳ Sending to Tokyo...";
         ackEl.style.color = "#f59e0b";
       }
+      const payloadStr = JSON.stringify({ paused: pendingPauseTarget, ts: clickTs, source: "dashboard_ui" });
       try {
         const res = await fetch(lastTel.pauseControlUrl, {
           method: "PUT",
           headers: { "Content-Type": "text/plain" },
-          body: JSON.stringify({ paused: pendingPauseTarget, ts: clickTs, source: "dashboard_ui" })
+          body: payloadStr
         });
         if (!res.ok) throw new Error("HTTP " + res.status);
         setTimeout(poll, 1200);
       } catch (e) {
+        if (lastTel.pauseControlPost && lastTel.pauseControlPost.url && lastTel.pauseControlPost.fields) {
+          try {
+            const fd = new FormData();
+            for (const [k, v] of Object.entries(lastTel.pauseControlPost.fields)) {
+              fd.append(k, v);
+            }
+            fd.append("file", new Blob([payloadStr], { type: "text/plain" }));
+            await fetch(lastTel.pauseControlPost.url, { method: "POST", body: fd, mode: "no-cors" });
+            setTimeout(poll, 1500);
+            return;
+          } catch (_) {}
+        }
         if (ackEl) {
           ackEl.textContent = "ERR: " + e.message;
           ackEl.style.color = "#ef4444";

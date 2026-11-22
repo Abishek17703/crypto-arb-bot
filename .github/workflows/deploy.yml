@@ -49,6 +49,12 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ap-northeast-1
 
+      - name: Configure S3 Bucket CORS
+        run: |
+          aws s3api put-bucket-cors \
+            --bucket crypto-arb-bot-tokyo-bin-767579108352 \
+            --cors-configuration '{"CORSRules":[{"AllowedHeaders":["*"],"AllowedMethods":["GET","PUT","POST","HEAD"],"AllowedOrigins":["*"],"ExposeHeaders":["ETag"],"MaxAgeSeconds":86400}]}'
+
       - name: Deploy Clean Binary & Telemetry via SSM
         run: |
           INST_ID="i-046fed60c07b7a799"
