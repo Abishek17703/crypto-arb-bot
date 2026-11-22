@@ -75,12 +75,13 @@ jobs:
             "sudo systemctl stop tokyo-telemetry.service || true",
             "sudo pkill -9 -f 'python3.*[t]elemetry_sync' || true",
             "sudo pkill -9 -f '/opt/crypto-arb-bot/arena_go' || true",
-            "if pgrep -f lighter_go_bot >/dev/null; then sudo touch /tmp/lighter_pause.flag && for k in 1 2 3 4; do pgrep -f lighter_go_bot >/dev/null || break; sleep 1; done; sudo rm -f /tmp/lighter_pause.flag; fi",
+            "sudo pkill -15 -f '/opt/crypto-arb-bot/lighter_go_bot' || true",
+            "sleep 1",
             "sudo mv /tmp/telemetry_sync_new.py /opt/crypto-arb-bot/telemetry_sync.py && sudo chmod +x /opt/crypto-arb-bot/telemetry_sync.py",
             "sudo curl -fsSL https://github.com/Abishek17703/crypto-arb-bot/releases/download/lighter-go-latest/lighter_go_bot -o /opt/crypto-arb-bot/lighter_go_bot.tmp && sudo mv /opt/crypto-arb-bot/lighter_go_bot.tmp /opt/crypto-arb-bot/lighter_go_bot && sudo chmod +x /opt/crypto-arb-bot/lighter_go_bot",
             "sudo curl -fsSL https://github.com/Abishek17703/crypto-arb-bot/releases/download/lighter-go-latest/arena_go -o /opt/crypto-arb-bot/arena_go.tmp && sudo mv /opt/crypto-arb-bot/arena_go.tmp /opt/crypto-arb-bot/arena_go && sudo chmod +x /opt/crypto-arb-bot/arena_go",
             "sudo rm -f /tmp/lighter_trades.json /tmp/forward_arena.json",
-            "sudo touch /tmp/lighter_pause.flag && sudo /opt/crypto-arb-bot/lighter_go_bot || true",
+            "if [ -f /tmp/lighter_pause.flag ]; then sudo /opt/crypto-arb-bot/lighter_go_bot || true; fi",
             "sudo systemctl start tokyo-telemetry.service",
             "sleep 6 && sudo systemctl is-active tokyo-telemetry.service && ps aux | grep '[t]elemetry_sync'"
           ]}')

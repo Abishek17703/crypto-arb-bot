@@ -1860,18 +1860,20 @@ func fetchBnAccountMargin() (sharedAvail, usdcBal, usdtBal float64, ok bool) {
 }
 
 func setupBnUsdcMargin() bool {
-	if ooSc, ooB, ooE := bnSignReq("GET", "fapi.binance.com", "/fapi/v1/openOrders", nil); ooE == nil && ooSc == 200 {
-		var oos []struct {
-			Symbol string `json:"symbol"`
-		}
-		if json.Unmarshal(ooB, &oos) == nil {
-			canceledSyms := map[string]bool{}
-			for _, oo := range oos {
-				if oo.Symbol != "" && !canceledSyms[oo.Symbol] {
-					canceledSyms[oo.Symbol] = true
-					cp := url.Values{}
-					cp.Set("symbol", oo.Symbol)
-					_, _, _ = bnSignReq("DELETE", "fapi.binance.com", "/fapi/v1/allOpenOrders", cp)
+	if !hasAdoptedLivePositions() {
+		if ooSc, ooB, ooE := bnSignReq("GET", "fapi.binance.com", "/fapi/v1/openOrders", nil); ooE == nil && ooSc == 200 {
+			var oos []struct {
+				Symbol string `json:"symbol"`
+			}
+			if json.Unmarshal(ooB, &oos) == nil {
+				canceledSyms := map[string]bool{}
+				for _, oo := range oos {
+					if oo.Symbol != "" && !canceledSyms[oo.Symbol] {
+						canceledSyms[oo.Symbol] = true
+						cp := url.Values{}
+						cp.Set("symbol", oo.Symbol)
+						_, _, _ = bnSignReq("DELETE", "fapi.binance.com", "/fapi/v1/allOpenOrders", cp)
+					}
 				}
 			}
 		}
@@ -2907,10 +2909,14 @@ func main() {
 	go runPauseWatchdog()
 	time.Sleep(1500 * time.Millisecond)
 
-	cancelAll()
-	flattenAllLtPositionsSync("boot_flat_")
-	flattenBnDnAndSweep()
-	flattenAsterAllSync()
+	cancelAll() // Cancel resting Lighter Maker entry orders only; keep adopted hedged positions untouched!
+	if !hasAdoptedLivePositions() {
+		flattenAllLtPositionsSync("boot_flat_")
+		flattenBnDnAndSweep()
+		flattenAsterAllSync()
+	} else {
+		fmt.Println("[HOT_RELOAD] Adopted active 1:1 hedged positions seamlessly without flattening or pausing!")
+	}
 	emitBnAuditLine()
 
 	if rawPC, ePC := readPauseControlJSON(); ePC == nil && len(rawPC) > 0 {

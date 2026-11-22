@@ -16,7 +16,7 @@ import (
 )
 
 const (
-	LiveArenaVer       = "LIVE-MICRO-v105.2-PURE-CONVERGE"
+	LiveArenaVer       = "LIVE-MICRO-v105.3-HOT-RELOAD"
 	StratStopLossUSD   = -1.50 // Auto-halt individual strategy if realized+unrealized drops <= -$1.50 (~3.3x max historical $15 DD)
 	GlobalStopLossUSD  = -6.50 // Auto-flatten & S3-pause ALL live strategies at <= -$6.50 ($300.33 Perp equity floor)
 	MaxLtTxPerMin      = 48    // Strict guard below #770015 Standard 60 tx/min quota
@@ -119,6 +119,7 @@ type LiveArenaTelemetry struct {
 	Strategies       []*LiveStratAccount `json:"strategies"`
 	RecentFills      []LiveFillAudit     `json:"recentFills"`
 	MarketSpreads    []LiveSpreadSnap    `json:"marketSpreads"`
+	SlotSnapshots    []SavedSlotSnap     `json:"slotSnapshots,omitempty"`
 }
 
 type LiveSlotRuntime struct {
@@ -159,6 +160,33 @@ type LiveSlotRuntime struct {
 	ExitPlaced  time.Time
 	LastOrdPoll time.Time
 	CoolUntil   time.Time
+
+	// IDLE-Safe Rotation Queue: never swaps symbols/venues mid-position!
+	OrigPeerVenue string
+	OrigSymbols   []string
+	PendingVenue  string
+	PendingSyms   []string
+	RotatedNote   string
+}
+
+type SavedSlotSnap struct {
+	StratID      string  `json:"stratId"`
+	State        string  `json:"state"`
+	Sym          string  `json:"sym"`
+	PeerVenue    string  `json:"peerVenue"`
+	PeerSym      string  `json:"peerSym"`
+	LtSide       string  `json:"ltSide"`
+	PeerSide     string  `json:"peerSide"`
+	HedgedQty    float64 `json:"hedgedQty"`
+	EntryLtPx    float64 `json:"entryLtPx"`
+	EntryPeerPx  float64 `json:"entryPeerPx"`
+	EntryFx      float64 `json:"entryFx"`
+	EntryPeerFee float64 `json:"entryPeerFee"`
+	OpenedMs     int64   `json:"openedMs"`
+	TradeID      int64   `json:"tradeId"`
+	ExitPeerOid  int64   `json:"exitPeerOid"`
+	ExitPeerPx   float64 `json:"exitPeerPx"`
+	RotatedNote  string  `json:"rotatedNote"`
 }
 
 var (
@@ -292,17 +320,19 @@ func initLiveMicroArena() {
 			State:      "IDLE",
 		}
 		liveSlots[d.id] = &LiveSlotRuntime{
-			StratID:      d.id,
-			PeerVenue:    d.peerVenue,
-			Symbols:      d.syms,
-			ClipUsd:      d.clip,
-			ScaleMult489: d.scale489,
-			EntryDisloc:  d.entryBp,
-			ExitNetBp:    d.exitBp,
-			CancelTolBp:  2.5,
-			MaxRestSec:   35.0,
-			MaxHoldSec:   900.0,
-			State:        "IDLE",
+			StratID:       d.id,
+			PeerVenue:     d.peerVenue,
+			Symbols:       append([]string(nil), d.syms...),
+			OrigPeerVenue: d.peerVenue,
+			OrigSymbols:   append([]string(nil), d.syms...),
+			ClipUsd:       d.clip,
+			ScaleMult489:  d.scale489,
+			EntryDisloc:   d.entryBp,
+			ExitNetBp:     d.exitBp,
+			CancelTolBp:   2.5,
+			MaxRestSec:    35.0,
+			MaxHoldSec:    900.0,
+			State:         "IDLE",
 		}
 	}
 	liveMu.Unlock()
@@ -316,7 +346,7 @@ func loadLiveArenaState() {
 		return
 	}
 	var saved LiveArenaTelemetry
-	if json.Unmarshal(raw, &saved) != nil || saved.Version != LiveArenaVer || saved.BootTsMs <= 0 {
+	if json.Unmarshal(raw, &saved) != nil || !strings.HasPrefix(saved.Version, "LIVE-MICRO-v105.") || saved.BootTsMs <= 0 {
 		return
 	}
 	liveMu.Lock()
@@ -343,6 +373,63 @@ func loadLiveArenaState() {
 		dst.GrossVolumeUsd = st.GrossVolumeUsd
 		dst.Halted = st.Halted
 		dst.HaltReason = st.HaltReason
+
+		// Fallback seamless position recovery even when upgrading from v105.2 (before SlotSnapshots existed):
+		rt := liveSlots[st.ID]
+		if rt != nil && len(saved.SlotSnapshots) == 0 && len(st.PosSnap) >= 2 && (st.State == "HEDGED" || st.State == "PEER_EXIT_OPEN") {
+			var ltP, peerP LivePosView
+			for _, pv := range st.PosSnap {
+				if pv.Venue == "LT_STD" {
+					ltP = pv
+				} else {
+					peerP = pv
+				}
+			}
+			if ltP.Symbol != "" && peerP.Symbol != "" && math.Abs(ltP.Qty) > 0 {
+				rt.State = "HEDGED" // safely re-evaluates & re-rests GTX exit on boot!
+				rt.Sym = ltP.Symbol
+				rt.PeerVenue = peerP.Venue
+				rt.PeerSym = peerP.Symbol
+				rt.HedgedQty = math.Abs(ltP.Qty)
+				rt.EntryLtPx = ltP.AvgPx
+				rt.EntryPeerPx = peerP.AvgPx
+				rt.EntryFx = 1.0
+				rt.EntryPeerFee = 4.0
+				if peerP.Venue == "ASTER_RWA" {
+					rt.EntryPeerFee = 1.25
+				}
+				if ltP.Qty < 0 {
+					rt.LtSide, rt.PeerSide = "ASK", "BUY"
+				} else {
+					rt.LtSide, rt.PeerSide = "BID", "SELL"
+				}
+				rt.OpenedAt = time.UnixMilli(ltP.OpenedMs)
+				rt.TradeID = ltP.OpenedMs
+			}
+		}
+	}
+	for _, sn := range saved.SlotSnapshots {
+		rt := liveSlots[sn.StratID]
+		if rt == nil || (sn.State != "HEDGED" && sn.State != "PEER_EXIT_OPEN") || sn.HedgedQty <= 0 {
+			continue
+		}
+		rt.State = sn.State
+		rt.Sym = sn.Sym
+		rt.PeerVenue = sn.PeerVenue
+		rt.PeerSym = sn.PeerSym
+		rt.LtSide = sn.LtSide
+		rt.PeerSide = sn.PeerSide
+		rt.HedgedQty = sn.HedgedQty
+		rt.EntryLtPx = sn.EntryLtPx
+		rt.EntryPeerPx = sn.EntryPeerPx
+		rt.EntryFx = sn.EntryFx
+		rt.EntryPeerFee = sn.EntryPeerFee
+		rt.OpenedAt = time.UnixMilli(sn.OpenedMs)
+		rt.TradeID = sn.TradeID
+		rt.ExitPeerOid = sn.ExitPeerOid
+		rt.ExitPeerPx = sn.ExitPeerPx
+		rt.ExitPlaced = time.Now()
+		rt.RotatedNote = sn.RotatedNote
 	}
 	if len(saved.RecentFills) > 0 {
 		liveFills = make([]LiveFillAudit, len(saved.RecentFills))
@@ -350,7 +437,18 @@ func loadLiveArenaState() {
 			liveFills[i] = saved.RecentFills[len(saved.RecentFills)-1-i]
 		}
 	}
-	fmt.Printf("[%s] Restored live micro-arena ledger (uptime %.1fm)\n", LiveArenaVer, float64(time.Now().UnixMilli()-liveBootMs)/60000.0)
+	fmt.Printf("[%s] Hot-reloaded live micro-arena state seamlessly (uptime %.1fm)\n", LiveArenaVer, float64(time.Now().UnixMilli()-liveBootMs)/60000.0)
+}
+
+func hasAdoptedLivePositions() bool {
+	liveMu.Lock()
+	defer liveMu.Unlock()
+	for _, rt := range liveSlots {
+		if rt != nil && (rt.State == "HEDGED" || rt.State == "PEER_EXIT_OPEN") && rt.HedgedQty > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func appendLiveFillLocked(f LiveFillAudit) {
@@ -824,19 +922,20 @@ func stepLiveSlot(rt *LiveSlotRuntime, now time.Time) {
 		}
 
 		// Did Lighter Maker fill (fully or partially >= MinB)?
+		// HEDGE-FIRST (<8ms): Fire Peer Market Hedge IMMEDIATELY upon WS fill, BEFORE canceling remainder on Lighter!
 		if math.Abs(ltPos) >= m.MinB {
-			cancelLtOrderByCOISync(rt.Sym, rt.LtCOI)
-			liveMu.Lock()
-			recordLtTxLocked(now.UnixMilli())
-			liveMu.Unlock()
-			time.Sleep(180 * time.Millisecond)
-			if rp, rae := fetchLtPosREST(rt.Sym); math.Abs(rp) >= m.MinB {
-				ltPos, ltAvg = rp, rae
-			}
 			fillQty := math.Abs(ltPos)
 			if ltAvg <= 0 {
 				ltAvg = rt.LtLimitPx
 			}
+			coiToCancel := rt.LtCOI
+			symToCancel := rt.Sym
+			go func() {
+				cancelLtOrderByCOISync(symToCancel, coiToCancel)
+				liveMu.Lock()
+				recordLtTxLocked(time.Now().UnixMilli())
+				liveMu.Unlock()
+			}()
 
 			peerSym, qDec, _, step, _, minNot, _, tFeeBp, pBid, pAsk, _, _, fx, _, _, okP := getPeerSpecAndBook(rt.PeerVenue, rt.Sym, now)
 			if !okP {
@@ -1163,8 +1262,19 @@ func stepLiveSlot(rt *LiveSlotRuntime, now time.Time) {
 	}
 
 	// -------------------------------------------------------------------------
-	// STATE 0: IDLE (Scan Disjoint Symbol Bucket for Positive-Dislocation Entry)
+	// STATE 0: IDLE (Apply Pending Rotation Safely ONLY When 100% Flat & IDLE!)
 	// -------------------------------------------------------------------------
+	liveMu.Lock()
+	if len(rt.PendingSyms) > 0 && rt.State == "IDLE" && rt.HedgedQty == 0 && rt.Sym == "" {
+		rt.PeerVenue = rt.PendingVenue
+		rt.Symbols = append([]string(nil), rt.PendingSyms...)
+		rt.PendingVenue = ""
+		rt.PendingSyms = nil
+		fmt.Printf("[IDLE_SAFE_ROTATE strat=%s newVenue=%s syms=%v note=%s]\n",
+			rt.StratID, rt.PeerVenue, rt.Symbols, rt.RotatedNote)
+	}
+	liveMu.Unlock()
+
 	if halted || now.Before(rt.CoolUntil) || now.UnixMilli() < quotaCoolUntil.Load() {
 		return
 	}
@@ -1485,6 +1595,33 @@ func writeLiveArenaTelemetry(now time.Time) {
 		}
 	}
 
+	liveMu.Lock()
+	slotSnaps := make([]SavedSlotSnap, 0, len(liveStratOrder))
+	for _, id := range liveStratOrder {
+		if rt := liveSlots[id]; rt != nil {
+			slotSnaps = append(slotSnaps, SavedSlotSnap{
+				StratID:      rt.StratID,
+				State:        rt.State,
+				Sym:          rt.Sym,
+				PeerVenue:    rt.PeerVenue,
+				PeerSym:      rt.PeerSym,
+				LtSide:       rt.LtSide,
+				PeerSide:     rt.PeerSide,
+				HedgedQty:    rt.HedgedQty,
+				EntryLtPx:    rt.EntryLtPx,
+				EntryPeerPx:  rt.EntryPeerPx,
+				EntryFx:      rt.EntryFx,
+				EntryPeerFee: rt.EntryPeerFee,
+				OpenedMs:     rt.OpenedAt.UnixMilli(),
+				TradeID:      rt.TradeID,
+				ExitPeerOid:  rt.ExitPeerOid,
+				ExitPeerPx:   rt.ExitPeerPx,
+				RotatedNote:  rt.RotatedNote,
+			})
+		}
+	}
+	liveMu.Unlock()
+
 	tel := LiveArenaTelemetry{
 		Version:          LiveArenaVer,
 		BootTsMs:         liveBootMs,
@@ -1505,6 +1642,7 @@ func writeLiveArenaTelemetry(now time.Time) {
 		Strategies:       outStrats,
 		RecentFills:      revFills,
 		MarketSpreads:    spreads,
+		SlotSnapshots:    slotSnaps,
 	}
 
 	if raw, err := json.Marshal(tel); err == nil {
@@ -1518,6 +1656,51 @@ func writeLiveArenaTelemetry(now time.Time) {
 	}
 }
 
+func evaluateForwardArenaIdleSafeRotation() {
+	raw, err := os.ReadFile("/tmp/forward_arena.json")
+	if err != nil || len(raw) < 50 {
+		return
+	}
+	var fa struct {
+		UptimeHours float64 `json:"uptimeHours"`
+		Strategies  []struct {
+			ID            string  `json:"id"`
+			HourlyRunRate float64 `json:"hourlyRunRate"`
+		} `json:"strategies"`
+	}
+	if json.Unmarshal(raw, &fa) != nil || fa.UptimeHours < 2.0 {
+		return
+	}
+	hrMap := map[string]float64{}
+	for _, s := range fa.Strategies {
+		hrMap[s.ID] = s.HourlyRunRate
+	}
+	s4Hr := hrMap["S4_ASTER_LT_BN_RWA_15X"]
+	s5Hr := hrMap["S5_LT_STD_MARGIN_STRICT"]
+	s3Hr := hrMap["S3_LT_ASTER_CRYPTO_ARB"]
+	topCryptoHr := math.Max(s5Hr, s3Hr)
+
+	liveMu.Lock()
+	defer liveMu.Unlock()
+	rt4 := liveSlots["LIVE_S4_ASTER_LT_RWA"]
+	if rt4 == nil {
+		return
+	}
+	// Never swap mid-position! Queue into PendingSyms so it only applies when State == "IDLE"!
+	if s4Hr < 4.50 && topCryptoHr >= 7.00 {
+		wantSyms := []string{"KAITO", "CRV", "ETHFI", "WLFI"} // strictly disjoint from S5/S3/S2!
+		if rt4.PeerVenue != "BN_USDC" && len(rt4.PendingSyms) == 0 {
+			rt4.PendingVenue = "BN_USDC"
+			rt4.PendingSyms = wantSyms
+			rt4.RotatedNote = fmt.Sprintf("Auto-parked RWA ($%.2f/hr < $4.50) -> Crypto Boost when IDLE", s4Hr)
+		}
+	} else if s4Hr >= 5.00 && rt4.PeerVenue != rt4.OrigPeerVenue && len(rt4.PendingSyms) == 0 {
+		rt4.PendingVenue = rt4.OrigPeerVenue
+		rt4.PendingSyms = append([]string(nil), rt4.OrigSymbols...)
+		rt4.RotatedNote = fmt.Sprintf("Restored RWA Equities ($%.2f/hr >= $5.00) when IDLE", s4Hr)
+	}
+}
+
 func runLiveMicroArenaLoop() {
 	initLiveMicroArena()
 	time.Sleep(4 * time.Second)
@@ -1526,11 +1709,13 @@ func runLiveMicroArenaLoop() {
 	}
 	_, _, _ = fetchAsterAccountMargin()
 	emitBnAuditLine()
+	evaluateForwardArenaIdleSafeRotation()
 	writeLiveArenaTelemetry(time.Now())
 
 	tick := time.NewTicker(200 * time.Millisecond)
 	defer tick.Stop()
 	lastMarginPoll := time.Now()
+	lastRotCheck := time.Now()
 	lastTelWrite := time.Time{}
 
 	for {
@@ -1548,6 +1733,10 @@ func runLiveMicroArenaLoop() {
 				_, _, _, _ = fetchBnAccountMargin()
 				_, _, _ = fetchAsterAccountMargin()
 			}()
+		}
+		if now.Sub(lastRotCheck) >= 60*time.Second {
+			lastRotCheck = now
+			go evaluateForwardArenaIdleSafeRotation()
 		}
 		for _, id := range liveStratOrder {
 			if remotePaused.Load() || breakerTripped.Load() {
