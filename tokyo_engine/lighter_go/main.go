@@ -29,7 +29,7 @@ import (
 )
 
 const (
-	BotVersion = "v103.0"
+	BotVersion = "v104.0"
 	BaseURL    = "https://mainnet.zklighter.elliot.ai"
 	WsURL      = "wss://mainnet.zklighter.elliot.ai/stream"
 	AcctIdx    = int64(770015)
@@ -2348,7 +2348,7 @@ func processActiveSlot(now time.Time) {
 		}
 		curUsdtMid, curBtcMid, _, _ := leadMidAndJumps(actSp.Sym, now)
 		leadAdverse := hasAdverseLeadMove(sl.BnSide, sl.RefUsdtMid, sl.RefBtcMid, curUsdtMid, curBtcMid)
-		needCancel := leadAdverse || ltMoved || ltHedgeDepth < 60.0 || curDisloc < 5.00 || now.Sub(sl.OpenedAt) >= 8*time.Second
+		needCancel := leadAdverse || ltMoved || ltHedgeDepth < 60.0 || curNetEdge < 2.00 || curDisloc < 5.00 || now.Sub(sl.OpenedAt) >= 8*time.Second
 		status, exQ, avgP, polled, ok := queryBnOrder(actSp.BnSym, sl.EntryOid, sl.LastPoll, needCancel)
 		if polled {
 			dnMu.Lock()
@@ -2682,7 +2682,7 @@ func scanAndOpenSlot(now time.Time, sharedAvail float64, specsSnap []DnSpec, las
 			continue
 		}
 		switch sp.Sym {
-		case "BTC", "ETH", "SOL", "XRP", "BNB":
+		case "BTC", "ETH", "SOL", "XRP", "BNB", "ZEC":
 			continue
 		}
 		dnMu.Lock()
@@ -2729,7 +2729,7 @@ func scanAndOpenSlot(now time.Time, sharedAvail float64, specsSnap []DnSpec, las
 		rawEdgeA := (lb - bnBuyUsd) / bnBuyUsd * 10000.0
 		dislocA := rawEdgeA - emaBps
 		bboDislocA := ((lb - bboBuyUsd) / bboBuyUsd * 10000.0) - emaBps
-		if lbBand >= 100.0 && bboDislocA >= 5.50 && dislocA >= 6.50 && dislocA > bestDisloc {
+		if lbBand >= 100.0 && bboDislocA >= 5.50 && rawEdgeA >= 3.00 && dislocA >= 6.50 && dislocA > bestDisloc {
 			bestDisloc, bestRawEdge, bestSp, bestBnSide, bestLtSide, bestBnPx, bestLtPx, bestFx, bestUsdtMid, bestBtcMid, bestEmaBps =
 				dislocA, rawEdgeA, sp, "BUY", "ASK", bnBuyPx, lb, fx, uMid, bMid, emaBps
 		}
@@ -2742,7 +2742,7 @@ func scanAndOpenSlot(now time.Time, sharedAvail float64, specsSnap []DnSpec, las
 		rawEdgeB := (bnSellUsd - la) / bnSellUsd * 10000.0
 		dislocB := rawEdgeB + emaBps
 		bboDislocB := ((bboSellUsd - la) / bboSellUsd * 10000.0) + emaBps
-		if laBand >= 100.0 && bboDislocB >= 5.50 && dislocB >= 6.50 && dislocB > bestDisloc {
+		if laBand >= 100.0 && bboDislocB >= 5.50 && rawEdgeB >= 3.00 && dislocB >= 6.50 && dislocB > bestDisloc {
 			bestDisloc, bestRawEdge, bestSp, bestBnSide, bestLtSide, bestBnPx, bestLtPx, bestFx, bestUsdtMid, bestBtcMid, bestEmaBps =
 				dislocB, rawEdgeB, sp, "SELL", "BID", bnSellPx, la, fx, uMid, bMid, emaBps
 		}
@@ -2753,7 +2753,7 @@ func scanAndOpenSlot(now time.Time, sharedAvail float64, specsSnap []DnSpec, las
 		fmt.Printf("[DN_SCAN] best=%s bnMaker=%s->ltZeroFee=%s netAfterFee=%+.2fbp (disloc=%+.2fbp fee=0.0bp clip=$%.0f) bnPx=%.5f ltPx=%.5f\n",
 			bestSp.BnSym, bestBnSide, bestLtSide, bestRawEdge, bestDisloc, ClipUSD, bestBnPx, bestLtPx)
 	}
-	if bestSp.BnSym == "" || bestDisloc < 6.50 {
+	if bestSp.BnSym == "" || bestRawEdge < 3.00 || bestDisloc < 6.50 {
 		return
 	}
 	m := markets[bestSp.Sym]
