@@ -8,11 +8,14 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/signal"
+	"runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -23,7 +26,7 @@ const (
 	TargetHourly   = 5.00
 	ArenaOutPath   = "/tmp/forward_arena.json"
 	ArenaStatePath = "/opt/crypto-arb-bot/forward_arena_state.json"
-	ArenaVer       = "ARENA-v4.0-TOKYO-ALPHA"
+	ArenaVer       = "ARENA-v4.1-TOKYO-PERSIST"
 
 	VenueBnUsdc   = "BN_USDC"
 	VenueBnUsdt   = "BN_USDT"
@@ -432,11 +435,11 @@ func initStrategies() {
 			MaxLevCap: 14.0,
 		},
 		{
-			ID:        "S5_BN_LIQ_WICK_CATCHER",
-			Name:      "Binance ForceOrder Liquidation Cascade Absorber",
-			Desc:      "Proven 100% win rate (+$2.68/hr in v2.1)! Catches live !forceOrder@arr liquidation bursts across all 39 Binance USDC-M perps via 0%-fee Maker bids/asks.",
-			VenueDesc: "BN_USDC 0% Maker (All 39 Perps)",
-			MaxLevCap: 6.5,
+			ID:        "S5_LT_STD_MARGIN_STRICT",
+			Name:      "Margin-Strict Real-$489 Portfolio (LT Std + BN + Aster)",
+			Desc:      "Exact real-account deployable blueprint: combines top-2 winners (S2+S3) capped strictly at <=3.6x leverage ($1,750 max/side) matching our exact #770015 0%-fee account limits.",
+			VenueDesc: "LT_STD 0% + BN_USDC / ASTER (<=3.6x)",
+			MaxLevCap: 4.5,
 		},
 		{
 			ID:        "S6_FUNDING_CARRY_SCALP",
@@ -446,17 +449,17 @@ func initStrategies() {
 			MaxLevCap: 6.5,
 		},
 		{
-			ID:        "S7_ASTER_QUOTE_TWINS",
-			Name:      "Single-Account Aster RWA Quote-Twin Arb (USDT vs USD1)",
-			Desc:      "Arbs identical RWA assets across quote currencies (XAUUSDT/XAUUSD1, METAUSDT/METAUSD1, QQQUSDT/QQQUSD1, NVDAUSDT/NVDAUSD1) inside 1 Aster account (0% Maker + 1.25bp RWA Taker!).",
-			VenueDesc: "ASTER_RWA Single-Acct (3.5bp RT)",
-			MaxLevCap: 15.0,
+			ID:        "S7_HIGH_CONV_LT_STD_DN",
+			Name:      "High-Conviction >=7bp Lighter Std <-> BN USDC Arb",
+			Desc:      "Same proven 4.0bp total-fee S2 architecture, filtered strictly to >=7.0bp dislocations with larger $780 clips for higher win rate & lower drawdown.",
+			VenueDesc: "LT_STD 0% + BN_USDC (>=7bp)",
+			MaxLevCap: 7.5,
 		},
 		{
 			ID:        "S8_BN_USDC_PAIR_STATARB",
 			Name:      "0%-Maker Binance USDC-M Cointegrated Pair Stat-Arb",
-			Desc:      "Beta-neutral Z-score mean-reversion on correlated USDC-M pairs (BTC/ETH, SOL/AVAX, UNI/AAVE, NEAR/SUI, ARB/WLD, DOGE/PEPE, ENA/HYPE) via 0%-Maker entry + 4bp hedge at 10x.",
-			VenueDesc: "BN_USDC 0% Pair Pairs (10x)",
+			Desc:      "Fixed exit-order non-churn + -40bp divergence stop! Beta-neutral Z-score mean-reversion on BTC/ETH, SOL/AVAX, UNI/AAVE, NEAR/SUI, ARB/WLD, ENA/HYPE at 10x.",
+			VenueDesc: "BN_USDC 0% Pairs (-40bp SL)",
 			MaxLevCap: 10.0,
 		},
 	}
@@ -1093,11 +1096,26 @@ func runCrossVenuePairArbLocked(cfg PairArbCfg, commonQtyDec int, minBase float6
 	pendingH := hasPendingTakerLocked(cfg.StratID, cfg.HedgeVenue, cfg.HedgeSym)
 
 	if posM != nil && math.Abs(posM.Qty) > 1e-8 {
-		cancelAllMakersForSymLocked(cfg.StratID, cfg.MakerVenue, cfg.MakerSym, nowMs)
+		for _, mo := range makerOrders {
+			if mo.StratID == cfg.StratID && mo.Venue == cfg.MakerVenue && mo.Symbol == cfg.MakerSym && strings.HasPrefix(mo.Tag, "E|") && mo.CancelReqMs == 0 {
+				requestCancelMakerLocked(mo.ID, nowMs)
+			}
+		}
 		if pendingM || pendingH {
 			return
 		}
 		if posH == nil || math.Abs(posH.Qty) <= 1e-8 {
+			if math.Abs(posM.Qty)*mMid < 8.0 && nowMs-posM.OpenedMs > 900 {
+				// Auto-sweep tiny rounding dust (<$8) cleanly!
+				cSide := "SELL"
+				px := bM.Bid
+				if posM.Qty < 0 {
+					cSide = "BUY"
+					px = bM.Ask
+				}
+				placeTakerLocked(cfg.StratID, cfg.MakerVenue, cfg.MakerSym, cSide, math.Abs(posM.Qty), px, 25.0, true, cfg.StratID[:2]+"_DUST_CLOSE", nowMs)
+				return
+			}
 			if nowMs-posM.OpenedMs > 900 {
 				hSide := "BUY"
 				px := bH.Ask
@@ -1292,70 +1310,56 @@ func evalStrategiesLocked(nowMs int64) {
 	}
 
 	// ------------------------------------------------------------------------
-	// S5: Binance ForceOrder Liquidation Cascade Absorber (All 39 USDC-M Perps!)
+	// S5: Margin-Strict Real-$489.12 Portfolio (LT Std + BN_USDC / ASTER_C)
+	// Hard-capped <= $1,750 per side (max 2-3 pairs) matching #770015 margins!
 	// ------------------------------------------------------------------------
-	s5Acct := strats["S5_BN_LIQ_WICK_CATCHER"]
-	for uSym, bs := range bnUsdcSpecs {
-		bc := books[bookKey(VenueBnUsdc, uSym)]
-		if bc == nil || bc.Bid <= 0 || bc.Ask <= bc.Bid || nowMs-bc.UpdatedMs > 2000 {
+	for _, sym := range s1Syms {
+		sp := ltSpecs[sym]
+		if sp == nil || sp.BnUsdcSym == "" {
 			continue
 		}
-		midC := 0.5 * (bc.Bid + bc.Ask)
-		pos := s5Acct.Positions[posKey(VenueBnUsdc, uSym)]
-		if pos != nil && math.Abs(pos.Qty) > 1e-8 {
-			upnlBp := 0.0
-			if pos.Qty > 0 {
-				upnlBp = ((midC - pos.AvgPx) / pos.AvgPx) * 10000.0
-			} else {
-				upnlBp = ((pos.AvgPx - midC) / pos.AvgPx) * 10000.0
-			}
-			if upnlBp <= -22.0 || nowMs-pos.OpenedMs > 45000 {
-				cancelAllMakersForSymLocked("S5_BN_LIQ_WICK_CATCHER", VenueBnUsdc, uSym, nowMs)
-				closeSide := "SELL"
-				px := bc.Bid
-				if pos.Qty < 0 {
-					closeSide = "BUY"
-					px = bc.Ask
-				}
-				placeTakerLocked("S5_BN_LIQ_WICK_CATCHER", VenueBnUsdc, uSym, closeSide, math.Abs(pos.Qty), px, 20.0, true, "S5_STOP_EXIT", nowMs)
-				stratCoolMap["S5:"+uSym] = nowMs + 15000
-				continue
-			}
-			if pos.Qty > 0 {
-				tpPx := ceilTo(math.Max(bc.Ask, pos.AvgPx*1.0009), bs.PriceDec)
-				cancelStaleOrRefreshMakerLocked("S5_BN_LIQ_WICK_CATCHER", VenueBnUsdc, uSym, "SELL", tpPx, math.Abs(pos.Qty), 1.5, true, "S5_BOUNCE_TP", 15000, nowMs)
-			} else {
-				tpPx := floorTo(math.Min(bc.Bid, pos.AvgPx*0.9991), bs.PriceDec)
-				cancelStaleOrRefreshMakerLocked("S5_BN_LIQ_WICK_CATCHER", VenueBnUsdc, uSym, "BUY", tpPx, math.Abs(pos.Qty), 1.5, true, "S5_BOUNCE_TP", 15000, nowMs)
-			}
+		dec := sp.SizeDecimals
+		if sp.BnQtyDec < dec {
+			dec = sp.BnQtyDec
+		}
+		runCrossVenuePairArbLocked(PairArbCfg{
+			StratID:       "S5_LT_STD_MARGIN_STRICT",
+			MakerVenue:    VenueLtStd,
+			MakerSym:      sym,
+			HedgeVenue:    VenueBnUsdc,
+			HedgeSym:      sp.BnUsdcSym,
+			SlotUsd:       550.0,
+			EntryDislocBp: 5.5,
+			NetTargetBp:   2.3,
+			MaxHoldMs:     900000,
+			CancelTolBp:   2.5,
+			MaxAgeMs:      45000,
+		}, dec, sp.MinBase, nowMs)
+	}
+	for _, sym := range []string{"VVV", "XMR", "LIT"} {
+		sp := ltSpecs[sym]
+		as := asterSpecs[sym+"USDT"]
+		if sp == nil || as == nil {
 			continue
 		}
-
-		if nowMs < stratCoolMap["S5:"+uSym] {
-			continue
+		dec := sp.SizeDecimals
+		if as.QtyDec < dec {
+			dec = as.QtyDec
 		}
-		liq := liqRecent[bs.UsdtSym]
-		if liq == nil {
-			liq = liqRecent[uSym]
-		}
-		ret2500, okR := midReturnBpLocked(bookKey(VenueBnUsdc, uSym), 2500, nowMs)
-		hasLiq := liq != nil && (nowMs-liq.TsMs <= 4500) && liq.Usd >= 3500
-		if !okR {
-			continue
-		}
-		qty := roundTo(600.0/midC, bs.QtyDec)
-		if qty*midC < 15.0 {
-			continue
-		}
-		if (hasLiq && liq.Side == "SELL" && ret2500 <= -10.0) || ret2500 <= -17.0 {
-			catchBid := floorTo(bc.Bid*(1.0-0.00015), bs.PriceDec)
-			cancelStaleOrRefreshMakerLocked("S5_BN_LIQ_WICK_CATCHER", VenueBnUsdc, uSym, "BUY", catchBid, qty, 2.0, false, "S5_CATCH_DUMP", 4000, nowMs)
-		} else if (hasLiq && liq.Side == "BUY" && ret2500 >= 10.0) || ret2500 >= 17.0 {
-			catchAsk := ceilTo(bc.Ask*(1.0+0.00015), bs.PriceDec)
-			cancelStaleOrRefreshMakerLocked("S5_BN_LIQ_WICK_CATCHER", VenueBnUsdc, uSym, "SELL", catchAsk, qty, 2.0, false, "S5_CATCH_PUMP", 4000, nowMs)
-		} else {
-			cancelAllMakersForSymLocked("S5_BN_LIQ_WICK_CATCHER", VenueBnUsdc, uSym, nowMs)
-		}
+		runCrossVenuePairArbLocked(PairArbCfg{
+			StratID:       "S5_LT_STD_MARGIN_STRICT",
+			MakerVenue:    VenueLtStd,
+			MakerSym:      sym,
+			HedgeVenue:    VenueAsterC,
+			HedgeSym:      sym + "USDT",
+			SlotUsd:       520.0,
+			EntryDislocBp: 6.2,
+			NetTargetBp:   2.4,
+			MaxHoldMs:     900000,
+			CancelTolBp:   2.5,
+			MaxAgeMs:      45000,
+			FxAdjHedge:    true,
+		}, dec, sp.MinBase, nowMs)
 	}
 
 	// ------------------------------------------------------------------------
@@ -1403,44 +1407,34 @@ func evalStrategiesLocked(nowMs int64) {
 	}
 
 	// ------------------------------------------------------------------------
-	// S7: Single-Account Aster RWA Quote-Twin Arb (USDT vs USD1!)
-	// Total 4-leg fee inside Aster RWA = 0 + 1.25 + 0 + 1.25 = ONLY 2.50bp!
+	// S7: High-Conviction >=7.0bp Lighter Std <-> BN USDC-M Arb ($780 clips)
 	// ------------------------------------------------------------------------
-	s7Twins := [][2]string{
-		{"XAUUSD1", "XAUUSDT"},
-		{"METAUSD1", "METAUSDT"},
-		{"QQQUSD1", "QQQUSDT"},
-		{"NVDAUSD1", "NVDAUSDT"},
-		{"XAGUSD1", "XAGUSDT"},
-	}
-	for _, pr := range s7Twins {
-		sA, sB := pr[0], pr[1]
-		asA, asB := asterSpecs[sA], asterSpecs[sB]
-		if asA == nil || asB == nil {
+	for _, sym := range s1Syms {
+		sp := ltSpecs[sym]
+		if sp == nil || sp.BnUsdcSym == "" {
 			continue
 		}
-		dec := asA.QtyDec
-		if asB.QtyDec < dec {
-			dec = asB.QtyDec
+		dec := sp.SizeDecimals
+		if sp.BnQtyDec < dec {
+			dec = sp.BnQtyDec
 		}
 		runCrossVenuePairArbLocked(PairArbCfg{
-			StratID:       "S7_ASTER_QUOTE_TWINS",
-			MakerVenue:    VenueAsterRWA,
-			MakerSym:      sA,
-			HedgeVenue:    VenueAsterRWA,
-			HedgeSym:      sB,
-			SlotUsd:       1200.0,
-			EntryDislocBp: 4.0,
-			NetTargetBp:   1.8,
+			StratID:       "S7_HIGH_CONV_LT_STD_DN",
+			MakerVenue:    VenueLtStd,
+			MakerSym:      sym,
+			HedgeVenue:    VenueBnUsdc,
+			HedgeSym:      sp.BnUsdcSym,
+			SlotUsd:       780.0,
+			EntryDislocBp: 7.0,
+			NetTargetBp:   2.5,
 			MaxHoldMs:     900000,
-			CancelTolBp:   1.2,
-			MaxAgeMs:      25000,
-		}, dec, 0.001, nowMs)
+			CancelTolBp:   2.5,
+			MaxAgeMs:      45000,
+		}, dec, sp.MinBase, nowMs)
 	}
 
 	// ------------------------------------------------------------------------
-	// S8: 0%-Maker Binance USDC-M Cointegrated Pair Stat-Arb (BTC/ETH, SOL/AVAX, UNI/AAVE, NEAR/SUI, ARB/WLD, ENA/HYPE)
-	// Single-venue USDC-M: 0% Maker in -> 4bp hedge -> 0% Maker out -> 4bp close = 8.0bp RT
+	// S8: 0%-Maker Binance USDC-M Cointegrated Pair Stat-Arb (Fixed Exit + -40bp SL!)
 	// ------------------------------------------------------------------------
 	s8Pairs := [][2]string{
 		{"BTCUSDC", "ETHUSDC"},
@@ -1478,7 +1472,12 @@ func evalStrategiesLocked(nowMs int64) {
 		pendB := hasPendingTakerLocked("S8_BN_USDC_PAIR_STATARB", VenueBnUsdc, sB)
 
 		if posA != nil && math.Abs(posA.Qty) > 1e-8 {
-			cancelAllMakersForSymLocked("S8_BN_USDC_PAIR_STATARB", VenueBnUsdc, sA, nowMs)
+			// Cancel ONLY entry orders on sA — NEVER cancel our X| exit Maker order!
+			for _, mo := range makerOrders {
+				if mo.StratID == "S8_BN_USDC_PAIR_STATARB" && mo.Venue == VenueBnUsdc && mo.Symbol == sA && strings.HasPrefix(mo.Tag, "E|") && mo.CancelReqMs == 0 {
+					requestCancelMakerLocked(mo.ID, nowMs)
+				}
+			}
 			if pendA || pendB || posB == nil || math.Abs(posB.Qty) <= 1e-8 {
 				continue
 			}
@@ -1495,8 +1494,23 @@ func evalStrategiesLocked(nowMs int64) {
 				pnlUsd += math.Abs(posB.Qty) * (posB.AvgPx - bB.Ask)
 			}
 			pnlBp := (pnlUsd / math.Max(legUsd, 1.0)) * 10000.0
+			if pnlBp <= -40.0 {
+				// Correlation-break emergency Taker flatten of both legs!
+				cancelAllMakersForSymLocked("S8_BN_USDC_PAIR_STATARB", VenueBnUsdc, sA, nowMs)
+				cSideA, pxA := "SELL", bA.Bid
+				if posA.Qty < 0 {
+					cSideA, pxA = "BUY", bA.Ask
+				}
+				cSideB, pxB := "SELL", bB.Bid
+				if posB.Qty < 0 {
+					cSideB, pxB = "BUY", bB.Ask
+				}
+				placeTakerLocked("S8_BN_USDC_PAIR_STATARB", VenueBnUsdc, sA, cSideA, math.Abs(posA.Qty), pxA, 20.0, true, "S8_SL_A", nowMs)
+				placeTakerLocked("S8_BN_USDC_PAIR_STATARB", VenueBnUsdc, sB, cSideB, math.Abs(posB.Qty), pxB, 20.0, true, "S8_SL_B", nowMs)
+				stratCoolMap["S8:"+pk] = nowMs + 60000
+				continue
+			}
 			if pnlBp >= 10.5 || (nowMs-posA.OpenedMs > 900000 && pnlBp >= 4.5) {
-				// Exit via 0%-Maker on A -> automatic DM close on B!
 				exitTag := "X|" + VenueBnUsdc + "|" + sB + "|DM"
 				if posA.Qty > 0 {
 					cancelStaleOrRefreshMakerLocked("S8_BN_USDC_PAIR_STATARB", VenueBnUsdc, sA, "SELL", bA.Ask, math.Abs(posA.Qty), 1.5, true, exitTag, 15000, nowMs)
@@ -1504,7 +1518,7 @@ func evalStrategiesLocked(nowMs int64) {
 					cancelStaleOrRefreshMakerLocked("S8_BN_USDC_PAIR_STATARB", VenueBnUsdc, sA, "BUY", bA.Bid, math.Abs(posA.Qty), 1.5, true, exitTag, 15000, nowMs)
 				}
 			} else {
-				cancelAllMakersForSymLocked("S8_BN_USDC_PAIR_STATARB", VenueBnUsdc, sB, nowMs)
+				cancelAllMakersForSymLocked("S8_BN_USDC_PAIR_STATARB", VenueBnUsdc, sA, nowMs)
 			}
 			continue
 		}
@@ -1520,6 +1534,9 @@ func evalStrategiesLocked(nowMs int64) {
 			continue
 		}
 
+		if nowMs < stratCoolMap["S8:"+pk] {
+			continue
+		}
 		qtyA := roundTo(900.0/midA, bsA.QtyDec)
 		if qtyA*midA < 25.0 {
 			continue
@@ -1713,13 +1730,74 @@ func updateMarkToMarketAndWriteTelemetry() {
 	}
 
 	raw, err := json.Marshal(tel)
+	shouldSaveState := (nowMs - lastStateSaveMs) >= 10000
+	if shouldSaveState && err == nil {
+		lastStateSaveMs = nowMs
+	}
 	mu.Unlock()
 	if err == nil {
 		tmp := ArenaOutPath + ".tmp"
 		if os.WriteFile(tmp, raw, 0644) == nil {
 			_ = os.Rename(tmp, ArenaOutPath)
 		}
+		if shouldSaveState {
+			stTmp := ArenaStatePath + ".tmp"
+			if os.WriteFile(stTmp, raw, 0644) == nil {
+				_ = os.Rename(stTmp, ArenaStatePath)
+			}
+		}
 	}
+}
+
+var lastStateSaveMs int64
+
+func loadCheckpoint() {
+	raw, err := os.ReadFile(ArenaStatePath)
+	if err != nil {
+		return
+	}
+	var tel ArenaTelemetry
+	if json.Unmarshal(raw, &tel) != nil || tel.Version != ArenaVer || tel.BootTsMs <= 0 {
+		return
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	bootMs = tel.BootTsMs
+	for _, saved := range tel.Strategies {
+		s := strats[saved.ID]
+		if s == nil {
+			continue
+		}
+		s.Cash = saved.Cash
+		s.RealizedGross = saved.RealizedGross
+		s.FeesPaid = saved.FeesPaid
+		s.FundingUsd = saved.FundingUsd
+		s.UnrealizedPnL = saved.UnrealizedPnL
+		s.Equity = saved.Equity
+		s.PeakEquity = saved.PeakEquity
+		s.MaxDrawdownUsd = saved.MaxDrawdownUsd
+		s.MakerPlaced = saved.MakerPlaced
+		s.MakerCancelled = saved.MakerCancelled
+		s.MakerFills = saved.MakerFills
+		s.PickoffFills = saved.PickoffFills
+		s.TakerFills = saved.TakerFills
+		s.RoundTrips = saved.RoundTrips
+		s.WinTrips = saved.WinTrips
+		s.GrossVolumeUsd = saved.GrossVolumeUsd
+		s.EquityCurve = saved.EquityCurve
+		s.Positions = map[string]*Position{}
+		for _, p := range saved.PosSnap {
+			pc := p
+			s.Positions[posKey(p.Venue, p.Symbol)] = &pc
+		}
+	}
+	if len(tel.RecentFills) > 0 {
+		recentFills = make([]FillAudit, len(tel.RecentFills))
+		for i := range tel.RecentFills {
+			recentFills[i] = tel.RecentFills[len(tel.RecentFills)-1-i]
+		}
+	}
+	fmt.Printf("[%s] Restored live checkpoint from %s (uptime %.1fm)\n", ArenaVer, ArenaStatePath, float64(time.Now().UnixMilli()-bootMs)/60000.0)
 }
 
 // ============================================================================
@@ -2596,16 +2674,29 @@ func runAsterAggTradeWS() {
 }
 
 func main() {
+	debug.SetMemoryLimit(240 << 20) // Hard 240 MiB ceiling so Tokyo EC2 never OOM-kills arena_go
+	debug.SetGCPercent(40)
+
 	for _, k := range []string{"ltBook", "ltTrade", "bnBook", "bnTrade", "bnLiq", "hlMids", "asterBook", "asterTrade"} {
 		feedCounters[k] = &atomic.Int64{}
 	}
 	initStrategies()
+	loadCheckpoint()
 	for attempt := 0; attempt < 10; attempt++ {
 		if err := loadMarketSpecs(); err == nil && len(ltSpecs) > 0 {
 			break
 		}
 		time.Sleep(2 * time.Second)
 	}
+
+	sigCh := make(chan os.Signal, 2)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		<-sigCh
+		lastStateSaveMs = 0
+		updateMarkToMarketAndWriteTelemetry()
+		os.Exit(0)
+	}()
 
 	go runFundingPoller()
 	go runLighterWS()
