@@ -18,7 +18,7 @@ import (
 )
 
 const (
-	LiveArenaVer       = "LIVE-MICRO-v106.0-CLEAN-EPOCH"
+	LiveArenaVer       = "LIVE-MICRO-v106.1-RADAR-FIX"
 	Baseline3VenueUSD  = 223.8805 // 100% Flat Clean-Epoch 3-venue baseline ($91.3605 LT + $82.4512 BN Perp + $50.0688 Aster)
 	StratStopLossUSD   = -1.50    // Auto-halt individual strategy if realized+unrealized drops <= -$1.50
 	GlobalStopLossUSD  = -6.50    // Auto-flatten & S3-pause ALL live strategies at <= -$6.50 ($217.38 true Perp floor)

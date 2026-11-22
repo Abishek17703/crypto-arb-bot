@@ -856,29 +856,21 @@ func runLtWS() {
 		wsMu.Lock()
 		ltConn = conn
 		subbedMids = map[int64]bool{}
+		wantActiveSyms := []string{
+			"BTC", "ETH", "SOL",
+			"UNI", "HYPE", "ENA", "NEAR", "SUI", "ARB",
+			"VVV", "XMR", "LIT",
+			"NVDA", "AAPL", "TSLA", "QQQ", "SPY", "META", "COIN", "MSTR",
+			"AAVE", "AVAX", "WLD", "LINK", "DOGE", "XRP", "TIA", "PENGU", "TRUMP",
+			"KAITO", "CRV", "ETHFI", "WLFI",
+		}
 		var midsToSub []int64
-		for _, sp := range dnSnap {
-			if sp.Quote == "USDC" {
-				if m, ok := markets[sp.Sym]; ok && !subbedMids[m.ID] {
-					subbedMids[m.ID] = true
-					midsToSub = append(midsToSub, m.ID)
-				}
-			}
-		}
-		for _, base := range []string{"BTC", "ETH", "SOL"} {
-			if m, ok := markets[base]; ok && !subbedMids[m.ID] {
+		for _, sym := range wantActiveSyms {
+			if m, ok := markets[sym]; ok && !subbedMids[m.ID] {
 				subbedMids[m.ID] = true
 				midsToSub = append(midsToSub, m.ID)
 			}
 		}
-		asterMu.Lock()
-		for _, asp := range asterSpecs {
-			if m, ok := markets[asp.Sym]; ok && !subbedMids[m.ID] {
-				subbedMids[m.ID] = true
-				midsToSub = append(midsToSub, m.ID)
-			}
-		}
-		asterMu.Unlock()
 		wsMu.Unlock()
 
 		for _, st := range mktStates {
@@ -890,21 +882,28 @@ func runLtWS() {
 			st.lastBookTS = time.Time{}
 			st.mu.Unlock()
 		}
-		for _, mid := range midsToSub {
-			wsMu.Lock()
-			if ltConn == conn {
-				_ = conn.WriteJSON(map[string]any{"type": "subscribe", "channel": fmt.Sprintf("order_book/%d", mid)})
+		// Subscribe in background so ReadMessage() starts immediately and consumes every initial snapshot + ping!
+		go func(c *websocket.Conn, ids []int64) {
+			for _, mid := range ids {
+				wsMu.Lock()
+				alive := (ltConn == c)
+				if alive {
+					_ = c.WriteJSON(map[string]any{"type": "subscribe", "channel": fmt.Sprintf("order_book/%d", mid)})
+				}
+				wsMu.Unlock()
+				if !alive {
+					return
+				}
+				time.Sleep(12 * time.Millisecond)
 			}
-			wsMu.Unlock()
-			time.Sleep(12 * time.Millisecond) // CRITICAL 12ms pacing: prevents Lighter WS snapshot drops & ghost levels!
-		}
-		if tok, err := txCli.GetAuthToken(time.Now().Add(6 * time.Hour)); err == nil {
-			wsMu.Lock()
-			if ltConn == conn {
-				_ = conn.WriteJSON(map[string]any{"type": "subscribe", "channel": fmt.Sprintf("account_all/%d", AcctIdx), "auth": tok})
+			if tok, err := txCli.GetAuthToken(time.Now().Add(6 * time.Hour)); err == nil {
+				wsMu.Lock()
+				if ltConn == c {
+					_ = c.WriteJSON(map[string]any{"type": "subscribe", "channel": fmt.Sprintf("account_all/%d", AcctIdx), "auth": tok})
+				}
+				wsMu.Unlock()
 			}
-			wsMu.Unlock()
-		}
+		}(conn, midsToSub)
 
 		for {
 			_, msg, err := conn.ReadMessage()
@@ -943,6 +942,14 @@ func runLtWS() {
 				} `json:"order_book"`
 			}
 			if json.Unmarshal(msg, &m) != nil {
+				continue
+			}
+			if m.Type == "ping" {
+				wsMu.Lock()
+				if ltConn == conn {
+					_ = conn.WriteJSON(map[string]string{"type": "pong"})
+				}
+				wsMu.Unlock()
 				continue
 			}
 			if strings.HasPrefix(m.Channel, "account_all:") {
