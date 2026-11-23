@@ -1473,6 +1473,7 @@ func evaluateForwardWinnerAndTiers() {
 		refNow = time.Now().UnixMilli()
 	}
 	bestID, bestName, bestHr, bestPF, bestDD := "", "", -1e9, 0.0, 999.0
+	curFwdHr := 0.0
 	var bestTrips int64
 	bestAgeMin := 0.0
 	for _, s := range fa.Strategies {
@@ -1482,6 +1483,9 @@ func evaluateForwardWinnerAndTiers() {
 		hr := s.Rolling45mHourly
 		if hr == 0 {
 			hr = s.HourlyRunRate
+		}
+		if s.ID == activePreset.ForwardID {
+			curFwdHr = hr
 		}
 		ageM := fa.UptimeHours * 60.0
 		if s.StratBootMs > 0 {
@@ -1499,14 +1503,19 @@ func evaluateForwardWinnerAndTiers() {
 		liveAcct.Forward45mHr = roundTo(bestHr, 2)
 		liveAcct.ForwardPF = roundTo(bestPF, 2)
 		liveAcct.ForwardTrips = bestTrips
-		allIdle := true
+		allIdle, restingLt := true, false
 		for _, sl := range liveSlots {
 			if sl != nil && sl.State != "IDLE" {
 				allIdle = false
-				break
+				if sl.State == "LT_ENTRY_OPEN" {
+					restingLt = true
+				}
 			}
 		}
-		if allIdle && (lastPresetSwitchMs == 0 || nowMs-lastPresetSwitchMs >= 45*60*1000) && bestID != activePreset.ForwardID {
+		negSwitch := curFwdHr < 0 && !restingLt
+		schedSwitch := allIdle && (lastPresetSwitchMs == 0 || nowMs-lastPresetSwitchMs >= 45*60*1000)
+		if (negSwitch || schedSwitch) && bestID != activePreset.ForwardID {
+			oldID := activePreset.ForwardID
 			activePreset = bnPresets[bestID]
 			liveAcct.ID = bestID
 			liveAcct.ForwardStratID = bestID
@@ -1517,7 +1526,7 @@ func evaluateForwardWinnerAndTiers() {
 			}
 			liveAcct.RotatedNote = activePreset.Label
 			lastPresetSwitchMs = nowMs
-			fmt.Printf("[AUTO_SELECT_WINNER preset=%s fwd45=$%+.2f/hr PF=%.2f trips=%d]\n", bestID, bestHr, bestPF, bestTrips)
+			fmt.Printf("[AUTO_SELECT_WINNER old=%s(%.2f/hr) -> preset=%s fwd45=$%+.2f/hr PF=%.2f trips=%d negSwitch=%v]\n", oldID, curFwdHr, bestID, bestHr, bestPF, bestTrips, negSwitch)
 		}
 	}
 	if liveAcct.Halted {
