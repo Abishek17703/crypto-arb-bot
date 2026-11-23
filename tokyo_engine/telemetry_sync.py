@@ -643,6 +643,11 @@ def main():
     write_flag(init_paused)
     if init_paused:
         stop_go_bot_gracefully()
+        try:
+            with open(LOG_PATH, "a", encoding="utf-8", errors="replace") as lf:
+                subprocess.run([LIGHTER_GO_BIN], stdout=lf, stderr=subprocess.STDOUT, timeout=20)
+        except Exception:
+            pass
     else:
         threading.Thread(target=boot_go_bot, args=(state,), daemon=True).start()
 
