@@ -522,6 +522,13 @@ func initStrategies() {
 			MaxLevCap: 3.0,
 		},
 		{
+			ID:        "S2_LT_BN_FAST_ROTATE",
+			Name:      "0% Lighter Maker -> BN USDC-M Fast Rotate (4.00bp Fee)",
+			Desc:      "0% Lighter #770015 Maker (>=6.5bp positive raw spread) -> BN USDC-M hedge -> 0% BN Maker exit with 6m step-down & 15m time-stop.",
+			VenueDesc: "LT_STD 0% M + BN_USDC 0% M Exit",
+			MaxLevCap: 3.0,
+		},
+		{
 			ID:        "S9_PURE_CROSSED_TAKER",
 			Name:      "Pure Crossed-Book Taker Grab (BN_USDC >= +8.5bp)",
 			Desc:      "Fires instant 0% Lighter IOC + <8ms BN USDC-M Taker ONLY when true raw crossed spread >= +8.5bp (>=+4.5bp net locked at entry!).",
@@ -1836,6 +1843,25 @@ func evalStrategiesLocked(nowMs int64) {
 		if sp.BnQtyDec < dec {
 			dec = sp.BnQtyDec
 		}
+		runCrossVenuePairArbLocked(PairArbCfg{
+			StratID:         "S2_LT_BN_FAST_ROTATE",
+			MakerVenue:      VenueLtStd,
+			MakerSym:        sym,
+			HedgeVenue:      VenueBnUsdc,
+			HedgeSym:        sp.BnUsdcSym,
+			SlotUsd:         240.0,
+			MaxOpenPairs:    3,
+			MinRawEdgeBp:    2.5,
+			EntryDislocBp:   6.5,
+			NetTargetBp:     2.5,
+			DecayAfterMs:    360000,
+			MaxHoldMs:       900000,
+			StopLossBp:      75.0,
+			MinPeerDepthMul: 2.5,
+			CancelTolBp:     2.5,
+			MaxAgeMs:        30000,
+		}, dec, sp.MinBase, nowMs)
+
 		runCrossVenuePairArbLocked(PairArbCfg{
 			StratID:         "S7_BN_HIGH_CONV_RAW",
 			MakerVenue:      VenueLtStd,

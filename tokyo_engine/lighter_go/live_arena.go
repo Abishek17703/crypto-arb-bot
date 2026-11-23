@@ -315,122 +315,6 @@ func applyTierClipLocked(acct *LiveStratAccount) {
 		return
 	}
 
-	// -------------------------------------------------------------------------
-	// STATE E2: LT_SNIPE_OPEN (Pure 0.00bp-Fee Lighter #770015 25s Momentum-Lag Scalp!)
-	// -------------------------------------------------------------------------
-	if rt.State == "LT_SNIPE_OPEN" {
-		m := markets[rt.Sym]
-		var lb, la, ltPos float64
-		if st := mktStates[rt.Sym]; st != nil {
-			st.mu.Lock()
-			lb, la, ltPos = st.ltBid, st.ltAsk, st.pos
-			st.mu.Unlock()
-		}
-		if lb <= 0 || la <= lb {
-			lb, la = fetchLtBookREST(m.ID)
-		}
-		if lb <= 0 || la <= lb {
-			return
-		}
-		holdS := now.Sub(rt.OpenedAt).Seconds()
-		var mark, pnlBp float64
-		if rt.LtSide == "BID" {
-			mark = lb
-			pnlBp = ((mark - rt.EntryLtPx) / rt.EntryLtPx) * 10000.0
-		} else {
-			mark = la
-			pnlBp = ((rt.EntryLtPx - mark) / rt.EntryLtPx) * 10000.0
-		}
-		tpBp := rt.ExitNetBp
-		if holdS >= 10.0 {
-			tpBp = 1.2
-		}
-		if halted || pnlBp >= tpBp || holdS >= rt.MaxHoldSec || pnlBp <= -7.5 {
-			closeStartMs := time.Now().UnixMilli()
-			expPos := rt.HedgedQty
-			if rt.LtSide == "ASK" {
-				expPos = -rt.HedgedQty
-			}
-			if math.Abs(ltPos) >= m.MinB {
-				expPos = ltPos
-			}
-			ltExitPx, ltLatMs := closeLtLegGuaranteedSync(rt.Sym, expPos, lb, la)
-			if ltExitPx <= 0 {
-				ltExitPx = mark
-			}
-			qty := rt.HedgedQty
-			ltGross := (ltExitPx - rt.EntryLtPx) * qty
-			if rt.LtSide == "ASK" {
-				ltGross = (rt.EntryLtPx - ltExitPx) * qty
-			}
-			time.Sleep(220 * time.Millisecond)
-			if exPx, exPnl, okEx := fetchExactLtCloseTrade(rt.Sym, closeStartMs); okEx {
-				ltExitPx = exPx
-				ltGross = exPnl
-			}
-			notional := qty * rt.EntryLtPx
-			netBps := 0.0
-			if notional > 0 {
-				netBps = (ltGross / notional) * 10000.0
-			}
-			closeSide := "SELL"
-			if rt.LtSide == "ASK" {
-				closeSide = "BUY"
-			}
-			reason := "E2_0FEE_SNIPE_TP"
-			if pnlBp <= -7.5 {
-				reason = "E2_0FEE_SNIPE_SL"
-			} else if holdS >= rt.MaxHoldSec && pnlBp < tpBp {
-				reason = "E2_0FEE_SNIPE_TIME"
-			}
-			nowMs := time.Now().UnixMilli()
-			closedSym := rt.Sym
-			liveMu.Lock()
-			acct.TakerFills++
-			acct.RoundTrips++
-			acct.RealizedGross = roundTo(acct.RealizedGross+ltGross, 4)
-			acct.Cash = roundTo(acct.StartCash+acct.RealizedGross-acct.FeesPaid+acct.FundingUsd, 4)
-			acct.GrossVolumeUsd = roundTo(acct.GrossVolumeUsd+notional, 2)
-			if ltGross > 0 {
-				acct.WinTrips++
-				acct.GrossWinUsd = roundTo(acct.GrossWinUsd+ltGross, 4)
-			} else if ltGross < 0 {
-				acct.GrossLossUsd = roundTo(acct.GrossLossUsd+math.Abs(ltGross), 4)
-			}
-			acct.RecentTripPnls = append(acct.RecentTripPnls, roundTo(ltGross, 4))
-			if len(acct.RecentTripPnls) > 12 {
-				acct.RecentTripPnls = append([]float64(nil), acct.RecentTripPnls[len(acct.RecentTripPnls)-12:]...)
-			}
-			if acct.GrossLossUsd > 1e-6 {
-				acct.ProfitFactor = roundTo(acct.GrossWinUsd/acct.GrossLossUsd, 2)
-			} else if acct.GrossWinUsd > 0 {
-				acct.ProfitFactor = 99.0
-			}
-			appendLiveFillLocked(LiveFillAudit{
-				TsMs:      nowMs,
-				StratID:   rt.StratID,
-				Venue:     "LT_STD",
-				Symbol:    closedSym,
-				Side:      closeSide,
-				ExecType:  "LT_IOC_CLOSE",
-				FillPx:    ltExitPx,
-				SignalPx:  mark,
-				Qty:       qty,
-				Notional:  roundTo(notional, 2),
-				FeeUsd:    0.0,
-				Realized:  roundTo(ltGross, 4),
-				LatencyMs: ltLatMs,
-				Tag:       reason,
-			})
-			rt.State = "IDLE"
-			rt.Sym = ""
-			rt.HedgedQty = 0
-			rt.CoolUntil = time.Now().Add(6 * time.Second)
-			liveMu.Unlock()
-			recordStratClose(rt.TradeID, rt.StratID, "PURE_LT_"+closedSym, closedSym, notional, holdS, netBps, ltGross, 0, ltGross, 0, reason)
-		}
-		return
-	}
 	acct.TierLabel = tierLabelFor(acct.Tier, acct.Tier3ClipUsd)
 	switch acct.Tier {
 	case 1:
@@ -569,6 +453,22 @@ func initLiveMicroArena() {
 			decaySec:     480.0,
 			maxHoldSec:   1200.0,
 			syms:         []string{"ETH", "SOL", "BNB", "UNI", "HYPE", "ENA", "NEAR", "WLD", "AAVE", "SUI", "ARB", "AVAX", "LINK", "DOGE", "XRP"},
+		},
+		{
+			id:           "LIVE_S2_LT_BN_FAST_ROTATE",
+			forwardID:    "S2_LT_BN_FAST_ROTATE",
+			name:         "S2: 0% Lighter Maker -> BN USDC-M Fast Rotate (4.00bp Fee)",
+			venueDesc:    "LT #770015 0% M -> BN USDC-M (Fast 6m Step-Down)",
+			desc:         "0% Lighter Maker (>=6.5bp positive raw spread) -> <8ms BN USDC-M hedge -> 0% BN Maker exit.",
+			peerVenue:    "BN_USDC",
+			tier3Clip:    55.0,
+			startCash:    50.0,
+			minRawEdgeBp: 2.5,
+			entryBp:      6.5,
+			exitBp:       2.5,
+			decaySec:     360.0,
+			maxHoldSec:   900.0,
+			syms:         []string{"ETH", "SOL", "BNB", "UNI", "HYPE", "ENA", "NEAR", "WLD", "AAVE", "SUI", "ARB", "AVAX", "TRUMP", "TIA", "CRV", "ETHFI", "LINK", "DOGE", "XRP"},
 		},
 		{
 			id:           "LIVE_S9_PURE_CROSSED_GRAB",
@@ -1429,6 +1329,123 @@ func stepLiveSlot(rt *LiveSlotRuntime, now time.Time) {
 	clipUsd := rt.ClipUsd
 	liveMu.Unlock()
 	if acct == nil {
+		return
+	}
+
+	// -------------------------------------------------------------------------
+	// STATE E2: LT_SNIPE_OPEN (Pure 0.00bp-Fee Lighter #770015 25s Momentum-Lag Scalp!)
+	// -------------------------------------------------------------------------
+	if rt.State == "LT_SNIPE_OPEN" {
+		m := markets[rt.Sym]
+		var lb, la, ltPos float64
+		if st := mktStates[rt.Sym]; st != nil {
+			st.mu.Lock()
+			lb, la, ltPos = st.ltBid, st.ltAsk, st.pos
+			st.mu.Unlock()
+		}
+		if lb <= 0 || la <= lb {
+			lb, la = fetchLtBookREST(m.ID)
+		}
+		if lb <= 0 || la <= lb {
+			return
+		}
+		holdS := now.Sub(rt.OpenedAt).Seconds()
+		var mark, pnlBp float64
+		if rt.LtSide == "BID" {
+			mark = lb
+			pnlBp = ((mark - rt.EntryLtPx) / rt.EntryLtPx) * 10000.0
+		} else {
+			mark = la
+			pnlBp = ((rt.EntryLtPx - mark) / rt.EntryLtPx) * 10000.0
+		}
+		tpBp := rt.ExitNetBp
+		if holdS >= 10.0 {
+			tpBp = 1.2
+		}
+		if halted || pnlBp >= tpBp || holdS >= rt.MaxHoldSec || pnlBp <= -7.5 {
+			closeStartMs := time.Now().UnixMilli()
+			expPos := rt.HedgedQty
+			if rt.LtSide == "ASK" {
+				expPos = -rt.HedgedQty
+			}
+			if math.Abs(ltPos) >= m.MinB {
+				expPos = ltPos
+			}
+			ltExitPx, ltLatMs := closeLtLegGuaranteedSync(rt.Sym, expPos, lb, la)
+			if ltExitPx <= 0 {
+				ltExitPx = mark
+			}
+			qty := rt.HedgedQty
+			ltGross := (ltExitPx - rt.EntryLtPx) * qty
+			if rt.LtSide == "ASK" {
+				ltGross = (rt.EntryLtPx - ltExitPx) * qty
+			}
+			time.Sleep(220 * time.Millisecond)
+			if exPx, exPnl, okEx := fetchExactLtCloseTrade(rt.Sym, closeStartMs); okEx {
+				ltExitPx = exPx
+				ltGross = exPnl
+			}
+			notional := qty * rt.EntryLtPx
+			netBps := 0.0
+			if notional > 0 {
+				netBps = (ltGross / notional) * 10000.0
+			}
+			closeSide := "SELL"
+			if rt.LtSide == "ASK" {
+				closeSide = "BUY"
+			}
+			reason := "E2_0FEE_SNIPE_TP"
+			if pnlBp <= -7.5 {
+				reason = "E2_0FEE_SNIPE_SL"
+			} else if holdS >= rt.MaxHoldSec && pnlBp < tpBp {
+				reason = "E2_0FEE_SNIPE_TIME"
+			}
+			nowMs := time.Now().UnixMilli()
+			closedSym := rt.Sym
+			liveMu.Lock()
+			acct.TakerFills++
+			acct.RoundTrips++
+			acct.RealizedGross = roundTo(acct.RealizedGross+ltGross, 4)
+			acct.Cash = roundTo(acct.StartCash+acct.RealizedGross-acct.FeesPaid+acct.FundingUsd, 4)
+			acct.GrossVolumeUsd = roundTo(acct.GrossVolumeUsd+notional, 2)
+			if ltGross > 0 {
+				acct.WinTrips++
+				acct.GrossWinUsd = roundTo(acct.GrossWinUsd+ltGross, 4)
+			} else if ltGross < 0 {
+				acct.GrossLossUsd = roundTo(acct.GrossLossUsd+math.Abs(ltGross), 4)
+			}
+			acct.RecentTripPnls = append(acct.RecentTripPnls, roundTo(ltGross, 4))
+			if len(acct.RecentTripPnls) > 12 {
+				acct.RecentTripPnls = append([]float64(nil), acct.RecentTripPnls[len(acct.RecentTripPnls)-12:]...)
+			}
+			if acct.GrossLossUsd > 1e-6 {
+				acct.ProfitFactor = roundTo(acct.GrossWinUsd/acct.GrossLossUsd, 2)
+			} else if acct.GrossWinUsd > 0 {
+				acct.ProfitFactor = 99.0
+			}
+			appendLiveFillLocked(LiveFillAudit{
+				TsMs:      nowMs,
+				StratID:   rt.StratID,
+				Venue:     "LT_STD",
+				Symbol:    closedSym,
+				Side:      closeSide,
+				ExecType:  "LT_IOC_CLOSE",
+				FillPx:    ltExitPx,
+				SignalPx:  mark,
+				Qty:       qty,
+				Notional:  roundTo(notional, 2),
+				FeeUsd:    0.0,
+				Realized:  roundTo(ltGross, 4),
+				LatencyMs: ltLatMs,
+				Tag:       reason,
+			})
+			rt.State = "IDLE"
+			rt.Sym = ""
+			rt.HedgedQty = 0
+			rt.CoolUntil = time.Now().Add(6 * time.Second)
+			liveMu.Unlock()
+			recordStratClose(rt.TradeID, rt.StratID, "PURE_LT_"+closedSym, closedSym, notional, holdS, netBps, ltGross, 0, ltGross, 0, reason)
+		}
 		return
 	}
 
