@@ -63,6 +63,7 @@ type LiveEqPoint struct {
 type LiveStratAccount struct {
 	ID              string        `json:"id"`
 	ForwardStratID  string        `json:"forwardStratId"`
+	SecondStratID   string        `json:"secondStratId,omitempty"`
 	Name            string        `json:"name"`
 	Desc            string        `json:"desc"`
 	VenueDesc       string        `json:"venueDesc"`
@@ -228,6 +229,7 @@ var (
 	lastLiveSaveMs        int64
 	lastPresetSwitchMs    int64
 	activePreset          StratPreset
+	secondPreset          StratPreset
 	dynamic3VenueBaseline = Baseline3VenueUSD
 	liveWakeCh            = make(chan struct{}, 1)
 	liveInitDone          atomic.Bool
@@ -922,8 +924,25 @@ func refreshSlotLtBBO(sl *SimpleSlot) (float64, float64) {
 	return lb, la
 }
 
+func slotPresetAndClip(idx, tier int, baseClip float64) (StratPreset, float64) {
+	if tier < 2 || secondPreset.ForwardID == "" || secondPreset.ForwardID == activePreset.ForwardID {
+		return activePreset, baseClip
+	}
+	if tier == 2 {
+		if idx == 1 {
+			return secondPreset, roundTo(baseClip*0.8, 0) // 40% to #2 ($36)
+		}
+		return activePreset, roundTo(baseClip*1.2, 0) // 60% to #1 ($54)
+	}
+	if idx == 2 {
+		return secondPreset, baseClip // 33% to #2 (1x $75)
+	}
+	return activePreset, baseClip // 67% to #1 (2x $75)
+}
+
 func stepSimpleSlot(sl *SimpleSlot, now time.Time) {
-	maxSlots, clipUsd, _ := tierSpec(liveAcct.Tier)
+	maxSlots, baseClip, _ := tierSpec(liveAcct.Tier)
+	preset, clipUsd := slotPresetAndClip(sl.Idx, liveAcct.Tier, baseClip)
 	halted := liveAcct.Halted || liveAcct.Tier <= 0
 
 	// 1. STATE: LT_ENTRY_OPEN (Max 1 resting 0% PostOnly order across entire bot)
@@ -1069,7 +1088,7 @@ func stepSimpleSlot(sl *SimpleSlot, now time.Time) {
 			if refBbo > 0 {
 				driftBp = math.Abs(sl.LtLimitPx-refBbo) / refBbo * 10000.0
 			}
-			if curDisloc < activePreset.EntryDisloc-2.2 || driftBp > 2.0 || math.Abs(jumpBps) > 2.5 {
+			if curDisloc < preset.EntryDisloc-2.2 || driftBp > 2.0 || math.Abs(jumpBps) > 2.5 {
 				shouldCancel = true
 			}
 		}
@@ -1113,13 +1132,13 @@ func stepSimpleSlot(sl *SimpleSlot, now time.Time) {
 			}
 			return
 		}
-		reqNetBp := activePreset.ExitNetBp
+		reqNetBp := preset.ExitNetBp
 		if halted {
 			reqNetBp = 0.15
-		} else if holdS >= activePreset.MaxHoldSec {
+		} else if holdS >= preset.MaxHoldSec {
 			reqNetBp = 0.30
-		} else if holdS >= activePreset.DecaySec {
-			reqNetBp = math.Max(0.8, activePreset.ExitNetBp-1.2)
+		} else if holdS >= preset.DecaySec {
+			reqNetBp = math.Max(0.8, preset.ExitNetBp-1.2)
 		}
 		if combNetBp >= reqNetBp && math.Abs(jumpBps) <= 2.0 {
 			if rb, ra := fetchLtBookREST(markets[sl.Sym].ID); rb > 0 && ra > rb {
@@ -1175,7 +1194,7 @@ func stepSimpleSlot(sl *SimpleSlot, now time.Time) {
 			curNetBp = (((sl.EntryPeerPx-sl.ExitPeerPx)*fx)+(lb-sl.EntryLtPx))/sl.EntryLtPx*10000.0 - 4.0
 		}
 		minKeep := 0.50
-		if now.Sub(sl.OpenedAt).Seconds() >= activePreset.MaxHoldSec {
+		if now.Sub(sl.OpenedAt).Seconds() >= preset.MaxHoldSec {
 			minKeep = 0.0
 		}
 		if liveAcct.Halted || curNetBp < minKeep || now.Sub(sl.ExitPlaced) >= 20*time.Second {
@@ -1225,12 +1244,12 @@ func stepSimpleSlot(sl *SimpleSlot, now time.Time) {
 		return
 	}
 
-	// Mode A: Pure Crossed-Book Grab (when activePreset.TakerGrabBp > 0)
-	if activePreset.TakerGrabBp > 0 {
+	// Mode A: Pure Crossed-Book Grab (when preset.TakerGrabBp > 0)
+	if preset.TakerGrabBp > 0 {
 		gSym, gBnSym, gLtSide, gBnSide := "", "", "", ""
 		gCross, gSigPx, gQty, gStep, gFx := -999.0, 0.0, 0.0, 0.0, 1.0
 		gQDec := 0
-		for _, sym := range activePreset.Symbols {
+		for _, sym := range preset.Symbols {
 			if symUsedInSlots(sym, sl.Idx) {
 				continue
 			}
@@ -1259,10 +1278,10 @@ func stepSimpleSlot(sl *SimpleSlot, now time.Time) {
 			if qty < m.MinB || qty*ltMid < math.Max(10.5, minNot) {
 				continue
 			}
-			if cs := ((lb - pAsk*fx) / (pAsk * fx)) * 10000.0; cs >= activePreset.TakerGrabBp && cs > gCross && bnTopDepthUsd(bnSym, "BUY") >= clipUsd*2.5 {
+			if cs := ((lb - pAsk*fx) / (pAsk * fx)) * 10000.0; cs >= preset.TakerGrabBp && cs > gCross && bnTopDepthUsd(bnSym, "BUY") >= clipUsd*2.5 {
 				gCross, gSym, gBnSym, gLtSide, gBnSide, gSigPx, gQty, gStep, gQDec, gFx = cs, sym, bnSym, "ASK", "BUY", lb, qty, step, qDec, fx
 			}
-			if cl := ((pBid*fx - la) / (pBid * fx)) * 10000.0; cl >= activePreset.TakerGrabBp && cl > gCross && bnTopDepthUsd(bnSym, "SELL") >= clipUsd*2.5 {
+			if cl := ((pBid*fx - la) / (pBid * fx)) * 10000.0; cl >= preset.TakerGrabBp && cl > gCross && bnTopDepthUsd(bnSym, "SELL") >= clipUsd*2.5 {
 				gCross, gSym, gBnSym, gLtSide, gBnSide, gSigPx, gQty, gStep, gQDec, gFx = cl, sym, bnSym, "BID", "SELL", la, qty, step, qDec, fx
 			}
 		}
@@ -1280,12 +1299,12 @@ func stepSimpleSlot(sl *SimpleSlot, now time.Time) {
 		}
 		iocPx, bnSig := roundTo(ra*1.0012, m.PxDec), pBidC
 		if gLtSide == "ASK" {
-			if ((rb-pAskC*fxC)/(pAskC*fxC))*10000.0 < activePreset.TakerGrabBp {
+			if ((rb-pAskC*fxC)/(pAskC*fxC))*10000.0 < preset.TakerGrabBp {
 				return
 			}
 			gSigPx, bnSig, iocPx = rb, pAskC, roundTo(rb*0.9988, m.PxDec)
 		} else {
-			if ((pBidC*fxC-ra)/(pBidC*fxC))*10000.0 < activePreset.TakerGrabBp {
+			if ((pBidC*fxC-ra)/(pBidC*fxC))*10000.0 < preset.TakerGrabBp {
 				return
 			}
 			gSigPx = ra
@@ -1363,8 +1382,8 @@ func stepSimpleSlot(sl *SimpleSlot, now time.Time) {
 	}
 	bSym, bBnSym, bLtSide, bBnSide := "", "", "", ""
 	bDisloc, bLtPx, bQty := -999.0, 0.0, 0.0
-	minRaw := 4.0 + math.Max(activePreset.MinRawEdgeBp, 2.0)
-	for _, sym := range activePreset.Symbols {
+	minRaw := 4.0 + math.Max(preset.MinRawEdgeBp, 2.0)
+	for _, sym := range preset.Symbols {
 		if symUsedInSlots(sym, sl.Idx) {
 			continue
 		}
@@ -1394,11 +1413,11 @@ func stepSimpleSlot(sl *SimpleSlot, now time.Time) {
 			continue
 		}
 		rawS := ((la - pAsk*fx) / (pAsk * fx)) * 10000.0
-		if rawS >= minRaw && (rawS >= activePreset.EntryDisloc || rawS-emaBps >= activePreset.EntryDisloc) && rawS > bDisloc && bnTopDepthUsd(bnSym, "BUY") >= clipUsd*2.5 {
+		if rawS >= minRaw && (rawS >= preset.EntryDisloc || rawS-emaBps >= preset.EntryDisloc) && rawS > bDisloc && bnTopDepthUsd(bnSym, "BUY") >= clipUsd*2.5 {
 			bDisloc, bSym, bBnSym, bLtSide, bBnSide, bLtPx, bQty = rawS, sym, bnSym, "ASK", "BUY", la, qty
 		}
 		rawL := ((pBid*fx - lb) / (pBid * fx)) * 10000.0
-		if rawL >= minRaw && (rawL >= activePreset.EntryDisloc || rawL+emaBps >= activePreset.EntryDisloc) && rawL > bDisloc && bnTopDepthUsd(bnSym, "SELL") >= clipUsd*2.5 {
+		if rawL >= minRaw && (rawL >= preset.EntryDisloc || rawL+emaBps >= preset.EntryDisloc) && rawL > bDisloc && bnTopDepthUsd(bnSym, "SELL") >= clipUsd*2.5 {
 			bDisloc, bSym, bBnSym, bLtSide, bBnSide, bLtPx, bQty = rawL, sym, bnSym, "BID", "SELL", lb, qty
 		}
 	}
@@ -1441,7 +1460,7 @@ func stepSimpleSlot(sl *SimpleSlot, now time.Time) {
 	sl.State, sl.Sym, sl.PeerSym, sl.LtSide, sl.PeerSide = "LT_ENTRY_OPEN", bSym, bBnSym, bLtSide, bBnSide
 	sl.LtCOI, sl.LtLimitPx, sl.PlacedAt, sl.LastOrdPoll, sl.CancelSent = coi, bLtPx, time.Now(), time.Now(), false
 	liveMu.Unlock()
-	fmt.Printf("[LIVE_QUOTE slot=%d preset=%s sym=%s lt=%s qty=%.4f @ %.5f raw=%+.2fbp]\n", sl.Idx, activePreset.ForwardID, bSym, bLtSide, bQty, bLtPx, bDisloc)
+	fmt.Printf("[LIVE_QUOTE slot=%d preset=%s sym=%s lt=%s qty=%.4f @ %.5f raw=%+.2fbp]\n", sl.Idx, preset.ForwardID, bSym, bLtSide, bQty, bLtPx, bDisloc)
 }
 
 // ---------- 45-Min Forward Lab Auto-Selector & Tier Auto-Scaler ----------
@@ -1473,6 +1492,7 @@ func evaluateForwardWinnerAndTiers() {
 		refNow = time.Now().UnixMilli()
 	}
 	bestID, bestName, bestHr, bestPF, bestDD := "", "", -1e9, 0.0, 999.0
+	secID, secHr := "", -1e9
 	curFwdHr := 0.0
 	var bestTrips int64
 	bestAgeMin := 0.0
@@ -1491,8 +1511,15 @@ func evaluateForwardWinnerAndTiers() {
 		if s.StratBootMs > 0 {
 			ageM = float64(refNow-s.StratBootMs) / 60000.0
 		}
-		if ageM >= 45.0 && hr >= 2.0 && s.ProfitFactor >= 1.40 && s.RoundTrips >= 5 && s.MaxDrawdownUsd < 40.0 && hr > bestHr {
-			bestID, bestName, bestHr, bestPF, bestDD, bestTrips, bestAgeMin = s.ID, s.Name, hr, s.ProfitFactor, s.MaxDrawdownUsd, s.RoundTrips, ageM
+		if ageM >= 45.0 && hr >= 2.0 && s.ProfitFactor >= 1.40 && s.RoundTrips >= 5 && s.MaxDrawdownUsd < 40.0 {
+			if hr > bestHr {
+				if bestID != "" && bestHr > secHr {
+					secID, secHr = bestID, bestHr
+				}
+				bestID, bestName, bestHr, bestPF, bestDD, bestTrips, bestAgeMin = s.ID, s.Name, hr, s.ProfitFactor, s.MaxDrawdownUsd, s.RoundTrips, ageM
+			} else if s.ID != bestID && hr > secHr {
+				secID, secHr = s.ID, hr
+			}
 		}
 	}
 
@@ -1524,10 +1551,30 @@ func evaluateForwardWinnerAndTiers() {
 			} else {
 				liveAcct.Name = activePreset.Label
 			}
-			liveAcct.RotatedNote = activePreset.Label
 			lastPresetSwitchMs = nowMs
 			fmt.Printf("[AUTO_SELECT_WINNER old=%s(%.2f/hr) -> preset=%s fwd45=$%+.2f/hr PF=%.2f trips=%d negSwitch=%v]\n", oldID, curFwdHr, bestID, bestHr, bestPF, bestTrips, negSwitch)
 		}
+	}
+	// Weighted 2-strategy split at Tier 2+ (60/40 at T2, 67/33 at T3) whenever a 2nd 45m+ profitable strategy qualifies:
+	splitID := secID
+	if (splitID == "" || splitID == activePreset.ForwardID) && bestID != "" && bestID != activePreset.ForwardID {
+		splitID = bestID
+	}
+	if splitID != "" && splitID != activePreset.ForwardID {
+		secondPreset = bnPresets[splitID]
+		liveAcct.SecondStratID = splitID
+	} else {
+		secondPreset = StratPreset{}
+		liveAcct.SecondStratID = ""
+	}
+	if liveAcct.Tier >= 2 && secondPreset.ForwardID != "" {
+		w1, w2 := 67, 33
+		if liveAcct.Tier == 2 {
+			w1, w2 = 60, 40
+		}
+		liveAcct.RotatedNote = fmt.Sprintf("Weighted Split: %s (%d%%) + %s (%d%%)", activePreset.ForwardID, w1, secondPreset.ForwardID, w2)
+	} else {
+		liveAcct.RotatedNote = activePreset.Label
 	}
 	if liveAcct.Halted {
 		return
