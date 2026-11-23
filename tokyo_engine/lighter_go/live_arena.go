@@ -367,26 +367,11 @@ func initLiveMicroArena() {
 		syms           []string
 	}{
 		{
-			id:             "LIVE_S10_BN_MAKER_FIRST",
-			forwardID:      "S10_BN_USDC_MAKER_FIRST",
-			name:           "S10: 0% BN USDC-M Maker -> 0% Lighter IOC (#1 Leader)",
-			venueDesc:      "BN USDC-M 0% GTX -> LT #770015 0% IOC (0.00bp 4-Leg Fee!)",
-			desc:           "Primary Slot #1: Rests 0% GTX Maker on BN USDC-M (>=5.0bp positive raw spread) -> 0% Lighter IOC hedge (850ms fallback) -> 0% BN Maker exit.",
-			peerVenue:      "BN_USDC",
-			peerMakerFirst: true,
-			tier3Clip:      55.0,
-			startCash:      60.0,
-			minRawEdgeBp:   5.0,
-			entryBp:        5.0,
-			exitBp:         2.5,
-			syms:           []string{"UNI", "HYPE", "ENA", "NEAR", "WLD", "AAVE", "SUI", "ARB", "AVAX", "TRUMP", "TIA", "CRV", "ETHFI", "LINK", "DOGE", "XRP"},
-		},
-		{
 			id:           "LIVE_S7_BN_HIGH_CONV",
 			forwardID:    "S7_BN_HIGH_CONV_RAW",
 			name:         "S7: High-Conviction >=8.5bp Raw Spread (LT <-> BN USDC-M)",
 			venueDesc:    "LT #770015 0% M -> BN USDC-M (4.00bp Fee, Zero FX Drift)",
-			desc:         "Primary Slot #2: 0% Lighter Maker (>=8.5bp positive raw spread) -> <8ms BN USDC-M hedge -> 0% BN Maker exit.",
+			desc:         "Primary Slot #1: 0% Lighter Maker (>=8.5bp positive raw spread) -> <8ms BN USDC-M hedge -> 0% BN Maker exit.",
 			peerVenue:    "BN_USDC",
 			tier3Clip:    55.0,
 			startCash:    60.0,
@@ -400,7 +385,7 @@ func initLiveMicroArena() {
 			forwardID:    "S9_PURE_CROSSED_TAKER",
 			name:         "S9: Pure Crossed-Book Taker Grab (Bid_A - Ask_B >= +8.5bp)",
 			venueDesc:    "LT #770015 0% IOC <-> BN USDC-M (+4.5bp Locked at Entry!)",
-			desc:         "Burst Slot #3: Fires 0% Lighter IOC + <8ms BN USDC-M hedge ONLY when true crossed book >= +8.5bp -> 0% BN Maker exit.",
+			desc:         "Burst Slot #2: Fires 0% Lighter IOC + <8ms BN USDC-M hedge ONLY when true crossed book >= +8.5bp -> 0% BN Maker exit.",
 			peerVenue:    "BN_USDC",
 			tier3Clip:    50.0,
 			startCash:    50.0,
@@ -415,7 +400,7 @@ func initLiveMicroArena() {
 			forwardID:    "S2_LT_BN_FAST_ROTATE",
 			name:         "S2: 0% Lighter Maker -> BN USDC-M Fast Rotate (4.00bp Fee)",
 			venueDesc:    "LT #770015 0% M -> BN USDC-M (Fast 6m Step-Down)",
-			desc:         "Slot #4: 0% Lighter Maker (>=6.5bp positive raw spread) -> <8ms BN USDC-M hedge -> 0% BN Maker exit.",
+			desc:         "Fast Slot #3: 0% Lighter Maker (>=6.5bp positive raw spread) -> <8ms BN USDC-M hedge -> 0% BN Maker exit.",
 			peerVenue:    "BN_USDC",
 			tier3Clip:    55.0,
 			startCash:    50.0,
@@ -1012,7 +997,12 @@ func closeLtLegGuaranteedSync(sym string, expectedPos float64, lb, la float64) (
 
 func fetchExactLtCloseTrade(sym string, minTsMs int64) (vwapPx, realPnl float64, found bool) {
 	hc := &http.Client{Timeout: 3 * time.Second}
-	u := fmt.Sprintf("%s/api/v1/trades?account_index=%d&limit=15&sort_by=timestamp", BaseURL, AcctIdx)
+	u := fmt.Sprintf("%s/api/v1/trades?account_index=%d&limit=20&sort_by=timestamp", BaseURL, AcctIdx)
+	if txCli != nil {
+		if tok, eTok := txCli.GetAuthToken(time.Now().Add(10 * time.Minute)); eTok == nil && tok != "" {
+			u += "&auth=" + url.QueryEscape(tok)
+		}
+	}
 	resp, err := ltGet(hc, u)
 	if err != nil {
 		return 0, 0, false
@@ -2109,7 +2099,7 @@ func stepLiveSlot(rt *LiveSlotRuntime, now time.Time) {
 		iocCOI, iocSent := placeLtHedgeIOC(gSym, gLtSide, iocLimitPx, gQty, false)
 		var ltPos, ltAvg float64
 		if iocSent {
-			ltPos, ltAvg = waitLtPositionFill(gSym, iocCOI, m.MinB, 1800*time.Millisecond)
+			ltPos, ltAvg = waitLtPositionFill(gSym, iocCOI, m.MinB, 4500*time.Millisecond)
 		}
 		ltIocLatMs := time.Since(tIoc0).Milliseconds()
 		if math.Abs(ltPos) < m.MinB {
@@ -2946,8 +2936,8 @@ func evaluateForwardArenaIdleSafeRotation() {
 
 		switch acct.Tier {
 		case 0:
-			// Tier 0 -> Tier 1 ($12 Micro): 45m+ Forward Lab uptime, Total Equity $/hr >= $5.00, PF >= 1.35, >= 5 Trips, MaxDD < $6.00
-			if fa.UptimeHours >= 0.75 && fs.hr45 >= 5.00 && fs.pf >= 1.35 && fs.trips >= 5 && fs.maxDD < 6.00 && dwellMin >= 15.0 {
+			// Tier 0 -> Tier 1 ($12 Micro): 45m+ Forward Lab uptime, Closed $/hr >= $2.50, PF >= 1.50, >= 5 Trips, MaxDD < $6.00
+			if fa.UptimeHours >= 0.75 && fs.hr45 >= 2.50 && fs.pf >= 1.50 && fs.trips >= 5 && fs.maxDD < 6.00 {
 				acct.Tier = 1
 				acct.StratActiveMs = nowMs
 				acct.TierChangedMs = nowMs

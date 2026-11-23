@@ -1984,7 +1984,13 @@ func fetchLtTradeFillByCOI(sym string, coi int64) (signedQty, vwapPx float64, fo
 	if coi <= 0 {
 		return 0, 0, false
 	}
-	resp, err := ltGet(txHTTP, fmt.Sprintf("%s/api/v1/trades?account_index=%d&limit=20&sort_by=timestamp", BaseURL, AcctIdx))
+	u := fmt.Sprintf("%s/api/v1/trades?account_index=%d&limit=25&sort_by=timestamp", BaseURL, AcctIdx)
+	if txCli != nil {
+		if tok, eTok := txCli.GetAuthToken(time.Now().Add(10 * time.Minute)); eTok == nil && tok != "" {
+			u += "&auth=" + url.QueryEscape(tok)
+		}
+	}
+	resp, err := ltGet(txHTTP, u)
 	if err != nil {
 		return 0, 0, false
 	}

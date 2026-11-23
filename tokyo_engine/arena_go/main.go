@@ -487,13 +487,6 @@ func l2TopDepthUsdLocked(venue, sym, side string) float64 {
 func initStrategies() {
 	defs := []*StrategyAccount{
 		{
-			ID:        "S10_BN_USDC_MAKER_FIRST",
-			Name:      "0% BN USDC-M Maker -> 0% Lighter IOC (#1 Leader, 0bp Fee)",
-			Desc:      "Rests 0% GTX Maker on liquid BN USDC-M (>=5.0bp positive raw spread) -> 0% Lighter #770015 IOC hedge -> 0% BN Maker exit (true 0.00bp 4-leg fee!).",
-			VenueDesc: "BN_USDC 0% M -> LT_STD 0% IOC",
-			MaxLevCap: 3.0,
-		},
-		{
 			ID:        "S9_PURE_CROSSED_TAKER",
 			Name:      "Pure Crossed-Book Taker Grab (Bid_A - Ask_B >= +8.5bp)",
 			Desc:      "Fires instant 0% Lighter IOC + <8ms BN USDC-M Taker ONLY when true raw crossed spread >= +8.5bp (>=+4.5bp net locked at entry! 3x $240 slots).",
@@ -1602,28 +1595,7 @@ func evalStrategiesLocked(nowMs int64) {
 			dec = sp.BnQtyDec
 		}
 
-		// 1. S10: 0% BN USDC-M GTX Maker -> 0% Lighter IOC Hedge -> 0% BN Maker Exit (0.00bp 4-leg fee!)
-		runCrossVenuePairArbLocked(PairArbCfg{
-			StratID:         "S10_BN_USDC_MAKER_FIRST",
-			MakerVenue:      VenueBnUsdc,
-			MakerSym:        sp.BnUsdcSym,
-			HedgeVenue:      VenueLtStd,
-			HedgeSym:        sym,
-			SlotUsd:         240.0,
-			MaxOpenPairs:    3,
-			MinRawEdgeBp:    5.0,
-			EntryDislocBp:   5.0,
-			NetTargetBp:     2.5,
-			DecayAfterMs:    480000,
-			MaxHoldMs:       900000,
-			StopLossBp:      75.0,
-			MinPeerDepthMul: 2.5,
-			ExitOnMaker:     true,
-			CancelTolBp:     1.5,
-			MaxAgeMs:        20000,
-		}, dec, sp.MinBase, nowMs)
-
-		// 2. S9: Pure Crossed-Book Taker Grab (Bid_A - Ask_B >= +8.5bp -> >= +4.5bp Net Locked at Entry!)
+		// 1. S9: Pure Crossed-Book Taker Grab (Bid_A - Ask_B >= +8.5bp -> >= +4.5bp Net Locked at Entry!)
 		runCrossVenuePairArbLocked(PairArbCfg{
 			StratID:         "S9_PURE_CROSSED_TAKER",
 			MakerVenue:      VenueLtStd,
