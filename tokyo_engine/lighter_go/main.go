@@ -1867,7 +1867,61 @@ func fetchBnAccountMargin() (sharedAvail, usdcBal, usdtBal float64, ok bool) {
 	return sharedAvail, usdcBal, usdtBal, true
 }
 
+func transferAllSpotStableToFutures() bool {
+	sc, body, err := bnSignReq("GET", "api.binance.com", "/api/v3/account", nil)
+	if err != nil || sc != 200 {
+		fmt.Printf("[SPOT_ACCT_SKIP sc=%d err=%v]\n", sc, err)
+		return false
+	}
+	var spot struct {
+		Balances []struct {
+			Asset string `json:"asset"`
+			Free  string `json:"free"`
+		} `json:"balances"`
+	}
+	if json.Unmarshal(body, &spot) != nil {
+		return false
+	}
+	moved := false
+	for _, b := range spot.Balances {
+		if b.Asset != "USDC" && b.Asset != "USDT" {
+			continue
+		}
+		freeVal, _ := strconv.ParseFloat(b.Free, 64)
+		amt := math.Floor(freeVal*100.0) / 100.0
+		if amt < 1.0 {
+			continue
+		}
+		amtStr := strconv.FormatFloat(amt, 'f', 2, 64)
+		tp := url.Values{}
+		tp.Set("type", "MAIN_UMFUTURE")
+		tp.Set("asset", b.Asset)
+		tp.Set("amount", amtStr)
+		tSc, tBody, tErr := bnSignReq("POST", "api.binance.com", "/sapi/v1/asset/transfer", tp)
+		fmt.Printf("[SPOT_TO_FUTURES asset=%s amt=%s sc=%d err=%v body=%s]\n", b.Asset, amtStr, tSc, tErr, string(tBody))
+		if tErr == nil && tSc == 200 {
+			moved = true
+			continue
+		}
+		if b.Asset == "USDT" {
+			fp := url.Values{}
+			fp.Set("asset", "USDT")
+			fp.Set("amount", amtStr)
+			fp.Set("type", "1")
+			fSc, fBody, fErr := bnSignReq("POST", "api.binance.com", "/fapi/v1/futures/transfer", fp)
+			fmt.Printf("[SPOT_TO_FUTURES_FAPI asset=USDT amt=%s sc=%d err=%v body=%s]\n", amtStr, fSc, fErr, string(fBody))
+			if fErr == nil && fSc == 200 {
+				moved = true
+			}
+		}
+	}
+	return moved
+}
+
 func setupBnUsdcMargin() bool {
+	if transferAllSpotStableToFutures() {
+		time.Sleep(800 * time.Millisecond)
+	}
 	if !hasAdoptedLivePositions() {
 		if ooSc, ooB, ooE := bnSignReq("GET", "fapi.binance.com", "/fapi/v1/openOrders", nil); ooE == nil && ooSc == 200 {
 			var oos []struct {

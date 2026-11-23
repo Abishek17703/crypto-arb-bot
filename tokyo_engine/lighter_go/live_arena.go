@@ -19,10 +19,10 @@ import (
 
 const (
 	LiveArenaVer         = "LIVE-v108.3-PARITY"
-	Baseline3VenueUSD    = 222.8400 // Exact 100% Flat 3-venue Perp cash ($90.20 LT + $82.50 BN Perp + $50.14 Aster; Spot $264.73 untouched!)
+	Baseline3VenueUSD    = 222.8400 // Initial 3-venue Perp cash before Spot -> Futures move
 	MaxDemoteDrawdownUSD = 8.00     // -$8.00 Total-Equity Max Drawdown demotes strategy back to Tier 0 (Forward Testing Only)
-	GlobalStopLossUSD    = -8.00    // -$8.00 ($214.90 true Perp floor) global 3-wallet circuit breaker
-	MaxLtTxPerMin        = 48       // Strict guard below #770015 Standard 60 tx/min quota
+	GlobalStopLossUSD    = -8.00    // -$8.00 dynamic 3-wallet circuit breaker
+	MaxLtTxPerMin        = 52       // Guard below #770015 Standard 60 tx/min quota
 )
 
 type LivePosView struct {
@@ -241,16 +241,17 @@ type SavedSlotSnap struct {
 }
 
 var (
-	liveMu           sync.Mutex
-	liveBootMs       = time.Now().UnixMilli()
-	liveStrats       = map[string]*LiveStratAccount{}
-	liveStratOrder   = []string{}
-	liveSlots        = map[string]*LiveSlotRuntime{} // key: SlotKey (e.g. StratID+":0", StratID+":1")
-	liveSlotKeys     = []string{}
-	liveFills        = []LiveFillAudit{}
-	ltTxTimesMs      = []int64{}
-	lastLiveSaveMs   int64
-	liveInitDone     atomic.Bool
+	liveMu                sync.Mutex
+	liveBootMs            = time.Now().UnixMilli()
+	liveStrats            = map[string]*LiveStratAccount{}
+	liveStratOrder        = []string{}
+	liveSlots             = map[string]*LiveSlotRuntime{} // key: SlotKey (e.g. StratID+":0", StratID+":1")
+	liveSlotKeys          = []string{}
+	liveFills             = []LiveFillAudit{}
+	ltTxTimesMs           = []int64{}
+	lastLiveSaveMs        int64
+	dynamic3VenueBaseline = Baseline3VenueUSD
+	liveInitDone          atomic.Bool
 )
 
 func canSendLtTxLocked(nowMs int64, isUrgentClose bool) bool {
@@ -300,9 +301,9 @@ func wakeAllLiveSlots() {
 func tierLabelFor(tier int, t3Clip float64) string {
 	switch tier {
 	case 1:
-		return "Tier 1: Micro (1x $12)"
+		return "Tier 1: Micro (1x $20)"
 	case 2:
-		return "Tier 2: Medium (2x $25)"
+		return "Tier 2: Medium (2x $45)"
 	case 3:
 		return fmt.Sprintf("Tier 3: Full Safe (2x $%.0f)", t3Clip)
 	default:
@@ -318,9 +319,9 @@ func applyTierClipLocked(acct *LiveStratAccount) {
 	acct.TierLabel = tierLabelFor(acct.Tier, acct.Tier3ClipUsd)
 	switch acct.Tier {
 	case 1:
-		acct.ClipUsd = 12.0 // Unlocks all 16 coins (UNI, AAVE, TIA, ENA, HYPE, XRP) above Lighter $10.50 minQuote!
+		acct.ClipUsd = 20.0
 	case 2:
-		acct.ClipUsd = 25.0
+		acct.ClipUsd = 45.0
 	case 3:
 		acct.ClipUsd = acct.Tier3ClipUsd
 	default:
@@ -379,7 +380,7 @@ func initLiveMicroArena() {
 			venueDesc:    "LT #770015 0% M -> Aster RWA 1.25bp (120s Fast Recycle)",
 			desc:         "0% Lighter Maker (>=3.75bp raw = +2.5bp net) -> <8ms 1.25bp Aster RWA/Gold Taker -> 0% Aster Maker exit.",
 			peerVenue:    "ASTER_RWA",
-			tier3Clip:    40.0,
+			tier3Clip:    42.0,
 			startCash:    50.0,
 			minRawEdgeBp: 2.75,
 			entryBp:      4.0,
@@ -396,7 +397,7 @@ func initLiveMicroArena() {
 			desc:          "Pure $0.00-fee Lighter #770015 momentum-lag sniper (+3.5bp TP / 25s exit / -7.5bp stop).",
 			peerVenue:     "BN_USDC",
 			pureLtLeadLag: true,
-			tier3Clip:     55.0,
+			tier3Clip:     75.0,
 			startCash:     50.0,
 			minRawEdgeBp:  1.5,
 			entryBp:       4.5,
@@ -412,7 +413,7 @@ func initLiveMicroArena() {
 			venueDesc:    "LT #770015 0% M -> BN USDC-M (90s Fast Step-Down)",
 			desc:         "Unlocks ETH, SOL, BNB, HYPE (+BTC at Tier 3) with 90s step-down (+0.8bp) and 6m recycle.",
 			peerVenue:    "BN_USDC",
-			tier3Clip:    62.0,
+			tier3Clip:    75.0,
 			startCash:    50.0,
 			minRawEdgeBp: 2.0,
 			entryBp:      6.0,
@@ -428,7 +429,7 @@ func initLiveMicroArena() {
 			venueDesc:    "LT #770015 0% IOC + Aster (+3.5bp Locked at Entry!)",
 			desc:         "Instant 0% Lighter IOC + <8ms Aster Taker ONLY when live books are genuinely crossed.",
 			peerVenue:    "ASTER_RWA",
-			tier3Clip:    40.0,
+			tier3Clip:    42.0,
 			startCash:    50.0,
 			minRawEdgeBp: 3.5,
 			entryBp:      4.75,
@@ -445,7 +446,7 @@ func initLiveMicroArena() {
 			venueDesc:    "LT #770015 0% M -> BN USDC-M (4.00bp Fee, Zero FX Drift)",
 			desc:         "0% Lighter Maker (>=8.5bp positive raw spread) -> <8ms BN USDC-M hedge -> 0% BN Maker exit.",
 			peerVenue:    "BN_USDC",
-			tier3Clip:    55.0,
+			tier3Clip:    75.0,
 			startCash:    60.0,
 			minRawEdgeBp: 4.5,
 			entryBp:      8.5,
@@ -461,7 +462,7 @@ func initLiveMicroArena() {
 			venueDesc:    "LT #770015 0% M -> BN USDC-M (Fast 6m Step-Down)",
 			desc:         "0% Lighter Maker (>=6.5bp positive raw spread) -> <8ms BN USDC-M hedge -> 0% BN Maker exit.",
 			peerVenue:    "BN_USDC",
-			tier3Clip:    55.0,
+			tier3Clip:    75.0,
 			startCash:    50.0,
 			minRawEdgeBp: 2.5,
 			entryBp:      6.5,
@@ -477,7 +478,7 @@ func initLiveMicroArena() {
 			venueDesc:    "LT #770015 0% IOC <-> BN USDC-M (+4.5bp Locked at Entry!)",
 			desc:         "Fires 0% Lighter IOC + <8ms BN USDC-M hedge ONLY when true crossed book >= +8.5bp.",
 			peerVenue:    "BN_USDC",
-			tier3Clip:    50.0,
+			tier3Clip:    75.0,
 			startCash:    50.0,
 			minRawEdgeBp: 4.5,
 			entryBp:      8.5,
@@ -2312,16 +2313,16 @@ func stepLiveSlot(rt *LiveSlotRuntime, now time.Time) {
 	canQuote := canSendLtTxLocked(now.UnixMilli(), false)
 	liveMu.Unlock()
 
-	if ltNot+clipUsd > math.Min(ltEqNow*2.8, 165.0) {
+	if ltNot+clipUsd > math.Min(ltEqNow*3.6, 330.0) {
 		return
 	}
 	if !rt.PureLtLeadLag {
 		if rt.PeerVenue == "BN_USDC" {
-			if bnAvail < math.Max(14.0, bnTot*0.40) || bnNot+clipUsd > math.Min(bnTot*2.8, 155.0) {
+			if bnAvail < math.Max(14.0, bnTot*0.25) || bnNot+clipUsd > math.Min(bnTot*2.5, 650.0) {
 				return
 			}
 		} else {
-			if asAvail < math.Max(10.0, asTot*0.40) || asNot+clipUsd > math.Min(asTot*2.5, 95.0) {
+			if asAvail < math.Max(10.0, asTot*0.35) || asNot+clipUsd > math.Min(asTot*2.6, 125.0) {
 				return
 			}
 		}
@@ -2967,10 +2968,14 @@ func writeLiveArenaTelemetry(now time.Time) {
 	realWalletDelta := 0.0
 	realEqDelta := 0.0
 	if ltCol > 10 && bnWallet > 50 && asWallet > 10 {
-		realWallet3 = roundTo(ltCol+bnWallet+asWallet, 4)
+		curW3 := ltCol + bnWallet + asWallet
+		if curW3 > dynamic3VenueBaseline+25.0 {
+			dynamic3VenueBaseline = curW3
+		}
+		realWallet3 = roundTo(curW3, 4)
 		realEq3 = roundTo(ltEq+bnMargin+asMargin, 4)
-		realWalletDelta = roundTo(realWallet3-Baseline3VenueUSD, 4)
-		realEqDelta = roundTo(realEq3-Baseline3VenueUSD, 4)
+		realWalletDelta = roundTo(realWallet3-dynamic3VenueBaseline, 4)
+		realEqDelta = roundTo(realEq3-dynamic3VenueBaseline, 4)
 	}
 
 	liveMu.Lock()
@@ -3455,8 +3460,7 @@ func evaluateForwardArenaIdleSafeRotation() {
 
 		switch acct.Tier {
 		case 0:
-			// Tier 0 -> Tier 1 ($12 Micro): 45m+ Forward Lab uptime, Closed $/hr >= $2.50, PF >= 1.50, >= 5 Trips, MaxDD < $6.00
-			if fs.ageMin >= 20.0 && fs.hr45 >= 3.00 && fs.pf >= 1.40 && fs.trips >= 4 && fs.maxDD < 6.00 {
+			if fs.ageMin >= 15.0 && fs.hr45 >= 2.50 && fs.pf >= 1.40 && fs.trips >= 4 && fs.maxDD < 6.00 {
 				acct.Tier = 1
 				acct.StratActiveMs = nowMs
 				acct.TierChangedMs = nowMs
@@ -3465,20 +3469,18 @@ func evaluateForwardArenaIdleSafeRotation() {
 				acct.PeakEquity = acct.Equity
 				acct.HaltReason = ""
 				applyTierClipLocked(acct)
-				fmt.Printf("[TIER_PROMOTE id=%s -> Tier 1 ($12) | Fwd45m=$%+.2f/hr PF=%.2f Trips=%d]\n", id, fs.hr45, fs.pf, fs.trips)
+				fmt.Printf("[TIER_PROMOTE id=%s -> Tier 1 ($20) | Fwd45m=$%+.2f/hr PF=%.2f Trips=%d]\n", id, fs.hr45, fs.pf, fs.trips)
 			}
 		case 1:
-			// Tier 1 -> Tier 2 (2x $25 Medium): 30m+ in Tier 1, >= 4 Real Trips, Total Net > $0, Real PF >= 1.30
-			if dwellMin >= 30.0 && tripsInTier >= 4 && netGain > 0.0 && acct.ProfitFactor >= 1.30 && acct.MaxDrawdownUsd < 4.00 {
+			if dwellMin >= 12.0 && tripsInTier >= 3 && netGain > 0.0 && acct.ProfitFactor >= 1.30 && acct.MaxDrawdownUsd < 4.00 {
 				acct.Tier = 2
 				acct.TierChangedMs = nowMs
 				acct.TierBaseTrips = acct.RoundTrips
 				applyTierClipLocked(acct)
-				fmt.Printf("[TIER_PROMOTE id=%s -> Tier 2 (2x $25) | RealPF=%.2f Net=$%+.3f]\n", id, acct.ProfitFactor, netGain)
+				fmt.Printf("[TIER_PROMOTE id=%s -> Tier 2 (2x $45) | RealPF=%.2f Net=$%+.3f]\n", id, acct.ProfitFactor, netGain)
 			}
 		case 2:
-			// Tier 2 -> Tier 3 (2x $55 BN / 2x $35 RWA Full Safe Cap): 45m+ in Tier 2, >= 6 Real Trips, Real PF >= 1.40
-			if dwellMin >= 45.0 && tripsInTier >= 6 && netGain > 0.25 && acct.ProfitFactor >= 1.40 && acct.MaxDrawdownUsd < 5.00 {
+			if dwellMin >= 20.0 && tripsInTier >= 5 && netGain > 0.15 && acct.ProfitFactor >= 1.35 && acct.MaxDrawdownUsd < 5.00 {
 				acct.Tier = 3
 				acct.TierChangedMs = nowMs
 				acct.TierBaseTrips = acct.RoundTrips
