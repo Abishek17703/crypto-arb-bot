@@ -630,37 +630,37 @@ func loadLiveArenaState() {
 		dst.HaltReason = st.HaltReason
 		applyTierClipLocked(dst)
 	}
-	for _, sn := range saved.SlotSnapshots {
-		sk := sn.SlotKey
-		if sk == "" {
-			sk = sn.StratID + ":0"
+		for _, sn := range saved.SlotSnapshots {
+			sk := sn.SlotKey
+			if sk == "" {
+				sk = sn.StratID + ":0"
+			}
+			rt := liveSlots[sk]
+			if rt == nil || (sn.State != "HEDGED" && sn.State != "PEER_EXIT_OPEN" && sn.State != "LT_SNIPE_OPEN") || sn.HedgedQty <= 0 || sn.OpenedMs < saved.BootTsMs {
+				continue
+			}
+			rt.State = sn.State
+			rt.Sym = sn.Sym
+			rt.PeerVenue = sn.PeerVenue
+			rt.PeerSym = sn.PeerSym
+			rt.LtSide = sn.LtSide
+			rt.PeerSide = sn.PeerSide
+			rt.HedgedQty = sn.HedgedQty
+			rt.EntryLtPx = sn.EntryLtPx
+			rt.EntryPeerPx = sn.EntryPeerPx
+			rt.EntryFx = sn.EntryFx
+			if rt.EntryFx <= 0 {
+				rt.EntryFx = 1.0
+			}
+			rt.EntryPeerFee = sn.EntryPeerFee
+			rt.EntryFeeUsd = sn.EntryFeeUsd
+			rt.OpenedAt = time.UnixMilli(sn.OpenedMs)
+			rt.TradeID = sn.TradeID
+			rt.ExitPeerOid = sn.ExitPeerOid
+			rt.ExitPeerPx = sn.ExitPeerPx
+			rt.ExitPlaced = time.Now()
+			rt.RotatedNote = sn.RotatedNote
 		}
-		rt := liveSlots[sk]
-		if rt == nil || (sn.State != "HEDGED" && sn.State != "PEER_EXIT_OPEN") || sn.HedgedQty <= 0 || sn.OpenedMs < saved.BootTsMs {
-			continue
-		}
-		rt.State = sn.State
-		rt.Sym = sn.Sym
-		rt.PeerVenue = sn.PeerVenue
-		rt.PeerSym = sn.PeerSym
-		rt.LtSide = sn.LtSide
-		rt.PeerSide = sn.PeerSide
-		rt.HedgedQty = sn.HedgedQty
-		rt.EntryLtPx = sn.EntryLtPx
-		rt.EntryPeerPx = sn.EntryPeerPx
-		rt.EntryFx = sn.EntryFx
-		if rt.EntryFx <= 0 {
-			rt.EntryFx = 1.0
-		}
-		rt.EntryPeerFee = sn.EntryPeerFee
-		rt.EntryFeeUsd = sn.EntryFeeUsd
-		rt.OpenedAt = time.UnixMilli(sn.OpenedMs)
-		rt.TradeID = sn.TradeID
-		rt.ExitPeerOid = sn.ExitPeerOid
-		rt.ExitPeerPx = sn.ExitPeerPx
-		rt.ExitPlaced = time.Now()
-		rt.RotatedNote = sn.RotatedNote
-	}
 	for i := len(saved.RecentFills) - 1; i >= 0; i-- {
 		if liveStrats[saved.RecentFills[i].StratID] != nil {
 			liveFills = append(liveFills, saved.RecentFills[i])
@@ -673,7 +673,7 @@ func hasAdoptedLivePositions() bool {
 	liveMu.Lock()
 	defer liveMu.Unlock()
 	for _, rt := range liveSlots {
-		if rt != nil && (rt.State == "HEDGED" || rt.State == "PEER_EXIT_OPEN") && rt.HedgedQty > 0 {
+		if rt != nil && (rt.State == "HEDGED" || rt.State == "PEER_EXIT_OPEN" || rt.State == "LT_SNIPE_OPEN") && rt.HedgedQty > 0 {
 			return true
 		}
 	}
@@ -878,20 +878,32 @@ func executePeerMarketOrder(peerVenue, peerSym, side string, qty float64, qDec i
 	}
 	fq, _ := strconv.ParseFloat(or.ExecQty, 64)
 	ap, _ := strconv.ParseFloat(or.AvgPx, 64)
-	if (fq <= 0 || ap <= 0) && or.OrderID > 0 {
-		time.Sleep(120 * time.Millisecond)
-		if peerVenue == "BN_USDC" {
-			_, fq2, ap2, _, ok2 := queryBnOrder(peerSym, or.OrderID, time.Time{}, true)
-			if ok2 && fq2 > 0 {
-				fq, ap = fq2, ap2
+	if (fq <= 0 || ap <= 0 || (or.Status != "FILLED" && fq < qty*0.999)) && or.OrderID > 0 {
+		waitSteps := []time.Duration{120 * time.Millisecond, 230 * time.Millisecond, 350 * time.Millisecond, 550 * time.Millisecond, 800 * time.Millisecond, 1050 * time.Millisecond}
+		for _, w := range waitSteps {
+			time.Sleep(w)
+			var st2 string
+			var fq2, ap2 float64
+			var ok2 bool
+			if peerVenue == "BN_USDC" {
+				st2, fq2, ap2, _, ok2 = queryBnOrder(peerSym, or.OrderID, time.Time{}, true)
+			} else {
+				st2, fq2, ap2, _, ok2 = queryAsterOrder(peerSym, or.OrderID, time.Time{}, true)
 			}
-		} else {
-			_, fq2, ap2, _, ok2 := queryAsterOrder(peerSym, or.OrderID, time.Time{}, true)
-			if ok2 && fq2 > 0 {
-				fq, ap = fq2, ap2
+			if ok2 {
+				if fq2 > fq {
+					fq = fq2
+				}
+				if ap2 > 0 {
+					ap = ap2
+				}
+				if (st2 == "FILLED" && fq > 0 && ap > 0) || st2 == "CANCELED" || st2 == "EXPIRED" || st2 == "REJECTED" {
+					break
+				}
 			}
 		}
 	}
+	latMs = time.Since(t0).Milliseconds()
 	return fq, ap, latMs, fq > 0
 }
 
@@ -942,6 +954,9 @@ func venueActiveNotionalLocked(peerVenue string) (ltNotional, bnNotional, asterN
 			u = rt.HedgedQty * rt.EntryLtPx
 		}
 		ltNotional += u
+		if rt.PureLtLeadLag {
+			continue
+		}
 		if rt.PeerVenue == "BN_USDC" {
 			bnNotional += u
 		} else {
@@ -1028,51 +1043,84 @@ func closeLtLegGuaranteedSync(sym string, expectedPos float64, lb, la float64) (
 	liveMu.Unlock()
 
 	closeCOI, _ := placeLtHedgeIOC(sym, closeSide, closePx, qty, true)
-	_ = closeCOI
+	targetAbs := math.Max(0.0, math.Abs(curPos)-qty+m.MinB*0.5)
 
-	cDeadline := time.Now().Add(950 * time.Millisecond)
-	restChecked := false
+	cDeadline := time.Now().Add(3200 * time.Millisecond)
+	chk1, chk2, chk3 := false, false, false
 	for time.Now().Before(cDeadline) {
 		if st := mktStates[sym]; st != nil {
 			st.mu.Lock()
 			pNow := st.pos
 			st.mu.Unlock()
-			if math.Abs(pNow) < m.MinB {
+			if math.Abs(pNow) <= targetAbs {
 				return exitEstPx, time.Since(t0).Milliseconds()
 			}
 		}
-		if !restChecked && time.Since(t0) >= 480*time.Millisecond {
-			restChecked = true
-			if rp, _ := fetchLtPosREST(sym); math.Abs(rp) < m.MinB {
+		el := time.Since(t0)
+		if (!chk1 && el >= 500*time.Millisecond) || (!chk2 && el >= 1350*time.Millisecond) || (!chk3 && el >= 2350*time.Millisecond) {
+			if el >= 2350*time.Millisecond {
+				chk3 = true
+			} else if el >= 1350*time.Millisecond {
+				chk2 = true
+			} else {
+				chk1 = true
+			}
+			if closeCOI > 0 {
+				if sq, vp, okT := fetchLtTradeFillByCOI(sym, closeCOI); okT && math.Abs(sq) >= qty-m.MinB*0.5 {
+					if vp > 0 {
+						exitEstPx = vp
+					}
+					return exitEstPx, time.Since(t0).Milliseconds()
+				}
+			}
+			if rp, _ := fetchLtPosREST(sym); math.Abs(rp) <= targetAbs {
 				return exitEstPx, time.Since(t0).Milliseconds()
 			}
 		}
 		select {
 		case <-ltFillCh:
-		case <-time.After(25 * time.Millisecond):
+		case <-time.After(35 * time.Millisecond):
 		}
 	}
 
-	// STAGE 2: Final 20bp-bounded fallback if book jumped >12bp during 305ms speed-bump:
-	if remPos, _ := fetchLtPosREST(sym); math.Abs(remPos) >= m.MinB {
-		lb2, la2 := fetchLtBookREST(m.ID)
-		if lb2 <= 0 || la2 <= 0 {
-			lb2, la2 = lb, la
+	// STAGE 2: Final 25bp-bounded fallback ONLY if Stage 1 truly missed after 3.2s zkLighter indexing window:
+	if remPos, _ := fetchLtPosREST(sym); math.Abs(remPos) > targetAbs {
+		remSlice := math.Abs(remPos) - targetAbs
+		if remSlice >= m.MinB {
+			lb2, la2 := fetchLtBookREST(m.ID)
+			if lb2 <= 0 || la2 <= 0 {
+				lb2, la2 = lb, la
+			}
+			rSide := "BID"
+			rPx := roundTo(la2*1.0025, m.PxDec)
+			if remPos > 0 {
+				rSide = "ASK"
+				rPx = roundTo(lb2*0.9975, m.PxDec)
+			}
+			liveMu.Lock()
+			recordLtTxLocked(time.Now().UnixMilli())
+			liveMu.Unlock()
+			_, _ = placeLtHedgeIOC(sym, rSide, rPx, remSlice, true)
+			time.Sleep(1100 * time.Millisecond)
+			_, _ = fetchLtPosREST(sym)
 		}
-		rSide := "BID"
-		rPx := roundTo(la2*1.0020, m.PxDec)
-		if remPos > 0 {
-			rSide = "ASK"
-			rPx = roundTo(lb2*0.9980, m.PxDec)
-		}
-		liveMu.Lock()
-		recordLtTxLocked(time.Now().UnixMilli())
-		liveMu.Unlock()
-		_, _ = placeLtHedgeIOC(sym, rSide, rPx, math.Abs(remPos), true)
-		time.Sleep(550 * time.Millisecond)
-		_, _ = fetchLtPosREST(sym)
 	}
 	return exitEstPx, time.Since(t0).Milliseconds()
+}
+
+func waitExactLtCloseTrade(sym string, minTsMs int64, maxWait time.Duration) (vwapPx, realPnl float64, found bool) {
+	deadline := time.Now().Add(maxWait)
+	steps := []time.Duration{200 * time.Millisecond, 350 * time.Millisecond, 550 * time.Millisecond, 800 * time.Millisecond, 950 * time.Millisecond, 1050 * time.Millisecond}
+	for _, w := range steps {
+		if time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(w)
+		if px, pnl, ok := fetchExactLtCloseTrade(sym, minTsMs); ok {
+			return px, pnl, true
+		}
+	}
+	return 0, 0, false
 }
 
 func fetchExactLtCloseTrade(sym string, minTsMs int64) (vwapPx, realPnl float64, found bool) {
@@ -1214,9 +1262,8 @@ func finalizeSlotClose(rt *LiveSlotRuntime, peerExitPx, peerExitFeeBp float64, e
 		ltGross = (ltExitPx - rt.EntryLtPx) * qty
 		peerGross = (rt.EntryPeerPx - peerExitPx) * fx * qty
 	}
-	// PENNY-EXACT EXCHANGE RECONCILIATION: Pull exact zkLighter fill price & realized PnL directly from /api/v1/trades!
-	time.Sleep(220 * time.Millisecond)
-	if exPx, exLtPnl, okEx := fetchExactLtCloseTrade(rt.Sym, closeStartMs); okEx {
+	// PENNY-EXACT EXCHANGE RECONCILIATION: Poll up to 3.8s for zkLighter block indexer so 100% of closes match on-chain PnL!
+	if exPx, exLtPnl, okEx := waitExactLtCloseTrade(rt.Sym, closeStartMs, 3800*time.Millisecond); okEx {
 		ltExitPx = exPx
 		ltGross = exLtPnl
 	}
@@ -1304,6 +1351,12 @@ func finalizeSlotClose(rt *LiveSlotRuntime, peerExitPx, peerExitFeeBp float64, e
 		LatencyMs: ltLatMs,
 		Tag:       reason,
 	})
+	closedSym := rt.Sym
+	closedLtSide := rt.LtSide
+	closedPeerVenue := rt.PeerVenue
+	closedPeerSide := rt.PeerSide
+	closedTradeID := rt.TradeID
+	closedStratID := rt.StratID
 	rt.State = "IDLE"
 	rt.Sym = ""
 	rt.PeerSym = ""
@@ -1317,9 +1370,9 @@ func finalizeSlotClose(rt *LiveSlotRuntime, peerExitPx, peerExitFeeBp float64, e
 	rt.CoolUntil = now.Add(3 * time.Second)
 	liveMu.Unlock()
 
-	recordStratClose(rt.TradeID, rt.StratID,
-		fmt.Sprintf("LT_%s_%s+%s_%s", rt.Sym, rt.LtSide, rt.PeerVenue, rt.PeerSide),
-		rt.Sym, notional, holdSec, netBps, netUsd, peerGross-totalFeeUsd, ltGross, totalFeeUsd, reason)
+	recordStratClose(closedTradeID, closedStratID,
+		fmt.Sprintf("LT_%s_%s+%s_%s", closedSym, closedLtSide, closedPeerVenue, closedPeerSide),
+		closedSym, notional, holdSec, netBps, netUsd, peerGross-totalFeeUsd, ltGross, totalFeeUsd, reason)
 }
 
 func stepLiveSlot(rt *LiveSlotRuntime, now time.Time) {
@@ -1380,8 +1433,7 @@ func stepLiveSlot(rt *LiveSlotRuntime, now time.Time) {
 			if rt.LtSide == "ASK" {
 				ltGross = (rt.EntryLtPx - ltExitPx) * qty
 			}
-			time.Sleep(220 * time.Millisecond)
-			if exPx, exPnl, okEx := fetchExactLtCloseTrade(rt.Sym, closeStartMs); okEx {
+			if exPx, exPnl, okEx := waitExactLtCloseTrade(rt.Sym, closeStartMs, 3800*time.Millisecond); okEx {
 				ltExitPx = exPx
 				ltGross = exPnl
 			}
@@ -1778,6 +1830,14 @@ func stepLiveSlot(rt *LiveSlotRuntime, now time.Time) {
 				liveMu.Unlock()
 				return
 			}
+			// If Lighter rounded up above Peer step (fillQty > fq >= m.MinB), trim the tiny residual Lighter slice so legs match 1:1!
+			if unhedgedLt := fillQty - fq; unhedgedLt >= m.MinB {
+				trimSigned := unhedgedLt
+				if ltPos < 0 {
+					trimSigned = -unhedgedLt
+				}
+				_, _ = closeLtLegGuaranteedSync(rt.Sym, trimSigned, lb, la)
+			}
 			if ap <= 0 {
 				ap = sigPx
 			}
@@ -2084,13 +2144,89 @@ func stepLiveSlot(rt *LiveSlotRuntime, now time.Time) {
 				return
 			}
 			if cQty >= m.MinB && cQty < rt.HedgedQty-m.MinB*0.5 {
-				// Partial Maker exit filled -> close matching slice on Lighter and keep remaining hedged!
+				// Partial Maker exit filled -> close matching slice on Lighter and book partial PnL + scale EntryFeeUsd cleanly!
+				frac := cQty / rt.HedgedQty
+				if frac > 1.0 {
+					frac = 1.0
+				}
+				partCloseMs := time.Now().UnixMilli()
 				partPos := -cQty
 				if rt.LtSide == "BID" {
 					partPos = cQty
 				}
-				_, _ = closeLtLegGuaranteedSync(rt.Sym, partPos, lb, la)
+				ltPartPx, ltPartLat := closeLtLegGuaranteedSync(rt.Sym, partPos, lb, la)
+				if ltPartPx <= 0 {
+					ltPartPx = rt.EntryLtPx
+				}
+				var ltPartGross, peerPartGross float64
+				if rt.LtSide == "ASK" {
+					ltPartGross = (rt.EntryLtPx - ltPartPx) * cQty
+					peerPartGross = (cPx - rt.EntryPeerPx) * fx * cQty
+				} else {
+					ltPartGross = (ltPartPx - rt.EntryLtPx) * cQty
+					peerPartGross = (rt.EntryPeerPx - cPx) * fx * cQty
+				}
+				if exPx, exPnl, okEx := waitExactLtCloseTrade(rt.Sym, partCloseMs, 3500*time.Millisecond); okEx {
+					ltPartPx = exPx
+					ltPartGross = exPnl
+				}
+				partEntryFee := rt.EntryFeeUsd * frac
+				partExitFee := (cQty * cPx * fx) * (mFeeBp / 10000.0)
+				partTotFee := partEntryFee + partExitFee
+				partGross := ltPartGross + peerPartGross
+				partNotional := cQty * rt.EntryLtPx
+				closePeerSide := "SELL"
+				if rt.PeerSide == "SELL" {
+					closePeerSide = "BUY"
+				}
+				closeLtSide := "BUY"
+				if rt.LtSide == "BID" {
+					closeLtSide = "SELL"
+				}
+				liveMu.Lock()
+				if acct != nil && !rt.LegacyWindDown {
+					acct.MakerFills++
+					acct.TakerFills++
+					acct.RealizedGross = roundTo(acct.RealizedGross+partGross, 4)
+					acct.FeesPaid = roundTo(acct.FeesPaid+partTotFee, 4)
+					acct.Cash = roundTo(acct.StartCash+acct.RealizedGross-acct.FeesPaid+acct.FundingUsd, 4)
+					acct.GrossVolumeUsd = roundTo(acct.GrossVolumeUsd+partNotional*2.0, 2)
+				}
+				appendLiveFillLocked(LiveFillAudit{
+					TsMs:      now.UnixMilli(),
+					StratID:   rt.StratID,
+					Venue:     rt.PeerVenue,
+					Symbol:    peerSym,
+					Side:      closePeerSide,
+					ExecType:  "PARTIAL_MAKER_EXIT",
+					FillPx:    cPx,
+					SignalPx:  cPx,
+					Qty:       cQty,
+					Notional:  roundTo(partNotional, 2),
+					FeeUsd:    roundTo(partExitFee, 4),
+					Realized:  roundTo(peerPartGross-partExitFee, 4),
+					LatencyMs: now.Sub(rt.ExitPlaced).Milliseconds(),
+					Tag:       "PARTIAL_PEER_EXIT",
+				})
+				appendLiveFillLocked(LiveFillAudit{
+					TsMs:      now.UnixMilli(),
+					StratID:   rt.StratID,
+					Venue:     "LT_STD",
+					Symbol:    rt.Sym,
+					Side:      closeLtSide,
+					ExecType:  "PARTIAL_LT_CLOSE",
+					FillPx:    ltPartPx,
+					SignalPx:  ltPartPx,
+					Qty:       cQty,
+					Notional:  roundTo(partNotional, 2),
+					FeeUsd:    0.0,
+					Realized:  roundTo(ltPartGross, 4),
+					LatencyMs: ltPartLat,
+					Tag:       "PARTIAL_LT_CLOSE",
+				})
+				rt.EntryFeeUsd = math.Max(0.0, roundTo(rt.EntryFeeUsd-partEntryFee, 4))
 				rt.HedgedQty = roundTo(rt.HedgedQty-cQty, qDec)
+				liveMu.Unlock()
 			}
 			if pBid > 0 && pAsk > 0 {
 				_ = pBid
@@ -2150,13 +2286,15 @@ func stepLiveSlot(rt *LiveSlotRuntime, now time.Time) {
 	if ltNot+clipUsd > math.Min(ltEqNow*2.8, 165.0) {
 		return
 	}
-	if rt.PeerVenue == "BN_USDC" {
-		if bnAvail < math.Max(14.0, bnTot*0.40) || bnNot+clipUsd > math.Min(bnTot*2.8, 155.0) {
-			return
-		}
-	} else {
-		if asAvail < math.Max(10.0, asTot*0.40) || asNot+clipUsd > math.Min(asTot*2.5, 95.0) {
-			return
+	if !rt.PureLtLeadLag {
+		if rt.PeerVenue == "BN_USDC" {
+			if bnAvail < math.Max(14.0, bnTot*0.40) || bnNot+clipUsd > math.Min(bnTot*2.8, 155.0) {
+				return
+			}
+		} else {
+			if asAvail < math.Max(10.0, asTot*0.40) || asNot+clipUsd > math.Min(asTot*2.5, 95.0) {
+				return
+			}
 		}
 	}
 	if !rt.PeerMakerFirst && !canQuote {
@@ -2186,8 +2324,14 @@ func stepLiveSlot(rt *LiveSlotRuntime, now time.Time) {
 			if math.Abs(ltPos) >= m.MinB || lb <= 0 || la <= lb || now.Sub(lTS) > 4*time.Second || ((la-lb)/lb)*10000.0 > 4.0 {
 				continue
 			}
-			_, _, _, _, _, _, _, _, pBid, pAsk, _, jumpBps, fx, warmTicks, bookAge, okP := getPeerSpecAndBook("BN_USDC", sym, now)
-			if !okP || warmTicks < 6 || bookAge > 3*time.Second || math.Abs(jumpBps) < rt.EntryDisloc {
+			_, _, _, _, _, _, _, _, pBid, pAsk, _, _, fx, warmTicks, bookAge, okP := getPeerSpecAndBook("BN_USDC", sym, now)
+			dnMu.Lock()
+			impBp := 0.0
+			if db := dnBooks[sym+"USDC"]; db != nil {
+				impBp = db.LastImpulseBp
+			}
+			dnMu.Unlock()
+			if !okP || warmTicks < 6 || bookAge > 3*time.Second || math.Abs(impBp) < rt.EntryDisloc {
 				continue
 			}
 			ltMid := 0.5 * (lb + la)
@@ -2202,7 +2346,7 @@ func stepLiveSlot(rt *LiveSlotRuntime, now time.Time) {
 			pBidUsd, pAskUsd := pBid*fx, pAsk*fx
 			var snipeSide, sideHuman string
 			var iocPx, sigPx float64
-			if jumpBps >= rt.EntryDisloc && ((pBidUsd-la)/la)*10000.0 >= rt.MinRawEdgeBp {
+			if impBp >= rt.EntryDisloc && ((pBidUsd-la)/la)*10000.0 >= rt.MinRawEdgeBp {
 				rb, ra := fetchLtBookREST(m.ID)
 				if rb <= 0 || ra <= rb || ((pBidUsd-ra)/ra)*10000.0 < rt.MinRawEdgeBp {
 					continue
@@ -2210,7 +2354,7 @@ func stepLiveSlot(rt *LiveSlotRuntime, now time.Time) {
 				snipeSide, sideHuman = "BID", "BUY"
 				sigPx = ra
 				iocPx = roundTo(ra*1.0008, m.PxDec)
-			} else if jumpBps <= -rt.EntryDisloc && ((lb-pAskUsd)/pAskUsd)*10000.0 >= rt.MinRawEdgeBp {
+			} else if impBp <= -rt.EntryDisloc && ((lb-pAskUsd)/pAskUsd)*10000.0 >= rt.MinRawEdgeBp {
 				rb, ra := fetchLtBookREST(m.ID)
 				if rb <= 0 || ra <= rb || ((rb-pAskUsd)/pAskUsd)*10000.0 < rt.MinRawEdgeBp {
 					continue
@@ -2275,7 +2419,7 @@ func stepLiveSlot(rt *LiveSlotRuntime, now time.Time) {
 			rt.OpenedAt = time.Now()
 			rt.TradeID = tid
 			liveMu.Unlock()
-			recordStratOpen(tid, rt.StratID, "PURE_LT_"+sym+"_"+sideHuman, sym, fq*fAvg, jumpBps, fmt.Sprintf("E2LeadLag jump=%+.1fbp Lt0pct@%.5f(%dms)", jumpBps, fAvg, latMs))
+			recordStratOpen(tid, rt.StratID, "PURE_LT_"+sym+"_"+sideHuman, sym, fq*fAvg, impBp, fmt.Sprintf("E2LeadLag imp=%+.1fbp Lt0pct@%.5f(%dms)", impBp, fAvg, latMs))
 			return
 		}
 		return
@@ -2389,11 +2533,7 @@ func stepLiveSlot(rt *LiveSlotRuntime, now time.Time) {
 		if rt.PeerVenue == "BN_USDC" {
 			ensureBnLeverage(gPeerSym)
 		} else {
-			lev := 5
-			if rt.PeerVenue == "ASTER_RWA" {
-				lev = 8
-			}
-			ensureAsterLeverage(gPeerSym, lev)
+			ensureAsterLeverage(gPeerSym, 5)
 		}
 
 		// Claim symbol lock atomically while IOC is in flight across 305ms Lighter speed-bump:
@@ -2445,6 +2585,13 @@ func stepLiveSlot(rt *LiveSlotRuntime, now time.Time) {
 			rt.CoolUntil = time.Now().Add(10 * time.Second)
 			liveMu.Unlock()
 			return
+		}
+		if unhedgedLt := fillQty - fq; unhedgedLt >= m.MinB {
+			trimSigned := unhedgedLt
+			if ltPos < 0 {
+				trimSigned = -unhedgedLt
+			}
+			_, _ = closeLtLegGuaranteedSync(gSym, trimSigned, rb, ra)
 		}
 		if ap <= 0 {
 			ap = peerSigPx
@@ -3423,9 +3570,99 @@ func fetchRealPeerPositionAbs(peerVenue, peerSym string) (float64, bool) {
 	return tot, true
 }
 
+var peerOrphanSeen = map[string]int{}
+
+func sweepUntrackedPeerOrphansSync() {
+	if remotePaused.Load() || breakerTripped.Load() {
+		return
+	}
+	checkVenue := func(venue string) {
+		var sc int
+		var body []byte
+		var err error
+		if venue == "BN_USDC" {
+			sc, body, err = bnSignReq("GET", "fapi.binance.com", "/fapi/v2/positionRisk", nil)
+		} else {
+			sc, body, err = asterSignReq("GET", "/fapi/v3/positionRisk", nil)
+		}
+		if err != nil || sc != 200 {
+			return
+		}
+		var rows []struct {
+			Symbol      string `json:"symbol"`
+			PositionAmt string `json:"positionAmt"`
+		}
+		if json.Unmarshal(body, &rows) != nil {
+			return
+		}
+		activeKeys := map[string]bool{}
+		for _, r := range rows {
+			amt, _ := strconv.ParseFloat(r.PositionAmt, 64)
+			if math.Abs(amt) <= 1e-6 {
+				continue
+			}
+			base := strings.TrimSuffix(strings.TrimSuffix(r.Symbol, "USDC"), "USDT")
+			liveMu.Lock()
+			tracked := false
+			for _, rt := range liveSlots {
+				if rt != nil && rt.State != "IDLE" && (rt.PeerSym == r.Symbol || rt.Sym == base) {
+					tracked = true
+					break
+				}
+			}
+			liveMu.Unlock()
+			k := venue + ":" + r.Symbol
+			if tracked {
+				delete(peerOrphanSeen, k)
+				continue
+			}
+			activeKeys[k] = true
+			peerOrphanSeen[k]++
+			if peerOrphanSeen[k] >= 2 {
+				delete(peerOrphanSeen, k)
+				qDec := 3
+				if venue == "BN_USDC" {
+					dnMu.Lock()
+					if sp, ok := dnByBnSym[r.Symbol]; ok {
+						qDec = sp.QDec
+					}
+					dnMu.Unlock()
+				} else {
+					asterMu.Lock()
+					if sp, ok := asterSpecs[r.Symbol]; ok {
+						qDec = sp.QDec
+					}
+					asterMu.Unlock()
+				}
+				cSide := "SELL"
+				if amt < 0 {
+					cSide = "BUY"
+				}
+				cp := url.Values{}
+				cp.Set("symbol", r.Symbol)
+				if venue == "BN_USDC" {
+					_, _, _ = bnSignReq("DELETE", "fapi.binance.com", "/fapi/v1/allOpenOrders", cp)
+				} else {
+					_, _, _ = asterSignReq("DELETE", "/fapi/v3/allOpenOrders", cp)
+				}
+				fmt.Printf("[PEER_ORPHAN_SWEEP] Flattening untracked %s position %s amt=%.5f cleanly!\n", venue, r.Symbol, amt)
+				_, _, _, _ = executePeerMarketOrder(venue, r.Symbol, cSide, math.Abs(amt), qDec, true)
+			}
+		}
+		for k := range peerOrphanSeen {
+			if strings.HasPrefix(k, venue+":") && !activeKeys[k] {
+				delete(peerOrphanSeen, k)
+			}
+		}
+	}
+	checkVenue("BN_USDC")
+	checkVenue("ASTER_RWA")
+}
+
 func reconcileGhostSlotsWithRealExchanges() {
 	type candSlot struct {
 		sk        string
+		state     string
 		sym       string
 		peerVenue string
 		peerSym   string
@@ -3435,7 +3672,7 @@ func reconcileGhostSlotsWithRealExchanges() {
 	liveMu.Lock()
 	for _, sk := range liveSlotKeys {
 		rt := liveSlots[sk]
-		if rt == nil || (rt.State != "HEDGED" && rt.State != "PEER_EXIT_OPEN") || rt.HedgedQty <= 0 || rt.Sym == "" {
+		if rt == nil || (rt.State != "HEDGED" && rt.State != "PEER_EXIT_OPEN" && rt.State != "LT_SNIPE_OPEN") || rt.HedgedQty <= 0 || rt.Sym == "" {
 			continue
 		}
 		if time.Since(rt.OpenedAt) < 20*time.Second {
@@ -3445,7 +3682,7 @@ func reconcileGhostSlotsWithRealExchanges() {
 		if m, ok := markets[rt.Sym]; ok && m.MinB > 0 {
 			minB = m.MinB
 		}
-		cands = append(cands, candSlot{sk: sk, sym: rt.Sym, peerVenue: rt.PeerVenue, peerSym: rt.PeerSym, minB: minB})
+		cands = append(cands, candSlot{sk: sk, state: rt.State, sym: rt.Sym, peerVenue: rt.PeerVenue, peerSym: rt.PeerSym, minB: minB})
 	}
 	liveMu.Unlock()
 
@@ -3454,13 +3691,15 @@ func reconcileGhostSlotsWithRealExchanges() {
 		if math.Abs(ltPos) >= c.minB {
 			continue
 		}
-		peerPos, okP := fetchRealPeerPositionAbs(c.peerVenue, c.peerSym)
-		if !okP || peerPos >= c.minB*0.5 {
-			continue
+		if c.state != "LT_SNIPE_OPEN" {
+			peerPos, okP := fetchRealPeerPositionAbs(c.peerVenue, c.peerSym)
+			if !okP || peerPos >= c.minB*0.5 {
+				continue
+			}
 		}
 		liveMu.Lock()
-		if rt := liveSlots[c.sk]; rt != nil && rt.Sym == c.sym && (rt.State == "HEDGED" || rt.State == "PEER_EXIT_OPEN") {
-			fmt.Printf("[GHOST_SLOT_CLEARED slot=%s sym=%s peer=%s] Both Lighter & Peer positions confirmed 0 -> resetting slot to IDLE!\n",
+		if rt := liveSlots[c.sk]; rt != nil && rt.Sym == c.sym && (rt.State == "HEDGED" || rt.State == "PEER_EXIT_OPEN" || rt.State == "LT_SNIPE_OPEN") {
+			fmt.Printf("[GHOST_SLOT_CLEARED slot=%s sym=%s peer=%s] Confirmed 0 position -> resetting slot to IDLE!\n",
 				c.sk, c.sym, c.peerSym)
 			rt.State = "IDLE"
 			rt.Sym = ""
@@ -3579,6 +3818,7 @@ func runLiveMicroArenaLoop() {
 			go func() {
 				reconcileGhostSlotsWithRealExchanges()
 				sweepUntrackedLtOrphansSync()
+				sweepUntrackedPeerOrphansSync()
 			}()
 		}
 		if now.Sub(lastRotCheck) >= 30*time.Second {

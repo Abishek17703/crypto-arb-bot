@@ -90,17 +90,20 @@ type DnSpec struct {
 }
 
 type DnBook struct {
-	Bid         float64
-	Ask         float64
-	BidQ        float64
-	AskQ        float64
-	TS          time.Time
-	EmaBps      float64
-	WarmTicks   int
-	LastEmaTS   time.Time
-	SnapMid     float64
-	SnapTS      time.Time
-	LastJumpBps float64
+	Bid           float64
+	Ask           float64
+	BidQ          float64
+	AskQ          float64
+	TS            time.Time
+	EmaBps        float64
+	WarmTicks     int
+	LastEmaTS     time.Time
+	SnapMid       float64
+	SnapTS        time.Time
+	LastJumpBps   float64
+	MidRing       [4]float64
+	TsRing        [4]time.Time
+	LastImpulseBp float64
 }
 
 type BnOrderState struct {
@@ -776,10 +779,11 @@ func runLtWS() {
 		ltConn = conn
 		subbedMids = map[int64]bool{}
 		wantActiveSyms := []string{
-			"BTC", "ETH", "SOL",
+			"BTC", "ETH", "SOL", "BNB",
 			"UNI", "HYPE", "ENA", "NEAR", "SUI", "ARB",
-			"VVV", "XMR", "LIT",
+			"VVV", "XMR", "LIT", "XAU",
 			"NVDA", "AAPL", "TSLA", "QQQ", "SPY", "META", "COIN", "MSTR",
+			"GOOGL", "AMZN", "HOOD", "PLTR",
 			"AAVE", "AVAX", "WLD", "LINK", "DOGE", "XRP", "TIA", "PENGU", "TRUMP",
 			"KAITO", "CRV", "ETHFI", "WLFI",
 		}
@@ -1033,13 +1037,27 @@ func onBnAnyBookTick(bnSym, baseSym string, b, a, bq, aq float64) {
 	}
 	db.Bid, db.Ask, db.BidQ, db.AskQ, db.TS = b, a, bq, aq, now
 
-	// Track rolling 250ms jump bps to detect toxic Binance impulse spikes before quoting:
+	// Track rolling 250ms jump bps AND 1.5s rolling impulse bps (for E2 Lead-Lag parity):
 	if db.SnapMid <= 0 {
 		db.SnapMid, db.SnapTS = bnMid, now
+		for i := 0; i < 4; i++ {
+			db.MidRing[i], db.TsRing[i] = bnMid, now
+		}
 	} else {
 		db.LastJumpBps = (bnMid - db.SnapMid) / db.SnapMid * 10000.0
 		if now.Sub(db.SnapTS) >= 250*time.Millisecond {
 			db.SnapMid, db.SnapTS = bnMid, now
+		}
+		if now.Sub(db.TsRing[3]) >= 500*time.Millisecond {
+			db.MidRing[0], db.MidRing[1], db.MidRing[2], db.MidRing[3] = db.MidRing[1], db.MidRing[2], db.MidRing[3], bnMid
+			db.TsRing[0], db.TsRing[1], db.TsRing[2], db.TsRing[3] = db.TsRing[1], db.TsRing[2], db.TsRing[3], now
+		}
+		refMid := db.MidRing[0]
+		if refMid <= 0 {
+			refMid = db.SnapMid
+		}
+		if refMid > 0 {
+			db.LastImpulseBp = (bnMid - refMid) / refMid * 10000.0
 		}
 	}
 
@@ -1796,15 +1814,17 @@ func bnSignReq(method, baseHost, path string, params url.Values) (int, []byte, e
 func ensureBnLeverage(bnSym string) {
 	dnMu.Lock()
 	already := dnLevSet[bnSym]
-	if !already {
-		dnLevSet[bnSym] = true
-	}
 	dnMu.Unlock()
 	if !already {
 		lvP := url.Values{}
 		lvP.Set("symbol", bnSym)
 		lvP.Set("leverage", "5")
-		_, _, _ = bnSignReq("POST", "fapi.binance.com", "/fapi/v1/leverage", lvP)
+		sc, _, err := bnSignReq("POST", "fapi.binance.com", "/fapi/v1/leverage", lvP)
+		if err == nil && sc == 200 {
+			dnMu.Lock()
+			dnLevSet[bnSym] = true
+			dnMu.Unlock()
+		}
 	}
 }
 

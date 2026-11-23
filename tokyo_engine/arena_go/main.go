@@ -1584,11 +1584,12 @@ func runCrossVenuePairArbLocked(cfg PairArbCfg, commonQtyDec int, minBase float6
 		}
 		rawCrossShortBp := ((mBidUsd - hAskUsd) / hAskUsd) * 10000.0
 		rawCrossLongBp := ((hBidUsd - mAskUsd) / hBidUsd) * 10000.0
-		if rawCrossShortBp >= cfg.TakerGrabMinBp && cfg.CarryBias <= 0 && l2TopDepthUsdLocked(cfg.HedgeVenue, cfg.HedgeSym, "BUY") >= cfg.SlotUsd*depthMul {
+		minGrabBp := math.Max(cfg.TakerGrabMinBp, rtFeeBp+4.0)
+		if rawCrossShortBp >= minGrabBp && cfg.CarryBias <= 0 && l2TopDepthUsdLocked(cfg.HedgeVenue, cfg.HedgeSym, "BUY") >= cfg.SlotUsd*depthMul {
 			if placeTakerLocked(cfg.StratID, cfg.MakerVenue, cfg.MakerSym, "SELL", qty, bM.Bid, 10.0, false, entryTag, nowMs) > 0 {
 				stratCoolMap[coolKey] = nowMs + 3000
 			}
-		} else if rawCrossLongBp >= cfg.TakerGrabMinBp && cfg.CarryBias >= 0 && l2TopDepthUsdLocked(cfg.HedgeVenue, cfg.HedgeSym, "SELL") >= cfg.SlotUsd*depthMul {
+		} else if rawCrossLongBp >= minGrabBp && cfg.CarryBias >= 0 && l2TopDepthUsdLocked(cfg.HedgeVenue, cfg.HedgeSym, "SELL") >= cfg.SlotUsd*depthMul {
 			if placeTakerLocked(cfg.StratID, cfg.MakerVenue, cfg.MakerSym, "BUY", qty, bM.Ask, 10.0, false, entryTag, nowMs) > 0 {
 				stratCoolMap[coolKey] = nowMs + 3000
 			}

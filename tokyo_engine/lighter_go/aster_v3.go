@@ -310,15 +310,17 @@ func fetchAsterAccountMargin() (avail, marginBal float64, ok bool) {
 func ensureAsterLeverage(asterSym string, lev int) {
 	asterMu.Lock()
 	done := asterLevSet[asterSym]
-	if !done {
-		asterLevSet[asterSym] = true
-	}
 	asterMu.Unlock()
 	if !done {
 		p := url.Values{}
 		p.Set("symbol", asterSym)
 		p.Set("leverage", strconv.Itoa(lev))
-		_, _, _ = asterSignReq("POST", "/fapi/v3/leverage", p)
+		sc, _, err := asterSignReq("POST", "/fapi/v3/leverage", p)
+		if err == nil && sc == 200 {
+			asterMu.Lock()
+			asterLevSet[asterSym] = true
+			asterMu.Unlock()
+		}
 	}
 }
 
