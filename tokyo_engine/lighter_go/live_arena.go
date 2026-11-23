@@ -18,7 +18,7 @@ import (
 )
 
 const (
-	LiveArenaVer         = "LIVE-v108.0-TIERED-KISS"
+	LiveArenaVer         = "LIVE-v108.1-TIERED-KISS"
 	Baseline3VenueUSD    = 222.9000 // Exact 100% Flat 3-venue Perp cash ($90.69 LT + $82.31 BN Perp + $49.90 Aster; Spot $264.73 untouched!)
 	MaxDemoteDrawdownUSD = 8.00     // -$8.00 Total-Equity Max Drawdown demotes strategy back to Tier 0 (Forward Testing Only)
 	GlobalStopLossUSD    = -8.00    // -$8.00 ($214.90 true Perp floor) global 3-wallet circuit breaker
@@ -445,7 +445,7 @@ func initLiveMicroArena() {
 				ExitNetBp:      d.exitBp,
 				CancelTolBp:    2.0,
 				MaxRestSec:     25.0,
-				MaxHoldSec:     900.0,
+				MaxHoldSec:     2700.0, // 45m breathing room for natural 1:1 hedged convergence (zero tight per-trade SL!)
 				State:          "IDLE",
 			}
 		}
@@ -1295,7 +1295,7 @@ func stepLiveSlot(rt *LiveSlotRuntime, now time.Time) {
 			}
 			tIoc0 := time.Now()
 			placeLtHedgeIOC(rt.Sym, rt.LtSide, iocPx, execQ, false)
-			ltPos, ltAvg := waitLtPositionFill(rt.Sym, m.MinB, 850*time.Millisecond)
+			ltPos, ltAvg := waitLtPositionFill(rt.Sym, m.MinB, 1150*time.Millisecond)
 			ltLatMs := time.Since(tIoc0).Milliseconds()
 
 			// 850ms Unhedged Fallback: if Lighter IOC missed due to speed-bump book move, immediately flatten BN/Aster leg (<8ms)!

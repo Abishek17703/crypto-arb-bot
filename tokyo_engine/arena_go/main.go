@@ -26,7 +26,7 @@ const (
 	TargetHourly   = 5.00
 	ArenaOutPath   = "/tmp/forward_arena.json"
 	ArenaStatePath = "/opt/crypto-arb-bot/forward_arena_state.json"
-	ArenaVer       = "ARENA-v6.0-KISS-489"
+	ArenaVer       = "ARENA-v6.1-NATURAL-CONV"
 
 	VenueBnUsdc   = "BN_USDC"
 	VenueBnUsdt   = "BN_USDT"
@@ -441,6 +441,12 @@ func countOpenPairsLocked(s *StrategyAccount) int {
 	for _, p := range s.Positions {
 		if math.Abs(p.Qty) > 1e-8 {
 			seen[symBase(p.Symbol)] = true
+		}
+	}
+	// Also count in-flight entry Taker orders (e.g. S9 385ms IOC speed-bump) so we NEVER exceed MaxOpenPairs (3x $240 = <=3.0x)!
+	for _, to := range takerOrders {
+		if to.StratID == s.ID && !to.ReduceOnly && !strings.Contains(to.Tag, "_HEDGE") && !strings.Contains(to.Tag, "_CLOSE") {
+			seen[symBase(to.Symbol)] = true
 		}
 	}
 	return len(seen)
@@ -1405,8 +1411,8 @@ func runCrossVenuePairArbLocked(cfg PairArbCfg, commonQtyDec int, minBase float6
 				placeTakerLocked(cfg.StratID, cfg.MakerVenue, cfg.MakerSym, cSide, math.Abs(posM.Qty), px, 25.0, true, pfx+"_DUST_CLOSE", nowMs)
 				return
 			}
-			// 850ms Unhedged Fallback: if Lighter 385ms IOC hedge missed due to book move, flatten Maker leg immediately!
-			if cfg.HedgeVenue == VenueLtStd && nowMs-posM.OpenedMs > 950 {
+			// 1450ms Unhedged Fallback: wait past full bnRtt + 305ms Lighter speed-bump + ltRtt before declaring IOC miss!
+			if cfg.HedgeVenue == VenueLtStd && nowMs-posM.OpenedMs > 1450 {
 				cSide, px := "SELL", bM.Bid
 				if posM.Qty < 0 {
 					cSide, px = "BUY", bM.Ask
@@ -1415,32 +1421,34 @@ func runCrossVenuePairArbLocked(cfg PairArbCfg, commonQtyDec int, minBase float6
 				stratCoolMap[cfg.StratID+":COOL:"+cfg.MakerSym] = nowMs + 8000
 				return
 			}
-			if nowMs-posM.OpenedMs > 850 {
+			if nowMs-posM.OpenedMs > 1350 {
 				hSide, px := "BUY", bH.Ask
 				if posM.Qty > 0 {
 					hSide, px = "SELL", bH.Bid
 				}
 				hQty := roundTo(math.Abs(posM.Qty), commonQtyDec)
 				if hQty > 0 {
-					placeTakerLocked(cfg.StratID, cfg.HedgeVenue, cfg.HedgeSym, hSide, hQty, px, 18.0, false, pfx+"_HEDGE", nowMs)
+					placeTakerLocked(cfg.StratID, cfg.HedgeVenue, cfg.HedgeSym, hSide, hQty, px, 20.0, false, pfx+"_HEDGE", nowMs)
 				}
 			}
 			return
 		}
 
-		// Manage hedged pair exit:
+		// Manage hedged pair exit — give 1:1 hedged delta-neutral spreads ample breathing room to draw down & converge naturally!
 		qty := math.Min(math.Abs(posM.Qty), math.Abs(posH.Qty))
 		heldMs := nowMs - posM.OpenedMs
 		decayMs := cfg.DecayAfterMs
 		if decayMs <= 0 {
-			decayMs = 480000 // 8m default decay
+			decayMs = 900000 // 15m before gently stepping down target
 		}
 		reqNetBp := cfg.NetTargetBp
-		if heldMs >= decayMs {
-			reqNetBp = 0.5
+		if heldMs >= decayMs && heldMs < decayMs*2 {
+			reqNetBp = math.Max(1.0, cfg.NetTargetBp*0.5)
+		} else if heldMs >= decayMs*2 {
+			reqNetBp = 0.4
 		}
 
-		// Compute instantaneous Taker-Taker PnL in bps for hard basis stop / 15m time-stop:
+		// Emergency-only basis safety net (default -75bp / ~10% structural break, NOT tight -18bp noise stop!):
 		var takerExitBp float64
 		if posH.Qty > 0 {
 			takerExitBp = ((hBidUsd - posH.AvgPx/fxH) / (posH.AvgPx / fxH) * 10000.0) + ((posM.AvgPx/fxM - mAskUsd) / (posM.AvgPx / fxM) * 10000.0)
@@ -1449,9 +1457,9 @@ func runCrossVenuePairArbLocked(cfg PairArbCfg, commonQtyDec int, minBase float6
 		}
 		slBp := cfg.StopLossBp
 		if slBp <= 0 {
-			slBp = 18.0
+			slBp = 75.0
 		}
-		if (heldMs >= 20000 && takerExitBp <= -slBp) || (cfg.MaxHoldMs > 0 && heldMs >= cfg.MaxHoldMs && takerExitBp <= -2.0) {
+		if heldMs >= 60000 && takerExitBp <= -slBp {
 			cancelAllMakersForSymLocked(cfg.StratID, cfg.MakerVenue, cfg.MakerSym, nowMs)
 			cancelAllMakersForSymLocked(cfg.StratID, cfg.HedgeVenue, cfg.HedgeSym, nowMs)
 			sM, pxM := "SELL", bM.Bid
@@ -1631,7 +1639,7 @@ func evalStrategiesLocked(nowMs int64) {
 			NetTargetBp:     2.5,
 			DecayAfterMs:    480000,
 			MaxHoldMs:       900000,
-			StopLossBp:      18.0,
+			StopLossBp:      75.0,
 			MinPeerDepthMul: 2.5,
 			ExitOnMaker:     true,
 			CancelTolBp:     1.5,
@@ -1665,7 +1673,7 @@ func evalStrategiesLocked(nowMs int64) {
 			NetTargetBp:     2.5,
 			DecayAfterMs:    360000,
 			MaxHoldMs:       900000,
-			StopLossBp:      18.0,
+			StopLossBp:      75.0,
 			MinPeerDepthMul: 2.5,
 			CancelTolBp:     2.5,
 			MaxAgeMs:        30000,
@@ -1699,7 +1707,7 @@ func evalStrategiesLocked(nowMs int64) {
 			NetTargetBp:     3.5,
 			DecayAfterMs:    420000,
 			MaxHoldMs:       900000,
-			StopLossBp:      18.0,
+			StopLossBp:      75.0,
 			MinPeerDepthMul: 3.0,
 			CancelTolBp:     2.5,
 			MaxAgeMs:        35000,
@@ -1733,7 +1741,7 @@ func evalStrategiesLocked(nowMs int64) {
 			NetTargetBp:     2.5,
 			DecayAfterMs:    480000,
 			MaxHoldMs:       900000,
-			StopLossBp:      18.0,
+			StopLossBp:      75.0,
 			MinPeerDepthMul: 2.5,
 			CancelTolBp:     2.5,
 			MaxAgeMs:        30000,
@@ -1766,7 +1774,7 @@ func evalStrategiesLocked(nowMs int64) {
 			NetTargetBp:     2.5,
 			DecayAfterMs:    480000,
 			MaxHoldMs:       900000,
-			StopLossBp:      18.0,
+			StopLossBp:      75.0,
 			MinPeerDepthMul: 2.5,
 			ExitOnMaker:     true,
 			CancelTolBp:     1.5,
@@ -1796,7 +1804,7 @@ func evalStrategiesLocked(nowMs int64) {
 			NetTargetBp:     2.5,
 			DecayAfterMs:    480000,
 			MaxHoldMs:       900000,
-			StopLossBp:      18.0,
+			StopLossBp:      75.0,
 			MinPeerDepthMul: 2.5,
 			ExitOnMaker:     true,
 			CancelTolBp:     1.5,
@@ -1848,7 +1856,7 @@ func evalStrategiesLocked(nowMs int64) {
 			NetTargetBp:     2.2,
 			DecayAfterMs:    900000,
 			MaxHoldMs:       3600000,
-			StopLossBp:      20.0,
+			StopLossBp:      75.0,
 			MinPeerDepthMul: 2.5,
 			CancelTolBp:     2.5,
 			MaxAgeMs:        35000,
@@ -1882,7 +1890,7 @@ func evalStrategiesLocked(nowMs int64) {
 			NetTargetBp:     3.5,
 			DecayAfterMs:    480000,
 			MaxHoldMs:       900000,
-			StopLossBp:      18.0,
+			StopLossBp:      75.0,
 			MinPeerDepthMul: 2.5,
 			CancelTolBp:     2.5,
 			MaxAgeMs:        35000,
@@ -1954,7 +1962,7 @@ func evalStrategiesLocked(nowMs int64) {
 				pnlUsd += math.Abs(posB.Qty) * (posB.AvgPx - bB.Ask)
 			}
 			pnlBp := (pnlUsd / math.Max(legUsd, 1.0)) * 10000.0
-			if pnlBp <= -25.0 || (nowMs-posA.OpenedMs > 900000 && pnlBp <= -6.0) {
+			if pnlBp <= -45.0 {
 				cancelAllMakersForSymLocked("S8_MAJOR_PAIRS_STATARB", VenueBnUsdc, sA, nowMs)
 				cSideA, pxA := "SELL", bA.Bid
 				if posA.Qty < 0 {
@@ -2034,7 +2042,7 @@ func evalStrategiesLocked(nowMs int64) {
 			NetTargetBp:     2.5,
 			DecayAfterMs:    420000,
 			MaxHoldMs:       900000,
-			StopLossBp:      18.0,
+			StopLossBp:      75.0,
 			MinPeerDepthMul: 2.5,
 		}, dec, sp.MinBase, nowMs)
 	}
@@ -2060,7 +2068,7 @@ func evalStrategiesLocked(nowMs int64) {
 			NetTargetBp:     2.8,
 			DecayAfterMs:    420000,
 			MaxHoldMs:       900000,
-			StopLossBp:      18.0,
+			StopLossBp:      75.0,
 			MinPeerDepthMul: 3.0,
 			FxAdjHedge:      true,
 		}, dec, sp.MinBase, nowMs)
@@ -2091,7 +2099,7 @@ func evalStrategiesLocked(nowMs int64) {
 			NetTargetBp:     2.5,
 			DecayAfterMs:    480000,
 			MaxHoldMs:       900000,
-			StopLossBp:      18.0,
+			StopLossBp:      75.0,
 			MinPeerDepthMul: 2.5,
 			ExitOnMaker:     true,
 			CancelTolBp:     1.5,
@@ -2348,8 +2356,8 @@ func loadCheckpoint() {
 		return
 	}
 	var tel ArenaTelemetry
-	// Clean zero-history cutover to ARENA-v6.0-KISS-489 (resets timer to 0m 00s & $489.12 benchmark capital!):
-	if json.Unmarshal(raw, &tel) != nil || !strings.HasPrefix(tel.Version, "ARENA-v6.0") || tel.BootTsMs <= 0 {
+	// Clean zero-history cutover to ARENA-v6.1-NATURAL-CONV (resets timer to 0m 00s & $489.12 benchmark capital!):
+	if json.Unmarshal(raw, &tel) != nil || !strings.HasPrefix(tel.Version, "ARENA-v6.1") || tel.BootTsMs <= 0 {
 		return
 	}
 	mu.Lock()

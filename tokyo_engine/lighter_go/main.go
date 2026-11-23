@@ -30,7 +30,7 @@ import (
 )
 
 const (
-	BotVersion = "v108.0"
+	BotVersion = "v108.1"
 	BaseURL    = "https://mainnet.zklighter.elliot.ai"
 	WsURL      = "wss://mainnet.zklighter.elliot.ai/stream"
 	AcctIdx    = int64(770015)
@@ -2904,13 +2904,6 @@ func main() {
 	initLiveMicroArena()
 	_, _, _ = fetchAsterAccountMargin()
 	writeLiveArenaTelemetry(time.Now())
-
-	if _, err := os.Stat(PauseFlagPath); err == nil {
-		remotePaused.Store(true)
-		writeLiveArenaTelemetry(time.Now())
-		fmt.Println("[PAUSED] /tmp/lighter_pause.flag active; exiting.")
-		os.Exit(0)
-	}
 	loadDnHistory()
 
 	hc := lthttp.NewClient(BaseURL)
@@ -2934,6 +2927,23 @@ func main() {
 
 	go runTxWorker()
 	go runTxWS()
+
+	// CRITICAL SAFETY: Even when booting in PAUSED mode (/tmp/lighter_pause.flag), ALWAYS verify & sweep Lighter + Binance + Aster 100% flat first!
+	if _, err := os.Stat(PauseFlagPath); err == nil {
+		remotePaused.Store(true)
+		useWsSend = false
+		cancelAll()
+		flattenAllLtPositionsSync("paused_boot_flat_")
+		flattenBnDnAndSweep()
+		flattenAsterAllSync()
+		time.Sleep(800 * time.Millisecond)
+		flattenAllLtPositionsSync("paused_boot_flat2_")
+		_, _, _, _ = fetchBnAccountMargin()
+		_, _, _ = fetchAsterAccountMargin()
+		writeLiveArenaTelemetry(time.Now())
+		fmt.Println("[PAUSED] /tmp/lighter_pause.flag active; swept all 3 venues 100% flat and exiting.")
+		os.Exit(0)
+	}
 	go runBnAllBookTickerWS()
 	go runAsterBookTickerWS()
 	go runLtWS()

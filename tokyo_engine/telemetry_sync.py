@@ -475,14 +475,14 @@ def ensure_arena_running():
 
 def stop_go_bot_gracefully():
     write_flag(True)
-    deadline = time.time() + 3.0
+    deadline = time.time() + 12.0
     while time.time() < deadline:
         if not is_go_bot_running():
             append_log("[INSTANT-PAUSE] lighter_go_bot exited cleanly after flattening.")
             return
         time.sleep(0.2)
     subprocess.run(["pkill", "-9", "-f", "lighter_go_bot"], stderr=subprocess.DEVNULL)
-    append_log("[INSTANT-PAUSE] lighter_go_bot force-stopped after 3.0s grace window.")
+    append_log("[INSTANT-PAUSE] lighter_go_bot force-stopped after 12.0s grace window.")
 
 
 def ensure_s3_cors_and_presign(s3):
