@@ -196,6 +196,7 @@ var (
 	bnTotalWallet float64
 	bnTotalMargin float64
 	ltCollateral  atomic.Int64
+	peakLtCol     atomic.Int64
 	activeSlot    = DnSlot{State: "IDLE"}
 
 	bnOrdMu  sync.Mutex
@@ -1320,6 +1321,9 @@ func syncAccountLoop() {
 				col, _ := strconv.ParseFloat(a.Collateral, 64)
 				if col > 0 {
 					ltCollateral.Store(int64(col * 1e6))
+					if peakLtCol.Load() == 0 || col > float64(peakLtCol.Load())/1e6+15.0 {
+						peakLtCol.Store(int64(col * 1e6))
+					}
 				}
 				eq, _ := strconv.ParseFloat(a.TotalAssetValue, 64)
 				if eq <= 0 {
@@ -1327,8 +1331,9 @@ func syncAccountLoop() {
 				}
 				if eq > 0 {
 					eqNow.Store(int64(eq * 1e6))
-					if eq < StopEqUSD && breakerTripped.CompareAndSwap(false, true) {
-						go flattenAndExitPause(fmt.Sprintf("STOP-LOSS Lighter eq=$%.2f < $%.2f", eq, StopEqUSD))
+					dynStopLt := math.Max(StopEqUSD, float64(peakLtCol.Load())/1e6-8.00)
+					if eq < dynStopLt && breakerTripped.CompareAndSwap(false, true) {
+						go flattenAndExitPause(fmt.Sprintf("STOP-LOSS Lighter eq=$%.2f < $%.2f", eq, dynStopLt))
 					}
 				}
 				for _, p := range a.Positions {
@@ -1867,10 +1872,14 @@ func fetchBnAccountMargin() (sharedAvail, usdcBal, usdtBal float64, ok bool) {
 	return sharedAvail, usdcBal, usdtBal, true
 }
 
-func transferAllSpotStableToFutures() bool {
+func ensureSpotReserveForLighterDeposit(targetSpotUsd float64) bool {
+	const markerPath = "/var/tmp/reserved_120_usdc_spot.done"
+	if _, err := os.Stat(markerPath); err == nil {
+		return false
+	}
 	sc, body, err := bnSignReq("GET", "api.binance.com", "/api/v3/account", nil)
 	if err != nil || sc != 200 {
-		fmt.Printf("[SPOT_ACCT_SKIP sc=%d err=%v]\n", sc, err)
+		fmt.Printf("[SPOT_RESERVE_SKIP sc=%d err=%v]\n", sc, err)
 		return false
 	}
 	var spot struct {
@@ -1882,44 +1891,72 @@ func transferAllSpotStableToFutures() bool {
 	if json.Unmarshal(body, &spot) != nil {
 		return false
 	}
-	moved := false
+	spotUsdc, spotUsdt := 0.0, 0.0
 	for _, b := range spot.Balances {
-		if b.Asset != "USDC" && b.Asset != "USDT" {
-			continue
+		if b.Asset == "USDC" {
+			spotUsdc, _ = strconv.ParseFloat(b.Free, 64)
+		} else if b.Asset == "USDT" {
+			spotUsdt, _ = strconv.ParseFloat(b.Free, 64)
 		}
-		freeVal, _ := strconv.ParseFloat(b.Free, 64)
-		amt := math.Floor(freeVal*100.0) / 100.0
+	}
+	if spotUsdc >= targetSpotUsd-0.5 {
+		_ = os.WriteFile(markerPath, []byte("ok\n"), 0644)
+		return false
+	}
+
+	_, usdcFut, usdtFut, okM := fetchBnAccountMargin()
+	if !okM {
+		return false
+	}
+	need := math.Round((targetSpotUsd-spotUsdc)*100.0) / 100.0
+	if need < 1.0 {
+		_ = os.WriteFile(markerPath, []byte("ok\n"), 0644)
+		return false
+	}
+	moveFromFut := func(asset string, amt float64) bool {
 		if amt < 1.0 {
-			continue
+			return false
 		}
-		amtStr := strconv.FormatFloat(amt, 'f', 2, 64)
+		amtStr := strconv.FormatFloat(math.Floor(amt*100.0)/100.0, 'f', 2, 64)
 		tp := url.Values{}
-		tp.Set("type", "MAIN_UMFUTURE")
-		tp.Set("asset", b.Asset)
+		tp.Set("type", "UMFUTURE_MAIN")
+		tp.Set("asset", asset)
 		tp.Set("amount", amtStr)
 		tSc, tBody, tErr := bnSignReq("POST", "api.binance.com", "/sapi/v1/asset/transfer", tp)
-		fmt.Printf("[SPOT_TO_FUTURES asset=%s amt=%s sc=%d err=%v body=%s]\n", b.Asset, amtStr, tSc, tErr, string(tBody))
+		fmt.Printf("[FUT_TO_SPOT asset=%s amt=%s sc=%d err=%v body=%s]\n", asset, amtStr, tSc, tErr, string(tBody))
 		if tErr == nil && tSc == 200 {
+			return true
+		}
+		fp := url.Values{}
+		fp.Set("asset", asset)
+		fp.Set("amount", amtStr)
+		fp.Set("type", "2")
+		fSc, fBody, fErr := bnSignReq("POST", "api.binance.com", "/sapi/v1/futures/transfer", fp)
+		fmt.Printf("[FUT_TO_SPOT_FAPI asset=%s amt=%s sc=%d err=%v body=%s]\n", asset, amtStr, fSc, fErr, string(fBody))
+		return fErr == nil && fSc == 200
+	}
+
+	moved := false
+	takeUsdc := math.Min(need, math.Floor(usdcFut*100.0)/100.0)
+	if takeUsdc >= 1.0 && moveFromFut("USDC", takeUsdc) {
+		moved = true
+		need = math.Round((need-takeUsdc)*100.0) / 100.0
+	}
+	remNeed := math.Round((need-spotUsdt)*100.0) / 100.0
+	if remNeed >= 1.0 && usdtFut >= 1.0 {
+		takeUsdt := math.Min(remNeed, math.Floor(usdtFut*100.0)/100.0)
+		if takeUsdt >= 1.0 && moveFromFut("USDT", takeUsdt) {
 			moved = true
-			continue
 		}
-		if b.Asset == "USDT" {
-			fp := url.Values{}
-			fp.Set("asset", "USDT")
-			fp.Set("amount", amtStr)
-			fp.Set("type", "1")
-			fSc, fBody, fErr := bnSignReq("POST", "api.binance.com", "/fapi/v1/futures/transfer", fp)
-			fmt.Printf("[SPOT_TO_FUTURES_FAPI asset=USDT amt=%s sc=%d err=%v body=%s]\n", amtStr, fSc, fErr, string(fBody))
-			if fErr == nil && fSc == 200 {
-				moved = true
-			}
-		}
+	}
+	if moved {
+		_ = os.WriteFile(markerPath, []byte("done\n"), 0644)
 	}
 	return moved
 }
 
 func setupBnUsdcMargin() bool {
-	if transferAllSpotStableToFutures() {
+	if ensureSpotReserveForLighterDeposit(120.00) {
 		time.Sleep(800 * time.Millisecond)
 	}
 	if !hasAdoptedLivePositions() {

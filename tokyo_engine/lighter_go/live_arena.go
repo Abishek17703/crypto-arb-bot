@@ -19,7 +19,7 @@ import (
 
 const (
 	LiveArenaVer         = "LIVE-v108.3-PARITY"
-	Baseline3VenueUSD    = 222.8400 // Initial 3-venue Perp cash before Spot -> Futures move
+	Baseline3VenueUSD    = 365.8000 // Post-$120 Spot reserve baseline ($89.95 LT + $225.85 BN Perp + $50.00 Aster; auto-ratchets to ~$486 on Lighter deposit!)
 	MaxDemoteDrawdownUSD = 8.00     // -$8.00 Total-Equity Max Drawdown demotes strategy back to Tier 0 (Forward Testing Only)
 	GlobalStopLossUSD    = -8.00    // -$8.00 dynamic 3-wallet circuit breaker
 	MaxLtTxPerMin        = 52       // Guard below #770015 Standard 60 tx/min quota
@@ -397,7 +397,7 @@ func initLiveMicroArena() {
 			desc:          "Pure $0.00-fee Lighter #770015 momentum-lag sniper (+3.5bp TP / 25s exit / -7.5bp stop).",
 			peerVenue:     "BN_USDC",
 			pureLtLeadLag: true,
-			tier3Clip:     75.0,
+			tier3Clip:     90.0,
 			startCash:     50.0,
 			minRawEdgeBp:  1.5,
 			entryBp:       4.5,
@@ -413,7 +413,7 @@ func initLiveMicroArena() {
 			venueDesc:    "LT #770015 0% M -> BN USDC-M (90s Fast Step-Down)",
 			desc:         "Unlocks ETH, SOL, BNB, HYPE (+BTC at Tier 3) with 90s step-down (+0.8bp) and 6m recycle.",
 			peerVenue:    "BN_USDC",
-			tier3Clip:    75.0,
+			tier3Clip:    90.0,
 			startCash:    50.0,
 			minRawEdgeBp: 2.0,
 			entryBp:      6.0,
@@ -446,7 +446,7 @@ func initLiveMicroArena() {
 			venueDesc:    "LT #770015 0% M -> BN USDC-M (4.00bp Fee, Zero FX Drift)",
 			desc:         "0% Lighter Maker (>=8.5bp positive raw spread) -> <8ms BN USDC-M hedge -> 0% BN Maker exit.",
 			peerVenue:    "BN_USDC",
-			tier3Clip:    75.0,
+			tier3Clip:    90.0,
 			startCash:    60.0,
 			minRawEdgeBp: 4.5,
 			entryBp:      8.5,
@@ -462,7 +462,7 @@ func initLiveMicroArena() {
 			venueDesc:    "LT #770015 0% M -> BN USDC-M (Fast 6m Step-Down)",
 			desc:         "0% Lighter Maker (>=6.5bp positive raw spread) -> <8ms BN USDC-M hedge -> 0% BN Maker exit.",
 			peerVenue:    "BN_USDC",
-			tier3Clip:    75.0,
+			tier3Clip:    90.0,
 			startCash:    50.0,
 			minRawEdgeBp: 2.5,
 			entryBp:      6.5,
@@ -478,7 +478,7 @@ func initLiveMicroArena() {
 			venueDesc:    "LT #770015 0% IOC <-> BN USDC-M (+4.5bp Locked at Entry!)",
 			desc:         "Fires 0% Lighter IOC + <8ms BN USDC-M hedge ONLY when true crossed book >= +8.5bp.",
 			peerVenue:    "BN_USDC",
-			tier3Clip:    75.0,
+			tier3Clip:    90.0,
 			startCash:    50.0,
 			minRawEdgeBp: 4.5,
 			entryBp:      8.5,
@@ -2313,7 +2313,7 @@ func stepLiveSlot(rt *LiveSlotRuntime, now time.Time) {
 	canQuote := canSendLtTxLocked(now.UnixMilli(), false)
 	liveMu.Unlock()
 
-	if ltNot+clipUsd > math.Min(ltEqNow*3.6, 330.0) {
+	if ltNot+clipUsd > math.Min(ltEqNow*3.6, 760.0) {
 		return
 	}
 	if !rt.PureLtLeadLag {
