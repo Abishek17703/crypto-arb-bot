@@ -81,7 +81,7 @@ jobs:
             "sudo curl -fsSL https://github.com/Abishek17703/crypto-arb-bot/releases/download/lighter-go-latest/lighter_go_bot -o /opt/crypto-arb-bot/lighter_go_bot.tmp && sudo mv /opt/crypto-arb-bot/lighter_go_bot.tmp /opt/crypto-arb-bot/lighter_go_bot && sudo chmod +x /opt/crypto-arb-bot/lighter_go_bot",
             "sudo curl -fsSL https://github.com/Abishek17703/crypto-arb-bot/releases/download/lighter-go-latest/arena_go -o /opt/crypto-arb-bot/arena_go.tmp && sudo mv /opt/crypto-arb-bot/arena_go.tmp /opt/crypto-arb-bot/arena_go && sudo chmod +x /opt/crypto-arb-bot/arena_go",
             "sudo rm -f /tmp/lighter_trades.json /tmp/forward_arena.json",
-            "sudo sh -c 'if [ -f /tmp/lighter_pause.flag ]; then /opt/crypto-arb-bot/lighter_go_bot >> /tmp/lighter_tokyo.log 2>&1 || true; fi'",
+            "if [ -f /tmp/lighter_pause.flag ]; then sudo /opt/crypto-arb-bot/lighter_go_bot >> /tmp/lighter_tokyo.log 2>&1 || true; fi",
             "sudo systemctl start tokyo-telemetry.service",
             "sleep 6 && sudo systemctl is-active tokyo-telemetry.service && ps aux | grep '[t]elemetry_sync'"
           ]}')
