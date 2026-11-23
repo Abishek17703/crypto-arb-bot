@@ -18,7 +18,7 @@ import (
 )
 
 const (
-	LiveArenaVer       = "LIVE-MICRO-v107.3-GAP-MAX"
+	LiveArenaVer       = "LIVE-MICRO-v107.4-45M-ADAPTIVE"
 	Baseline3VenueUSD  = 223.8805 // 100% Flat Clean-Epoch 3-venue baseline ($91.3605 LT + $82.4512 BN Perp + $50.0688 Aster)
 	StratStopLossUSD   = -1.50    // Auto-halt individual strategy if realized+unrealized drops <= -$1.50
 	GlobalStopLossUSD  = -6.50    // Auto-flatten & S3-pause ALL live strategies at <= -$6.50 ($217.38 true Perp floor)
@@ -187,6 +187,7 @@ type LiveSlotRuntime struct {
 	PendingVenue  string
 	PendingSyms   []string
 	PendingGrabBp float64
+	LastSwapAt    time.Time
 	RotatedNote   string
 }
 
@@ -1530,6 +1531,7 @@ func stepLiveSlot(rt *LiveSlotRuntime, now time.Time) {
 		rt.PendingVenue = ""
 		rt.PendingSyms = nil
 		rt.PendingGrabBp = 0
+		rt.LastSwapAt = now
 		fmt.Printf("[IDLE_SAFE_ROTATE slot=%s newVenue=%s grab=%.1fbp syms=%v note=%s]\n",
 			rt.SlotKey, rt.PeerVenue, rt.TakerGrabBp, rt.Symbols, rt.RotatedNote)
 	}
@@ -2300,49 +2302,81 @@ func evaluateForwardArenaIdleSafeRotation() {
 	var fa struct {
 		UptimeHours float64 `json:"uptimeHours"`
 		Strategies  []struct {
-			ID              string  `json:"id"`
-			HourlyRunRate   float64 `json:"hourlyRunRate"`
-			Rolling4hHourly float64 `json:"rolling4hHourly"`
+			ID               string  `json:"id"`
+			HourlyRunRate    float64 `json:"hourlyRunRate"`
+			Rolling15mHourly float64 `json:"rolling15mHourly"`
+			Rolling45mHourly float64 `json:"rolling45mHourly"`
+			Rolling4hHourly  float64 `json:"rolling4hHourly"`
+			EquityCurve      []struct {
+				TsMs int64   `json:"ts"`
+				Cash float64 `json:"cash"`
+				Eq   float64 `json:"eq"`
+			} `json:"equityCurve"`
 		} `json:"strategies"`
 	}
-	if json.Unmarshal(raw, &fa) != nil || fa.UptimeHours < 1.0 {
+	if json.Unmarshal(raw, &fa) != nil || fa.UptimeHours < 0.50 {
 		return
 	}
-	hrMap := map[string]float64{}
+	nowMs := time.Now().UnixMilli()
+	hr45 := map[string]float64{}
 	for _, s := range fa.Strategies {
-		// Use the 4-hour rolling $/hr directly so weekday/weekend & US-open shifts rotate automatically!
-		r := s.Rolling4hHourly
-		if r == 0 && s.HourlyRunRate != 0 {
+		r := s.Rolling45mHourly
+		if r == 0 && len(s.EquityCurve) >= 6 {
+			tgt := nowMs - 45*60*1000
+			ref := s.EquityCurve[0]
+			for _, pt := range s.EquityCurve {
+				if pt.TsMs <= tgt {
+					ref = pt
+				} else {
+					break
+				}
+			}
+			last := s.EquityCurve[len(s.EquityCurve)-1]
+			dtHr := float64(last.TsMs-ref.TsMs) / 3600000.0
+			if dtHr >= 0.20 {
+				v1, v0 := last.Cash, ref.Cash
+				if v0 <= 0 {
+					v1, v0 = last.Eq, ref.Eq
+				}
+				r = (v1 - v0) / dtHr
+			}
+		}
+		if r == 0 {
+			r = s.Rolling4hHourly
+		}
+		if r == 0 {
 			r = s.HourlyRunRate
 		}
-		hrMap[s.ID] = r
+		hr45[s.ID] = r
 	}
-	s4Hr := hrMap["S4_ASTER_LT_BN_RWA_15X"]
-	s5Hr := hrMap["S5_LT_STD_MARGIN_STRICT"]
-	s3Hr := hrMap["S3_LT_ASTER_CRYPTO_ARB"]
-	topCryptoHr := math.Max(s5Hr, s3Hr)
 
+	s4Rwa := hr45["S4_ASTER_LT_BN_RWA_15X"]
+	s9Grab := hr45["S9_LT_TAKER_SPIKE_GRAB"]
+
+	now := time.Now()
 	liveMu.Lock()
 	defer liveMu.Unlock()
 	for sub := 0; sub < 2; sub++ {
 		rt4 := liveSlots[fmt.Sprintf("LIVE_S4_ASTER_LT_RWA:%d", sub)]
-		if rt4 == nil {
+		if rt4 == nil || (!rt4.LastSwapAt.IsZero() && now.Sub(rt4.LastSwapAt) < 25*time.Minute) {
 			continue
 		}
-		// Never swap mid-position! Queue into PendingSyms so it only applies when State == "IDLE"!
-		if s4Hr < 4.50 && topCryptoHr >= 6.50 {
-			wantSyms := []string{"UNI", "HYPE", "ENA", "NEAR", "WLD", "AAVE", "SUI", "ARB", "AVAX", "PENGU", "TRUMP", "TIA", "WLFI", "KAITO", "CRV", "ETHFI", "LINK", "DOGE", "XRP"}
-			if rt4.PeerVenue != "BN_USDC" && len(rt4.PendingSyms) == 0 {
+		// 45m Adaptive Ride-Until-Decay (+$2.50/hr hysteresis, 25m dwell):
+		// Rides 2h bursts OR 24h regimes naturally, and swaps within 45m when the active regime decays!
+		if rt4.PeerVenue == "ASTER_RWA" {
+			if s9Grab >= s4Rwa+2.50 && s9Grab >= 4.00 && len(rt4.PendingSyms) == 0 {
 				rt4.PendingVenue = "BN_USDC"
-				rt4.PendingSyms = wantSyms
+				rt4.PendingSyms = []string{"UNI", "HYPE", "ENA", "NEAR", "WLD", "AAVE", "SUI", "ARB", "AVAX", "PENGU", "TRUMP", "TIA", "WLFI", "KAITO", "CRV", "ETHFI", "LINK", "DOGE", "XRP"}
 				rt4.PendingGrabBp = 11.0
-				rt4.RotatedNote = fmt.Sprintf("4h Rolling Auto-Swap: RWA $%.2f/hr -> S9 Instant Taker-Grab", s4Hr)
+				rt4.RotatedNote = fmt.Sprintf("45m Adaptive Swap: S9 +$%.2f/hr > RWA $%+.2f/hr (+$2.50 hyst)", s9Grab, s4Rwa)
 			}
-		} else if s4Hr >= 5.00 && rt4.PeerVenue != rt4.OrigPeerVenue && len(rt4.PendingSyms) == 0 {
-			rt4.PendingVenue = rt4.OrigPeerVenue
-			rt4.PendingSyms = append([]string(nil), rt4.OrigSymbols...)
-			rt4.PendingGrabBp = 0.0
-			rt4.RotatedNote = fmt.Sprintf("4h Rolling Auto-Swap: Restored RWA Equities ($%.2f/hr >= $5.00)", s4Hr)
+		} else {
+			if s4Rwa >= s9Grab+2.50 && s4Rwa >= 4.00 && len(rt4.PendingSyms) == 0 {
+				rt4.PendingVenue = rt4.OrigPeerVenue
+				rt4.PendingSyms = append([]string(nil), rt4.OrigSymbols...)
+				rt4.PendingGrabBp = 0.0
+				rt4.RotatedNote = fmt.Sprintf("45m Adaptive Swap: RWA +$%.2f/hr > S9 $%+.2f/hr (+$2.50 hyst)", s4Rwa, s9Grab)
+			}
 		}
 	}
 }

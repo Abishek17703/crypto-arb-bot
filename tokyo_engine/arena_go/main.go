@@ -26,7 +26,7 @@ const (
 	TargetHourly   = 5.00
 	ArenaOutPath   = "/tmp/forward_arena.json"
 	ArenaStatePath = "/opt/crypto-arb-bot/forward_arena_state.json"
-	ArenaVer       = "ARENA-v4.3-TAKER-GRAB-LAB"
+	ArenaVer       = "ARENA-v4.4-MULTI-HORIZON"
 
 	VenueBnUsdc   = "BN_USDC"
 	VenueBnUsdt   = "BN_USDT"
@@ -196,9 +196,13 @@ type StrategyAccount struct {
 	Equity          float64              `json:"equity"`
 	PeakEquity      float64              `json:"peakEquity"`
 	MaxDrawdownUsd  float64              `json:"maxDrawdownUsd"`
-	HourlyRunRate   float64              `json:"hourlyRunRate"`
-	RealizedHourly  float64              `json:"realizedHourly"`
-	Rolling4hHourly float64              `json:"rolling4hHourly"`
+	HourlyRunRate    float64              `json:"hourlyRunRate"`
+	RealizedHourly   float64              `json:"realizedHourly"`
+	Rolling15mHourly float64              `json:"rolling15mHourly"`
+	Rolling45mHourly float64              `json:"rolling45mHourly"`
+	Rolling2hHourly  float64              `json:"rolling2hHourly"`
+	Rolling4hHourly  float64              `json:"rolling4hHourly"`
+	Rolling24hHourly float64              `json:"rolling24hHourly"`
 	StratBootMs     int64                `json:"stratBootMs,omitempty"`
 	MakerPlaced     int64                `json:"makerPlaced"`
 	MakerCancelled  int64                `json:"makerCancelled"`
@@ -1727,29 +1731,41 @@ func updateMarkToMarketAndWriteTelemetry() {
 
 		if len(s.EquityCurve) == 0 || nowMs-s.EquityCurve[len(s.EquityCurve)-1].TsMs >= 30000 {
 			s.EquityCurve = append(s.EquityCurve, EquityPoint{TsMs: nowMs, Equity: s.Equity, Cash: s.Cash})
-			if len(s.EquityCurve) > 540 { // 540 * 30s = 4.5 hours full rolling window!
-				s.EquityCurve = append([]EquityPoint(nil), s.EquityCurve[len(s.EquityCurve)-540:]...)
+			if len(s.EquityCurve) > 2940 { // 2940 * 30s = 24.5 hours full rolling window!
+				s.EquityCurve = append([]EquityPoint(nil), s.EquityCurve[len(s.EquityCurve)-2940:]...)
 			}
 		}
 
-		// Compute true 4-hour rolling $/hr from EquityCurve (falls back smoothly to all-time if <4h collected):
-		roll4h := s.HourlyRunRate
-		targetTs := nowMs - 4*3600*1000
-		if len(s.EquityCurve) >= 2 {
+		calcRoll := func(winMs int64, minDtHr float64) float64 {
+			if len(s.EquityCurve) < 2 {
+				return s.RealizedHourly
+			}
+			tgt := nowMs - winMs
 			refPt := s.EquityCurve[0]
 			for _, pt := range s.EquityCurve {
-				if pt.TsMs <= targetTs {
+				if pt.TsMs <= tgt {
 					refPt = pt
 				} else {
 					break
 				}
 			}
 			dtHr := float64(nowMs-refPt.TsMs) / 3600000.0
-			if dtHr >= 0.50 {
-				roll4h = roundTo((s.Equity-refPt.Equity)/dtHr, 3)
+			if dtHr < minDtHr {
+				return s.RealizedHourly
 			}
+			cNow := s.Cash
+			cRef := refPt.Cash
+			if cRef <= 0 {
+				cNow, cRef = s.Equity, refPt.Equity
+			}
+			return roundTo((cNow-cRef)/dtHr, 3)
 		}
-		s.Rolling4hHourly = roll4h
+
+		s.Rolling15mHourly = calcRoll(15*60*1000, 0.12)
+		s.Rolling45mHourly = calcRoll(45*60*1000, 0.25)
+		s.Rolling2hHourly = calcRoll(2*3600*1000, 0.50)
+		s.Rolling4hHourly = calcRoll(4*3600*1000, 0.50)
+		s.Rolling24hHourly = calcRoll(24*3600*1000, 0.50)
 
 		s.StatusNote = fmt.Sprintf("Net $%+.2f ($%+.2f/hr) | Fills:%dM/%dT (Pickoff:%d) | Pos:%d | Resting:%d",
 			netGain, s.HourlyRunRate, s.MakerFills, s.TakerFills, s.PickoffFills, len(snaps), s.ActiveMakers)
