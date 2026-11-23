@@ -195,6 +195,18 @@ type EquityPoint struct {
 	Cash      float64 `json:"cash,omitempty"`
 }
 
+type ClosedTripRecord struct {
+	TsMs     int64   `json:"ts"`
+	StratID  string  `json:"strat"`
+	Coin     string  `json:"coin"`
+	Legs     string  `json:"legs"`
+	Notional float64 `json:"usd"`
+	HoldSec  float64 `json:"holdS"`
+	FeeUsd   float64 `json:"fee"`
+	NetUsd   float64 `json:"net"`
+	Reason   string  `json:"reason"`
+}
+
 type StrategyAccount struct {
 	ID              string               `json:"id"`
 	Name            string               `json:"name"`
@@ -203,6 +215,8 @@ type StrategyAccount struct {
 	MaxLevCap       float64              `json:"maxLevCap"`
 	StartCash       float64              `json:"startCash"`
 	Cash            float64              `json:"cash"` // StartCash + RealizedPnL - FeesPaid + FundingUsd
+	ClosedNetUsd    float64              `json:"closedNetUsd"`
+	WithdrawableUsd float64              `json:"withdrawableUsd"`
 	RealizedGross   float64              `json:"realizedGross"`
 	FeesPaid        float64              `json:"feesPaid"`
 	FundingUsd      float64              `json:"fundingUsd"`
@@ -271,6 +285,7 @@ type ArenaTelemetry struct {
 	MarketSpreads  []MarketSpreadSnap `json:"marketSpreads"`
 	Strategies     []*StrategyAccount `json:"strategies"`
 	RecentFills    []FillAudit        `json:"recentFills"`
+	ClosedTrips    []ClosedTripRecord `json:"closedTrips,omitempty"`
 }
 
 type MarketSpreadSnap struct {
@@ -310,6 +325,7 @@ var (
 	strats        = map[string]*StrategyAccount{}
 	stratOrder    = []string{}
 	recentFills   = []FillAudit{}
+	closedTrips   = []ClosedTripRecord{}
 	feedCounters  = map[string]*atomic.Int64{}
 	twinRatioEMA  = map[string]float64{}
 	dnBasisEMA    = map[string]float64{}
@@ -1000,6 +1016,19 @@ func applyFillLocked(stratID, venue, sym, side, execType string, fillPx, sigPx, 
 			if len(s.RecentTripPnls) > 12 {
 				s.RecentTripPnls = append([]float64(nil), s.RecentTripPnls[len(s.RecentTripPnls)-12:]...)
 			}
+			closedTrips = append(closedTrips, ClosedTripRecord{
+				TsMs:     nowMs,
+				StratID:  stratID,
+				Coin:     groupKey,
+				Legs:     venue + " " + side,
+				Notional: roundTo(notional, 2),
+				FeeUsd:   roundTo(feeUsd, 4),
+				NetUsd:   roundTo(combTripNet, 4),
+				Reason:   tag,
+			})
+			if len(closedTrips) > 300 {
+				closedTrips = append([]ClosedTripRecord(nil), closedTrips[len(closedTrips)-300:]...)
+			}
 			if s.GrossLossUsd > 1e-6 {
 				s.ProfitFactor = roundTo(s.GrossWinUsd/s.GrossLossUsd, 2)
 			} else if s.GrossWinUsd > 0 {
@@ -1265,7 +1294,7 @@ func onStrategyFillHookLocked(stratID, venue, sym, side string, fillPx, qty floa
 	}
 	maxSlip := 18.0
 	if peerVenue == VenueLtStd || peerVenue == VenueLtPrem {
-		maxSlip = 12.0 // Exact 12bp Lighter IOC bound matching live_arena.go!
+		maxSlip = 25.0 // 25bp 0% Lighter IOC hedge/close bound matching live_arena.go (eliminates false IOC_MISS_FLAT aborts!)
 	}
 	placeTakerLocked(stratID, peerVenue, peerSym, hedgeSide, hQty, sigPx, maxSlip, isExit, hTag, nowMs)
 }
@@ -2192,8 +2221,10 @@ func updateMarkToMarketAndWriteTelemetry() {
 
 	for _, id := range stratOrder {
 		s := strats[id]
-		upnl := 0.0
-		midUpnl := 0.0
+		rawMarkUpnl := 0.0
+		rawMidUpnl := 0.0
+		openEntryFees := 0.0
+		openExitFees := 0.0
 		snaps := make([]Position, 0, len(s.Positions))
 		for _, p := range s.Positions {
 			if math.Abs(p.Qty) <= 1e-9 {
@@ -2205,27 +2236,36 @@ func updateMarkToMarketAndWriteTelemetry() {
 			if b != nil && b.Bid > 0 && b.Ask > 0 {
 				midMark = 0.5 * (b.Bid + b.Ask)
 				if p.Qty > 0 {
-					mark = b.Bid // conservative liquidation mark for MaxDD!
+					mark = b.Bid // executable liquidation Bid!
 				} else {
-					mark = b.Ask
+					mark = b.Ask // executable liquidation Ask!
 				}
 			}
+			tFeeBp := 0.0
+			if vp, ok := venuePhys[p.Venue]; ok {
+				tFeeBp = vp.TakerFeeBp
+			}
+			openEntryFees += p.EntryFee
+			openExitFees += (math.Abs(p.Qty) * mark) * (tFeeBp / 10000.0)
 			if p.Qty > 0 {
-				upnl += math.Abs(p.Qty)*(mark-p.AvgPx) - p.EntryFee
-				midUpnl += math.Abs(p.Qty)*(midMark-p.AvgPx) - p.EntryFee
+				rawMarkUpnl += math.Abs(p.Qty) * (mark - p.AvgPx)
+				rawMidUpnl += math.Abs(p.Qty) * (midMark - p.AvgPx)
 			} else {
-				upnl += math.Abs(p.Qty)*(p.AvgPx-mark) - p.EntryFee
-				midUpnl += math.Abs(p.Qty)*(p.AvgPx-midMark) - p.EntryFee
+				rawMarkUpnl += math.Abs(p.Qty) * (p.AvgPx - mark)
+				rawMidUpnl += math.Abs(p.Qty) * (p.AvgPx - midMark)
 			}
 			snaps = append(snaps, *p)
 		}
 
-		s.UnrealizedPnL = roundTo(upnl, 4)
+		// Exact Net-Withdrawable Accounting (Zero double-deduction of open EntryFee; ClosedNetUsd = pure closed trips only!):
 		s.Cash = roundTo(s.StartCash+s.RealizedGross-s.FeesPaid+s.FundingUsd, 4)
-		s.Equity = roundTo(s.Cash+upnl, 4)
-		// Noise-free Signal Equity: uses Fair-Mid uPnL (clamped <= 0 so phantom unrealized spikes never inflate $/hr, and instant entry bid-ask cross noise never distorts run rate!):
-		sigUpnl := math.Min(0.0, midUpnl)
-		sigEq := roundTo(s.Cash+sigUpnl, 4)
+		s.ClosedNetUsd = roundTo((s.Cash-s.StartCash)+openEntryFees, 4)
+		s.UnrealizedPnL = roundTo(rawMarkUpnl-openEntryFees-openExitFees, 4)
+		s.Equity = roundTo(s.StartCash+s.ClosedNetUsd+s.UnrealizedPnL, 4)
+		s.WithdrawableUsd = s.Equity
+		// Noise-free Signal Equity: Fair-Mid open PnL after entry fee clamped <= 0 so bid-ask cross noise never inflates $/hr:
+		sigUpnl := math.Min(0.0, rawMidUpnl-openEntryFees)
+		sigEq := roundTo(s.StartCash+s.ClosedNetUsd+sigUpnl, 4)
 		if s.Equity > s.PeakEquity {
 			s.PeakEquity = s.Equity
 		}
@@ -2234,7 +2274,7 @@ func updateMarkToMarketAndWriteTelemetry() {
 			s.MaxDrawdownUsd = roundTo(dd, 4)
 		}
 		netGain := sigEq - s.StartCash
-		realGain := s.Cash - s.StartCash
+		realGain := s.ClosedNetUsd
 		stratStart := bootMs
 		if s.StratBootMs > bootMs {
 			stratStart = s.StratBootMs
@@ -2351,6 +2391,10 @@ func updateMarkToMarketAndWriteTelemetry() {
 	for i := range recentFills {
 		revFills[i] = recentFills[len(recentFills)-1-i]
 	}
+	revClosed := make([]ClosedTripRecord, len(closedTrips))
+	for i := range closedTrips {
+		revClosed[i] = closedTrips[len(closedTrips)-1-i]
+	}
 
 	goalMet := false
 	for _, s := range outStrats {
@@ -2374,6 +2418,7 @@ func updateMarkToMarketAndWriteTelemetry() {
 		MarketSpreads:  spreads,
 		Strategies:     outStrats,
 		RecentFills:    revFills,
+		ClosedTrips:    revClosed,
 	}
 
 	raw, err := json.Marshal(tel)
@@ -2452,6 +2497,12 @@ func loadCheckpoint() {
 		recentFills = make([]FillAudit, len(tel.RecentFills))
 		for i := range tel.RecentFills {
 			recentFills[i] = tel.RecentFills[len(tel.RecentFills)-1-i]
+		}
+	}
+	if len(tel.ClosedTrips) > 0 {
+		closedTrips = make([]ClosedTripRecord, len(tel.ClosedTrips))
+		for i := range tel.ClosedTrips {
+			closedTrips[i] = tel.ClosedTrips[len(tel.ClosedTrips)-1-i]
 		}
 	}
 	fmt.Printf("[%s] Restored live checkpoint from %s (uptime %.1fm)\n", ArenaVer, ArenaStatePath, float64(time.Now().UnixMilli()-bootMs)/60000.0)

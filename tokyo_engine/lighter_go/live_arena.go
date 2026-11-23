@@ -77,6 +77,8 @@ type LiveStratAccount struct {
 	Tier3ClipUsd    float64       `json:"tier3ClipUsd"`
 	StartCash       float64       `json:"startCash"`
 	Cash            float64       `json:"cash"`
+	ClosedNetUsd    float64       `json:"closedNetUsd"`
+	WithdrawableUsd float64       `json:"withdrawableUsd"`
 	RealizedGross   float64       `json:"realizedGross"`
 	FeesPaid        float64       `json:"feesPaid"`
 	FundingUsd      float64       `json:"fundingUsd"`
@@ -570,7 +572,7 @@ func loadLiveArenaState() {
 			sk = sn.StratID + ":0"
 		}
 		rt := liveSlots[sk]
-		if rt == nil || (sn.State != "HEDGED" && sn.State != "PEER_EXIT_OPEN") || sn.HedgedQty <= 0 {
+		if rt == nil || (sn.State != "HEDGED" && sn.State != "PEER_EXIT_OPEN") || sn.HedgedQty <= 0 || sn.OpenedMs < saved.BootTsMs {
 			continue
 		}
 		rt.State = sn.State
@@ -946,11 +948,11 @@ func closeLtLegGuaranteedSync(sym string, expectedPos float64, lb, la float64) (
 	// 1:1 FORWARD PARITY (<450ms total close!):
 	// Lighter #770015 is ALREADY 0.00% Taker Fee! Skip the 650ms PostOnly detour so the book cannot move against us after Peer Maker exit fills!
 	closeSide := "BID"
-	closePx := roundTo(la*1.0012, m.PxDec) // Exact 12bp-bounded IOC matching Forward Lab!
+	closePx := roundTo(la*1.0025, m.PxDec) // 25bp-bounded 0% Lighter IOC close matching Forward Lab!
 	exitEstPx = la
 	if curPos > 0 {
 		closeSide = "ASK"
-		closePx = roundTo(lb*0.9988, m.PxDec)
+		closePx = roundTo(lb*0.9975, m.PxDec)
 		exitEstPx = lb
 	}
 
@@ -1310,14 +1312,14 @@ func stepLiveSlot(rt *LiveSlotRuntime, now time.Time) {
 			var iocPx, ltSigPx float64
 			if rt.LtSide == "ASK" {
 				ltSigPx = rb
-				iocPx = roundTo(rb*0.9988, m.PxDec) // 12bp bounded IOC
+				iocPx = roundTo(rb*0.9975, m.PxDec) // 25bp bounded 0% Lighter IOC hedge (prevents false IOC_MISS_FLAT!)
 			} else {
 				ltSigPx = ra
-				iocPx = roundTo(ra*1.0012, m.PxDec)
+				iocPx = roundTo(ra*1.0025, m.PxDec)
 			}
 			tIoc0 := time.Now()
 			placeLtHedgeIOC(rt.Sym, rt.LtSide, iocPx, execQ, false)
-			ltPos, ltAvg := waitLtPositionFill(rt.Sym, m.MinB, 1150*time.Millisecond)
+			ltPos, ltAvg := waitLtPositionFill(rt.Sym, m.MinB, 1450*time.Millisecond)
 			ltLatMs := time.Since(tIoc0).Milliseconds()
 
 			// 850ms Unhedged Fallback: if Lighter IOC missed due to speed-bump book move, immediately flatten BN/Aster leg (<8ms)!
@@ -2520,7 +2522,7 @@ func writeLiveArenaTelemetry(now time.Time) {
 						Tag:       rt.State,
 					})
 				}
-				_, _, _, _, _, _, _, _, pBid, pAsk, _, _, fx, _, _, okP := getPeerSpecAndBook(rt.PeerVenue, rt.Sym, now)
+				_, _, _, _, _, _, _, tFeeMarkBp, pBid, pAsk, _, _, fx, _, _, okP := getPeerSpecAndBook(rt.PeerVenue, rt.Sym, now)
 				peerQtySigned := rt.HedgedQty
 				pMark := pBid
 				pMidMark := 0.5 * (pBid + pAsk)
@@ -2529,11 +2531,12 @@ func writeLiveArenaTelemetry(now time.Time) {
 					pMark = pAsk
 				}
 				if okP && pMark > 0 {
+					estExitFeeUsd := (rt.HedgedQty * pMark * fx) * (tFeeMarkBp / 10000.0)
 					if peerQtySigned > 0 {
-						pairUpnl += rt.HedgedQty * (pMark - rt.EntryPeerPx) * fx
+						pairUpnl += rt.HedgedQty*(pMark-rt.EntryPeerPx)*fx - estExitFeeUsd
 						pairMidUpnl += rt.HedgedQty * (pMidMark - rt.EntryPeerPx) * fx
 					} else {
-						pairUpnl += rt.HedgedQty * (rt.EntryPeerPx - pMark) * fx
+						pairUpnl += rt.HedgedQty*(rt.EntryPeerPx-pMark)*fx - estExitFeeUsd
 						pairMidUpnl += rt.HedgedQty * (rt.EntryPeerPx - pMidMark) * fx
 					}
 				}
@@ -2555,7 +2558,9 @@ func writeLiveArenaTelemetry(now time.Time) {
 
 		acct.UnrealizedPnL = roundTo(upnl, 4)
 		acct.Cash = roundTo(acct.StartCash+acct.RealizedGross-acct.FeesPaid+acct.FundingUsd, 4)
+		acct.ClosedNetUsd = roundTo(acct.Cash-acct.StartCash, 4)
 		acct.Equity = roundTo(acct.Cash+upnl, 4)
+		acct.WithdrawableUsd = acct.Equity
 		sigUpnl := math.Min(0.0, midUpnl)
 		sigEq := roundTo(acct.Cash+sigUpnl, 4)
 		if acct.Equity > acct.PeakEquity {
@@ -2981,6 +2986,114 @@ func sweepUntrackedLtOrphansSync() {
 	}
 }
 
+func clearAllLiveSlotsOnFlatten() {
+	liveMu.Lock()
+	defer liveMu.Unlock()
+	for _, rt := range liveSlots {
+		if rt == nil {
+			continue
+		}
+		rt.State = "IDLE"
+		rt.Sym = ""
+		rt.PeerSym = ""
+		rt.LtCOI = 0
+		rt.EntryPeerOid = 0
+		rt.ExitPeerOid = 0
+		rt.HedgedQty = 0
+		rt.EntryFeeUsd = 0
+		rt.LegacyWindDown = false
+		rt.RotatedNote = ""
+	}
+}
+
+func fetchRealPeerPositionAbs(peerVenue, peerSym string) (float64, bool) {
+	if peerSym == "" {
+		return 0, true
+	}
+	qp := url.Values{}
+	qp.Set("symbol", peerSym)
+	var sc int
+	var body []byte
+	var err error
+	if peerVenue == "BN_USDC" {
+		sc, body, err = bnSignReq("GET", "fapi.binance.com", "/fapi/v2/positionRisk", qp)
+	} else {
+		sc, body, err = asterSignReq("GET", "/fapi/v3/positionRisk", qp)
+	}
+	if err != nil || sc != 200 {
+		return 0, false
+	}
+	var rows []struct {
+		Symbol      string `json:"symbol"`
+		PositionAmt string `json:"positionAmt"`
+	}
+	if json.Unmarshal(body, &rows) != nil {
+		return 0, false
+	}
+	tot := 0.0
+	for _, r := range rows {
+		if r.Symbol == peerSym {
+			v, _ := strconv.ParseFloat(r.PositionAmt, 64)
+			tot += math.Abs(v)
+		}
+	}
+	return tot, true
+}
+
+func reconcileGhostSlotsWithRealExchanges() {
+	type candSlot struct {
+		sk        string
+		sym       string
+		peerVenue string
+		peerSym   string
+		minB      float64
+	}
+	var cands []candSlot
+	liveMu.Lock()
+	for _, sk := range liveSlotKeys {
+		rt := liveSlots[sk]
+		if rt == nil || (rt.State != "HEDGED" && rt.State != "PEER_EXIT_OPEN") || rt.HedgedQty <= 0 || rt.Sym == "" {
+			continue
+		}
+		if time.Since(rt.OpenedAt) < 20*time.Second {
+			continue
+		}
+		minB := 1e-6
+		if m, ok := markets[rt.Sym]; ok && m.MinB > 0 {
+			minB = m.MinB
+		}
+		cands = append(cands, candSlot{sk: sk, sym: rt.Sym, peerVenue: rt.PeerVenue, peerSym: rt.PeerSym, minB: minB})
+	}
+	liveMu.Unlock()
+
+	for _, c := range cands {
+		ltPos, _ := fetchLtPosREST(c.sym)
+		if math.Abs(ltPos) >= c.minB {
+			continue
+		}
+		peerPos, okP := fetchRealPeerPositionAbs(c.peerVenue, c.peerSym)
+		if !okP || peerPos >= c.minB*0.5 {
+			continue
+		}
+		liveMu.Lock()
+		if rt := liveSlots[c.sk]; rt != nil && rt.Sym == c.sym && (rt.State == "HEDGED" || rt.State == "PEER_EXIT_OPEN") {
+			fmt.Printf("[GHOST_SLOT_CLEARED slot=%s sym=%s peer=%s] Both Lighter & Peer positions confirmed 0 -> resetting slot to IDLE!\n",
+				c.sk, c.sym, c.peerSym)
+			rt.State = "IDLE"
+			rt.Sym = ""
+			rt.PeerSym = ""
+			rt.LtCOI = 0
+			rt.EntryPeerOid = 0
+			rt.ExitPeerOid = 0
+			rt.HedgedQty = 0
+			rt.EntryFeeUsd = 0
+			rt.LegacyWindDown = false
+			rt.RotatedNote = ""
+		}
+		liveMu.Unlock()
+	}
+}
+
 func runLiveMicroArenaLoop() {
 	initLiveMicroArena()
 	time.Sleep(4 * time.Second)
@@ -2989,9 +3102,29 @@ func runLiveMicroArenaLoop() {
 	}
 	_, _, _ = fetchAsterAccountMargin()
 	emitBnAuditLine()
+	reconcileGhostSlotsWithRealExchanges()
 	sweepUntrackedLtOrphansSync()
 	evaluateForwardArenaIdleSafeRotation()
 	writeLiveArenaTelemetry(time.Now())
+
+	// Staggered Lighter REST BBO resync (1 coin / 950ms = ~15s cycle across universe, 0 TX quota!) so WS books NEVER hold stale un-deleted levels:
+	go func() {
+		idx := 0
+		syms := []string{"UNI", "HYPE", "ENA", "NEAR", "WLD", "AAVE", "SUI", "ARB", "AVAX", "TRUMP", "TIA", "CRV", "ETHFI", "LINK", "DOGE", "XRP", "NVDA", "TSLA", "COIN", "HOOD", "SPY", "QQQ"}
+		t := time.NewTicker(950 * time.Millisecond)
+		defer t.Stop()
+		for {
+			<-t.C
+			if remotePaused.Load() || breakerTripped.Load() {
+				return
+			}
+			sym := syms[idx%len(syms)]
+			idx++
+			if m, ok := markets[sym]; ok {
+				_, _ = fetchLtBookREST(m.ID)
+			}
+		}
+	}()
 
 	// Keep TLS TCP pools to fapi.binance.com, fapi.asterdex.com, and mainnet.zklighter.elliot.ai warm every 4s (<8ms hedge):
 	go func() {
@@ -3060,7 +3193,10 @@ func runLiveMicroArenaLoop() {
 		}
 		if now.Sub(lastOrphanCheck) >= 30*time.Second {
 			lastOrphanCheck = now
-			go sweepUntrackedLtOrphansSync()
+			go func() {
+				reconcileGhostSlotsWithRealExchanges()
+				sweepUntrackedLtOrphansSync()
+			}()
 		}
 		if now.Sub(lastRotCheck) >= 30*time.Second {
 			lastRotCheck = now

@@ -1436,9 +1436,11 @@ func fetchLtBookREST(mid int64) (float64, float64) {
 	var ob struct {
 		Bids []struct {
 			Price string `json:"price"`
+			Size  string `json:"size"`
 		} `json:"bids"`
 		Asks []struct {
 			Price string `json:"price"`
+			Size  string `json:"size"`
 		} `json:"asks"`
 	}
 	if json.Unmarshal(body, &ob) != nil || len(ob.Bids) == 0 || len(ob.Asks) == 0 {
@@ -1446,6 +1448,36 @@ func fetchLtBookREST(mid int64) (float64, float64) {
 	}
 	bb, _ := strconv.ParseFloat(ob.Bids[0].Price, 64)
 	ba, _ := strconv.ParseFloat(ob.Asks[0].Price, 64)
+	if bb > 0 && ba > bb {
+		if sym, ok := idToSym[mid]; ok {
+			if st := mktStates[sym]; st != nil {
+				st.mu.Lock()
+				for ps := range st.bookBids {
+					if p, e := strconv.ParseFloat(ps, 64); e == nil && p > bb {
+						delete(st.bookBids, ps)
+					}
+				}
+				for ps := range st.bookAsks {
+					if p, e := strconv.ParseFloat(ps, 64); e == nil && p < ba {
+						delete(st.bookAsks, ps)
+					}
+				}
+				for _, b := range ob.Bids {
+					if sz, e := strconv.ParseFloat(b.Size, 64); e == nil && sz > 0 {
+						st.bookBids[b.Price] = sz
+					}
+				}
+				for _, a := range ob.Asks {
+					if sz, e := strconv.ParseFloat(a.Size, 64); e == nil && sz > 0 {
+						st.bookAsks[a.Price] = sz
+					}
+				}
+				recomputeBBO(st)
+				st.lastBookTS = time.Now()
+				st.mu.Unlock()
+			}
+		}
+	}
 	return bb, ba
 }
 
@@ -1780,6 +1812,7 @@ func flattenAndExitPause(reason string) {
 		flattenAsterAllSync()
 	}()
 	wg.Wait()
+	clearAllLiveSlotsOnFlatten()
 	if liveInitDone.Load() {
 		writeLiveArenaTelemetry(time.Now())
 	}
@@ -2942,6 +2975,7 @@ func main() {
 		time.Sleep(1200 * time.Millisecond)
 		_, _, _, _ = fetchBnAccountMargin()
 		_, _, _ = fetchAsterAccountMargin()
+		clearAllLiveSlotsOnFlatten()
 		writeLiveArenaTelemetry(time.Now())
 		fmt.Println("[PAUSED] /tmp/lighter_pause.flag active; swept all 3 venues 100% flat and exiting.")
 		os.Exit(0)

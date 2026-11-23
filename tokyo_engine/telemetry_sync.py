@@ -344,13 +344,16 @@ def fetch_binance_income_and_reconstruct(fapi, lt_trades, disk_hist, cached_wall
         i_sym = r.get("symbol", "")
         base_sym = i_sym[:-4] if i_sym.endswith(("USDC", "USDT")) else i_sym
         if by_sym.get(base_sym):
-            cl = min(by_sym[base_sym], key=lambda c: abs(t_ms - c["closeTs"]))
-            used_inc.add(idx)
-            cl["matchedBnSym"] = i_sym
-            v = float(r.get("income") or 0.0)
-            cl["bnLeg"] += v
-            if tp == "COMMISSION":
-                cl["feeUsd"] += abs(v)
+            cand = min(by_sym[base_sym], key=lambda c: abs(t_ms - c["closeTs"]))
+            if t_ms >= cand["openTs"] - 5000 and abs(t_ms - cand["closeTs"]) <= 45000:
+                used_inc.add(idx)
+                cand["matchedBnSym"] = i_sym
+                v = float(r.get("income") or 0.0)
+                cand["bnLeg"] += v
+                if tp == "COMMISSION":
+                    cand["feeUsd"] += abs(v)
+            else:
+                bn_only_rows.append((t_ms, i_sym, base_sym, tp, float(r.get("income") or 0.0)))
         else:
             bn_only_rows.append((t_ms, i_sym, base_sym, tp, float(r.get("income") or 0.0)))
 
