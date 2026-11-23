@@ -30,14 +30,14 @@ import (
 )
 
 const (
-	BotVersion = "v107.4"
+	BotVersion = "v108.0"
 	BaseURL    = "https://mainnet.zklighter.elliot.ai"
 	WsURL      = "wss://mainnet.zklighter.elliot.ai/stream"
 	AcctIdx    = int64(770015)
 	KeyIdx     = uint8(4)
 	ChainID    = uint32(304)
 	PrivKey    = "56491130b44362b137b0a3b46dc63d647865876f11ff1613c857f946ec8612f6e4f216d065f4695a"
-	StopEqUSD  = 83.50
+	StopEqUSD  = 82.69
 	ClipUSD    = 40.00
 
 	BnApiKey = "I4IImhi629VlyPD28pnIkveLZsAwH5yf0COTtmJQuYiGFICACdCS03HEXz2OCti4"

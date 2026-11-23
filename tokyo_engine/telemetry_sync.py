@@ -790,19 +790,9 @@ def main():
                                 Body=arena_bytes,
                                 ContentType="application/json",
                                 CacheControl="no-store, no-cache, must-revalidate, max-age=0",
-                                ACL="public-read",
                             )
                     except Exception:
-                        try:
-                            s3.put_object(
-                                Bucket=S3_BUCKET,
-                                Key=ARENA_S3_KEY,
-                                Body=arena_bytes,
-                                ContentType="application/json",
-                                CacheControl="no-store, no-cache, must-revalidate, max-age=0",
-                            )
-                        except Exception:
-                            pass
+                        pass
         except Exception as e:
             print("Telemetry loop err:", e, flush=True)
 
