@@ -241,27 +241,27 @@ var (
 	bnPresets = map[string]StratPreset{
 		"L1_0FEE_SMALL_SCALP": {
 			ForwardID: "L1_0FEE_SMALL_SCALP", Regime: "LOW VOL", Label: "LOW VOL | 24x7 0%-Fee Small-Spread Scalper",
-			SingleLegLt: true, MinRawEdgeBp: 2.2, EntryDisloc: 2.2, TakerGrabBp: 0, ExitNetBp: 2.0, DecaySec: 25, MaxHoldSec: 45,
-			Symbols: []string{"ETH", "SOL", "BNB", "HYPE", "XRP", "NEAR", "SUI", "ENA", "AVAX", "AAVE", "UNI", "DOGE"},
+			SingleLegLt: true, MinRawEdgeBp: 1.2, EntryDisloc: 1.2, TakerGrabBp: 0, ExitNetBp: 1.5, DecaySec: 25, MaxHoldSec: 45,
+			Symbols: []string{"ETH", "SOL", "BNB", "HYPE", "XRP", "NEAR", "SUI", "ENA", "AVAX", "AAVE", "UNI", "DOGE", "WLD", "ARB", "LINK"},
 		},
 		"M1_LT_BN_FAST_SMALL": {
 			ForwardID: "M1_LT_BN_FAST_SMALL", Regime: "MID VOL", Label: "MID VOL | Fast Small-Spread Arb (Lighter-First Exit)",
-			MinRawEdgeBp: 1.5, EntryDisloc: 9.5, TakerGrabBp: 0, ExitNetBp: 1.8, DecaySec: 120, MaxHoldSec: 600,
+			MinRawEdgeBp: 1.5, EntryDisloc: 9.5, TakerGrabBp: 0, ExitNetBp: 1.8, DecaySec: 120, MaxHoldSec: 360,
 			Symbols: []string{"BTC", "ETH", "SOL", "BNB", "UNI", "HYPE", "ENA", "NEAR", "WLD", "AAVE", "SUI", "ARB", "AVAX", "LINK", "DOGE", "XRP"},
 		},
 		"M2_LT_BN_HIGH_CONV": {
 			ForwardID: "M2_LT_BN_HIGH_CONV", Regime: "MID VOL", Label: "MID VOL | High-Conviction Spread Harvester (>=11.5bp)",
-			MinRawEdgeBp: 3.5, EntryDisloc: 11.5, TakerGrabBp: 0, ExitNetBp: 3.0, DecaySec: 300, MaxHoldSec: 900,
+			MinRawEdgeBp: 3.5, EntryDisloc: 11.5, TakerGrabBp: 0, ExitNetBp: 3.0, DecaySec: 240, MaxHoldSec: 540,
 			Symbols: []string{"BTC", "ETH", "SOL", "BNB", "UNI", "HYPE", "ENA", "NEAR", "WLD", "AAVE", "SUI", "ARB", "AVAX", "LINK", "DOGE", "XRP"},
 		},
 		"P1_0FEE_IMPULSE_SNIPER": {
 			ForwardID: "P1_0FEE_IMPULSE_SNIPER", Regime: "PEAK VOL", Label: "PEAK VOL | 0%-Fee Binance-Lead -> Lighter-Lag Sniper",
-			SingleLegLt: true, MinRawEdgeBp: 2.2, EntryDisloc: 3.0, TakerGrabBp: 2.2, ExitNetBp: 2.8, DecaySec: 9, MaxHoldSec: 20,
+			SingleLegLt: true, MinRawEdgeBp: 1.2, EntryDisloc: 2.0, TakerGrabBp: 2.0, ExitNetBp: 2.5, DecaySec: 9, MaxHoldSec: 20,
 			Symbols: []string{"BTC", "ETH", "SOL", "BNB", "HYPE", "XRP", "NEAR", "SUI", "ENA", "AVAX"},
 		},
 		"P2_CROSSED_BOOK_GRAB": {
 			ForwardID: "P2_CROSSED_BOOK_GRAB", Regime: "PEAK VOL", Label: "PEAK VOL | Crossed-Book Grab (>=10.5bp IOC, LT-First Exit)",
-			MinRawEdgeBp: 2.5, EntryDisloc: 10.5, TakerGrabBp: 10.5, ExitNetBp: 2.2, DecaySec: 240, MaxHoldSec: 720,
+			MinRawEdgeBp: 2.5, EntryDisloc: 10.5, TakerGrabBp: 10.5, ExitNetBp: 2.2, DecaySec: 180, MaxHoldSec: 480,
 			Symbols: []string{"BTC", "ETH", "SOL", "BNB", "UNI", "HYPE", "ENA", "NEAR", "WLD", "AAVE", "SUI", "ARB", "AVAX", "TRUMP", "TIA", "CRV", "ETHFI", "LINK", "DOGE", "XRP"},
 		},
 	}
@@ -1568,7 +1568,7 @@ func stepSimpleSlot(sl *SimpleSlot, now time.Time) {
 				continue
 			}
 			spBp := ((la - lb) / lb) * 10000.0
-			if spBp < 2.2 || spBp > 9.0 {
+			if spBp < 1.2 || spBp > 9.0 {
 				continue
 			}
 			_, _, _, _, _, _, _, _, jumpBps, _, warm, age, okB := getBnUsdcBook(sym, now)
@@ -1594,7 +1594,7 @@ func stepSimpleSlot(sl *SimpleSlot, now time.Time) {
 			return
 		}
 		rb, ra := fetchLtBookREST(markets[lSym].ID)
-		if rb <= 0 || ra <= rb || ((ra-rb)/rb)*10000.0 < 2.2 {
+		if rb <= 0 || ra <= rb || ((ra-rb)/rb)*10000.0 < 1.2 {
 			return
 		}
 		if lSide == "ASK" {
@@ -1777,7 +1777,7 @@ func stepSimpleSlot(sl *SimpleSlot, now time.Time) {
 			continue
 		}
 		bnSym, qDec, _, step, minNot, pBid, pAsk, emaBps, jumpBps, fx, warm, age, okB := getBnUsdcBook(sym, now)
-		if !okB || warm < 8 || age > 8*time.Second || math.Abs(jumpBps) > 1.8 || (pAsk-pBid)/pBid*10000.0 > 8.0 {
+		if !okB || warm < 8 || age > 8*time.Second || math.Abs(jumpBps) > 1.0 || (pAsk-pBid)/pBid*10000.0 > 8.0 {
 			continue
 		}
 		cStep := math.Max(step, math.Pow10(-m.SzDec))
