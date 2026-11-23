@@ -220,6 +220,18 @@ var (
 			IdleConnTimeout:     90 * time.Second,
 		},
 	}
+	ltRestHTTP = &http.Client{
+		Timeout: 5 * time.Second,
+		Transport: &http.Transport{
+			DialContext:         (&net.Dialer{Timeout: 3 * time.Second, KeepAlive: 60 * time.Second}).DialContext,
+			MaxIdleConnsPerHost: 12,
+			IdleConnTimeout:     90 * time.Second,
+		},
+	}
+	ltAcctMu        sync.Mutex
+	ltAcctCache     *LtAcctSnap
+	ltAcctCacheTS   time.Time
+	ltRestCoolUntil atomic.Int64
 	bnHTTP = &http.Client{
 		Timeout: 3500 * time.Millisecond,
 		Transport: &http.Transport{
@@ -458,6 +470,10 @@ func nextOpts() *types.TransactOpts {
 }
 
 func sendSignedTx(id, dbg string, build func(*types.TransactOpts) (uint8, string, error)) error {
+	if (remotePaused.Load() || breakerTripped.Load()) &&
+		!strings.HasPrefix(id, "ca") && !strings.Contains(id, "flat") && !strings.HasPrefix(id, "lt_") {
+		return fmt.Errorf("paused: blocked non-close tx %s", id)
+	}
 	txMu.Lock()
 	defer txMu.Unlock()
 	t0 := time.Now()
@@ -1268,7 +1284,25 @@ func runBnUserWS() {
 	}
 }
 
+type LtAcctPos struct {
+	MarketID       int64  `json:"market_id"`
+	Position       string `json:"position"`
+	Sign           int    `json:"sign"`
+	AvgEntryPrice  string `json:"avg_entry_price"`
+	OpenOrderCount int    `json:"open_order_count"`
+}
+
+type LtAcctSnap struct {
+	TotalAssetValue string      `json:"total_asset_value"`
+	Collateral      string      `json:"collateral"`
+	TotalOrderCount int         `json:"total_order_count"`
+	Positions       []LtAcctPos `json:"positions"`
+}
+
 func ltGet(hc *http.Client, u string) (*http.Response, error) {
+	if hc == nil {
+		hc = ltRestHTTP
+	}
 	req, err := http.NewRequest("GET", u, nil)
 	if err != nil {
 		return nil, err
@@ -1277,108 +1311,166 @@ func ltGet(hc *http.Client, u string) (*http.Response, error) {
 	return hc.Do(req)
 }
 
-func syncAccountLoop() {
-	hc := &http.Client{Timeout: 6 * time.Second}
+func fetchLtAccountCached(maxAge time.Duration, maxRetries int) (*LtAcctSnap, bool) {
+	ltAcctMu.Lock()
+	if ltAcctCache != nil && maxAge > 0 && time.Since(ltAcctCacheTS) <= maxAge {
+		cp := ltAcctCache
+		ltAcctMu.Unlock()
+		return cp, true
+	}
+	ltAcctMu.Unlock()
+
 	accURL := fmt.Sprintf("%s/api/v1/account?by=index&value=%d", BaseURL, AcctIdx)
-	trURL := fmt.Sprintf("%s/api/v1/trades?account_index=%d&limit=100&sort_by=timestamp", BaseURL, AcctIdx)
+	backoffs := []time.Duration{0, 2 * time.Second, 4 * time.Second, 6 * time.Second, 9 * time.Second}
+	attempts := 1 + maxRetries
+	if attempts > len(backoffs) {
+		attempts = len(backoffs)
+	}
+	for i := 0; i < attempts; i++ {
+		if i > 0 {
+			time.Sleep(backoffs[i])
+		}
+		if maxRetries == 0 && time.Now().UnixMilli() < ltRestCoolUntil.Load() {
+			return nil, false
+		}
+		resp, err := ltGet(ltRestHTTP, accURL)
+		if err != nil {
+			continue
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode == 429 || resp.StatusCode == 403 {
+			ltRestCoolUntil.Store(time.Now().Add(12 * time.Second).UnixMilli())
+			fmt.Printf("[LT_REST_LIMIT endpoint=account sc=%d try=%d/%d]\n", resp.StatusCode, i+1, attempts)
+			continue
+		}
+		if resp.StatusCode != 200 {
+			continue
+		}
+		var res struct {
+			Accounts []LtAcctSnap `json:"accounts"`
+		}
+		if json.Unmarshal(body, &res) != nil || len(res.Accounts) == 0 {
+			continue
+		}
+		var rawObj struct {
+			Accounts []json.RawMessage `json:"accounts"`
+		}
+		if json.Unmarshal(body, &rawObj) == nil && len(rawObj.Accounts) > 0 {
+			_ = os.WriteFile("/tmp/lighter_acct.json.tmp", rawObj.Accounts[0], 0644)
+			_ = os.Rename("/tmp/lighter_acct.json.tmp", "/tmp/lighter_acct.json")
+		}
+		a := res.Accounts[0]
+		col, _ := strconv.ParseFloat(a.Collateral, 64)
+		if col > 0 {
+			ltCollateral.Store(int64(col * 1e6))
+			if peakLtCol.Load() == 0 || col > float64(peakLtCol.Load())/1e6+15.0 {
+				peakLtCol.Store(int64(col * 1e6))
+			}
+		}
+		eq, _ := strconv.ParseFloat(a.TotalAssetValue, 64)
+		if eq <= 0 {
+			eq = col
+		}
+		if eq > 0 {
+			eqNow.Store(int64(eq * 1e6))
+			dynStopLt := math.Max(StopEqUSD, float64(peakLtCol.Load())/1e6-8.00)
+			if eq < dynStopLt && breakerTripped.CompareAndSwap(false, true) {
+				go flattenAndExitPause(fmt.Sprintf("STOP-LOSS Lighter eq=$%.2f < $%.2f", eq, dynStopLt))
+			}
+		}
+		seenMid := map[int64]bool{}
+		for _, p := range a.Positions {
+			seenMid[p.MarketID] = true
+			if sym, ok := idToSym[p.MarketID]; ok {
+				st := mktStates[sym]
+				if st == nil {
+					continue
+				}
+				sz, _ := strconv.ParseFloat(p.Position, 64)
+				if p.Sign < 0 && sz > 0 {
+					sz = -sz
+				}
+				st.mu.Lock()
+				prevPos := st.pos
+				st.pos = sz
+				ae, _ := strconv.ParseFloat(p.AvgEntryPrice, 64)
+				if ae > 0 {
+					st.avgEntry = ae
+				}
+				if math.Abs(sz-prevPos) > 1e-6 {
+					st.lastFillTS = time.Now()
+				}
+				st.mu.Unlock()
+			}
+		}
+		// Zero any symbol omitted from positions array:
+		for mid, sym := range idToSym {
+			if !seenMid[mid] {
+				if st := mktStates[sym]; st != nil {
+					st.mu.Lock()
+					st.pos = 0
+					st.mu.Unlock()
+				}
+			}
+		}
+		snap := &a
+		ltAcctMu.Lock()
+		ltAcctCache = snap
+		ltAcctCacheTS = time.Now()
+		ltAcctMu.Unlock()
+		return snap, true
+	}
+	return nil, false
+}
+
+func syncAccountLoop() {
 	loopCnt := 0
 	for {
 		loopCnt++
-		if loopCnt%2 == 1 {
-			if trResp, e := ltGet(hc, trURL); e == nil {
+		_, _ = fetchLtAccountCached(2500*time.Millisecond, 0)
+		if loopCnt%4 == 1 && time.Now().UnixMilli() >= ltRestCoolUntil.Load() {
+			trURL := fmt.Sprintf("%s/api/v1/trades?account_index=%d&limit=100&sort_by=timestamp", BaseURL, AcctIdx)
+			if txCli != nil {
+				if tok, eTok := txCli.GetAuthToken(time.Now().Add(10 * time.Minute)); eTok == nil && tok != "" {
+					trURL += "&auth=" + url.QueryEscape(tok)
+				}
+			}
+			if trResp, e := ltGet(ltRestHTTP, trURL); e == nil {
 				tb, _ := io.ReadAll(trResp.Body)
 				trResp.Body.Close()
-				if len(tb) > 20 && strings.Contains(string(tb), `"trades"`) {
+				if trResp.StatusCode == 429 || trResp.StatusCode == 403 {
+					ltRestCoolUntil.Store(time.Now().Add(12 * time.Second).UnixMilli())
+					fmt.Printf("[LT_REST_LIMIT endpoint=trades sc=%d]\n", trResp.StatusCode)
+				} else if trResp.StatusCode == 200 && len(tb) > 20 && strings.Contains(string(tb), `"trades"`) {
 					_ = os.WriteFile("/tmp/lighter_trades.json.tmp", tb, 0644)
 					_ = os.Rename("/tmp/lighter_trades.json.tmp", "/tmp/lighter_trades.json")
 				}
 			}
 		}
-		if resp, err := ltGet(hc, accURL); err == nil {
-			body, _ := io.ReadAll(resp.Body)
-			resp.Body.Close()
-			var res struct {
-				Accounts []struct {
-					TotalAssetValue string `json:"total_asset_value"`
-					Collateral      string `json:"collateral"`
-					Positions       []struct {
-						MarketID      int64  `json:"market_id"`
-						Position      string `json:"position"`
-						Sign          int    `json:"sign"`
-						AvgEntryPrice string `json:"avg_entry_price"`
-					} `json:"positions"`
-				} `json:"accounts"`
-			}
-			if json.Unmarshal(body, &res) == nil && len(res.Accounts) > 0 {
-				var rawObj struct {
-					Accounts []json.RawMessage `json:"accounts"`
-				}
-				if json.Unmarshal(body, &rawObj) == nil && len(rawObj.Accounts) > 0 {
-					_ = os.WriteFile("/tmp/lighter_acct.json.tmp", rawObj.Accounts[0], 0644)
-					_ = os.Rename("/tmp/lighter_acct.json.tmp", "/tmp/lighter_acct.json")
-				}
-				a := res.Accounts[0]
-				col, _ := strconv.ParseFloat(a.Collateral, 64)
-				if col > 0 {
-					ltCollateral.Store(int64(col * 1e6))
-					if peakLtCol.Load() == 0 || col > float64(peakLtCol.Load())/1e6+15.0 {
-						peakLtCol.Store(int64(col * 1e6))
-					}
-				}
-				eq, _ := strconv.ParseFloat(a.TotalAssetValue, 64)
-				if eq <= 0 {
-					eq = col
-				}
-				if eq > 0 {
-					eqNow.Store(int64(eq * 1e6))
-					dynStopLt := math.Max(StopEqUSD, float64(peakLtCol.Load())/1e6-8.00)
-					if eq < dynStopLt && breakerTripped.CompareAndSwap(false, true) {
-						go flattenAndExitPause(fmt.Sprintf("STOP-LOSS Lighter eq=$%.2f < $%.2f", eq, dynStopLt))
-					}
-				}
-				for _, p := range a.Positions {
-					if sym, ok := idToSym[p.MarketID]; ok {
-						st := mktStates[sym]
-						if st == nil {
-							continue
-						}
-						sz, _ := strconv.ParseFloat(p.Position, 64)
-						if p.Sign < 0 && sz > 0 {
-							sz = -sz
-						}
-						st.mu.Lock()
-						prevPos := st.pos
-						st.pos = sz
-						ae, _ := strconv.ParseFloat(p.AvgEntryPrice, 64)
-						if ae > 0 {
-							st.avgEntry = ae
-						}
-						if math.Abs(sz-prevPos) > 1e-6 {
-							st.lastFillTS = time.Now()
-						}
-						st.mu.Unlock()
-					}
-				}
-			}
-		}
-		time.Sleep(2 * time.Second)
+		time.Sleep(4 * time.Second)
 	}
 }
 
 func fetchLtBookREST(mid int64) (float64, float64) {
-	hc := &http.Client{Timeout: 4 * time.Second}
-	u := fmt.Sprintf("%s/api/v1/orderBookOrders?market_id=%d&limit=5", BaseURL, mid)
-	req, err := http.NewRequest("GET", u, nil)
-	if err != nil {
+	if time.Now().UnixMilli() < ltRestCoolUntil.Load() {
 		return 0, 0
 	}
-	req.Header.Set("User-Agent", "Mozilla/5.0")
-	resp, err := hc.Do(req)
+	u := fmt.Sprintf("%s/api/v1/orderBookOrders?market_id=%d&limit=5", BaseURL, mid)
+	resp, err := ltGet(ltRestHTTP, u)
 	if err != nil {
 		return 0, 0
 	}
 	body, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
+	if resp.StatusCode == 429 || resp.StatusCode == 403 {
+		ltRestCoolUntil.Store(time.Now().Add(12 * time.Second).UnixMilli())
+		fmt.Printf("[LT_REST_LIMIT endpoint=orderBookOrders sc=%d]\n", resp.StatusCode)
+		return 0, 0
+	}
+	if resp.StatusCode != 200 {
+		return 0, 0
+	}
 	var ob struct {
 		Bids []struct {
 			Price string `json:"price"`
@@ -1427,50 +1519,31 @@ func fetchLtBookREST(mid int64) (float64, float64) {
 	return bb, ba
 }
 
-func fetchLtPosREST(sym string) (float64, float64) {
+func fetchLtPosRESTChecked(sym string) (float64, float64, bool) {
 	m, ok := markets[sym]
 	if !ok {
-		return 0, 0
+		return 0, 0, false
 	}
-	hc := &http.Client{Timeout: 3 * time.Second}
-	resp, err := ltGet(hc, fmt.Sprintf("%s/api/v1/account?by=index&value=%d", BaseURL, AcctIdx))
-	if err != nil {
-		return 0, 0
+	snap, okS := fetchLtAccountCached(1500*time.Millisecond, 0)
+	if !okS || snap == nil {
+		return 0, 0, false
 	}
-	body, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	var res struct {
-		Accounts []struct {
-			Positions []struct {
-				MarketID      int64  `json:"market_id"`
-				Position      string `json:"position"`
-				Sign          int    `json:"sign"`
-				AvgEntryPrice string `json:"avg_entry_price"`
-			} `json:"positions"`
-		} `json:"accounts"`
-	}
-	if json.Unmarshal(body, &res) != nil || len(res.Accounts) == 0 {
-		return 0, 0
-	}
-	for _, p := range res.Accounts[0].Positions {
+	for _, p := range snap.Positions {
 		if p.MarketID == m.ID {
 			sz, _ := strconv.ParseFloat(p.Position, 64)
 			if p.Sign < 0 && sz > 0 {
 				sz = -sz
 			}
 			ae, _ := strconv.ParseFloat(p.AvgEntryPrice, 64)
-			if st := mktStates[sym]; st != nil {
-				st.mu.Lock()
-				st.pos = sz
-				if ae > 0 {
-					st.avgEntry = ae
-				}
-				st.mu.Unlock()
-			}
-			return sz, ae
+			return sz, ae, true
 		}
 	}
-	return 0, 0
+	return 0, 0, true
+}
+
+func fetchLtPosREST(sym string) (float64, float64) {
+	sz, ae, _ := fetchLtPosRESTChecked(sym)
+	return sz, ae
 }
 
 // ---------- Pause & Flatten Guards ----------
@@ -1567,39 +1640,46 @@ func triggerS3Pause(reason string) {
 }
 
 func flattenAllLtPositionsSync(prefix string) {
-	hc := &http.Client{Timeout: 3 * time.Second}
-	resp, err := ltGet(hc, fmt.Sprintf("%s/api/v1/account?by=index&value=%d", BaseURL, AcctIdx))
-	if err != nil {
-		return
-	}
-	body, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	var res struct {
-		Accounts []struct {
-			Positions []struct {
-				MarketID int64  `json:"market_id"`
-				Position string `json:"position"`
-				Sign     int    `json:"sign"`
-			} `json:"positions"`
-		} `json:"accounts"`
-	}
-	if json.Unmarshal(body, &res) != nil || len(res.Accounts) == 0 {
-		return
-	}
-	for _, p := range res.Accounts[0].Positions {
-		sym, ok := idToSym[p.MarketID]
-		if !ok {
-			continue
+	posList := map[string]float64{}
+	avgList := map[string]float64{}
+	if snap, ok := fetchLtAccountCached(0, 4); ok && snap != nil {
+		for _, p := range snap.Positions {
+			sym, okS := idToSym[p.MarketID]
+			if !okS {
+				continue
+			}
+			sz, _ := strconv.ParseFloat(p.Position, 64)
+			if p.Sign < 0 && sz > 0 {
+				sz = -sz
+			}
+			ae, _ := strconv.ParseFloat(p.AvgEntryPrice, 64)
+			if m, okM := markets[sym]; okM && math.Abs(sz) >= m.MinB {
+				posList[sym] = sz
+				if ae > 0 {
+					avgList[sym] = ae
+				}
+			}
 		}
+	} else {
+		// Fallback to live WS mktStates if Lighter REST is rate-limited!
+		for sym, st := range mktStates {
+			if st == nil {
+				continue
+			}
+			st.mu.Lock()
+			sz, ae := st.pos, st.avgEntry
+			st.mu.Unlock()
+			if m, okM := markets[sym]; okM && math.Abs(sz) >= m.MinB {
+				posList[sym] = sz
+				if ae > 0 {
+					avgList[sym] = ae
+				}
+			}
+		}
+	}
+	for sym, sz := range posList {
 		m, okM := markets[sym]
 		if !okM {
-			continue
-		}
-		sz, _ := strconv.ParseFloat(p.Position, 64)
-		if p.Sign < 0 && sz > 0 {
-			sz = -sz
-		}
-		if math.Abs(sz) < m.MinB {
 			continue
 		}
 		var lb, la float64
@@ -1611,11 +1691,31 @@ func flattenAllLtPositionsSync(prefix string) {
 		if lb <= 0 || la <= 0 {
 			lb, la = fetchLtBookREST(m.ID)
 		}
-		px := la * 1.015
+		if lb <= 0 || la <= 0 {
+			// Fallback to Peer mid price if Lighter book REST is rate-limited!
+			dnMu.Lock()
+			if db := dnBooks[sym+"USDC"]; db != nil && db.Bid > 0 && db.Ask > 0 {
+				lb, la = db.Bid, db.Ask
+			}
+			dnMu.Unlock()
+		}
+		if lb <= 0 || la <= 0 {
+			asterMu.Lock()
+			if db := asterBooks[sym+"USDT"]; db != nil && db.Bid > 0 && db.Ask > 0 {
+				lb, la = db.Bid, db.Ask
+			}
+			asterMu.Unlock()
+		}
+		if lb <= 0 || la <= 0 {
+			if ae := avgList[sym]; ae > 0 {
+				lb, la = ae*0.97, ae*1.03
+			}
+		}
+		px := la * 1.020
 		var isAsk uint8
 		if sz > 0 {
 			isAsk = 1
-			px = lb * 0.985
+			px = lb * 0.980
 		}
 		if px > 0 {
 			_ = sendSignedTx(prefix+sym, sym, func(opts *types.TransactOpts) (uint8, string, error) {
@@ -1748,6 +1848,9 @@ func flattenAndExitPause(reason string) {
 		defer wg.Done()
 		cancelAll()
 		flattenAllLtPositionsSync("pause_flat_")
+		time.Sleep(2500 * time.Millisecond)
+		cancelAll()
+		flattenAllLtPositionsSync("pause_flat2_")
 	}()
 	go func() {
 		defer wg.Done()
@@ -2145,7 +2248,7 @@ func queryBnOrder(symbol string, oid int64, lastPoll time.Time, forceREST bool) 
 }
 
 func fetchLtTradeFillByCOI(sym string, coi int64) (signedQty, vwapPx float64, found bool) {
-	if coi <= 0 {
+	if coi <= 0 || time.Now().UnixMilli() < ltRestCoolUntil.Load() {
 		return 0, 0, false
 	}
 	u := fmt.Sprintf("%s/api/v1/trades?account_index=%d&limit=25&sort_by=timestamp", BaseURL, AcctIdx)
@@ -2154,12 +2257,19 @@ func fetchLtTradeFillByCOI(sym string, coi int64) (signedQty, vwapPx float64, fo
 			u += "&auth=" + url.QueryEscape(tok)
 		}
 	}
-	resp, err := ltGet(txHTTP, u)
+	resp, err := ltGet(ltRestHTTP, u)
 	if err != nil {
 		return 0, 0, false
 	}
 	b, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
+	if resp.StatusCode == 429 || resp.StatusCode == 403 {
+		ltRestCoolUntil.Store(time.Now().Add(12 * time.Second).UnixMilli())
+		return 0, 0, false
+	}
+	if resp.StatusCode != 200 {
+		return 0, 0, false
+	}
 	var tr struct {
 		Trades []struct {
 			Sym         string `json:"market_symbol"`

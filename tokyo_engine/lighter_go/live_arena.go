@@ -766,26 +766,11 @@ func fetchLtMarketOpenOrderCountREST(sym string) (int, bool) {
 	if !exists {
 		return 0, false
 	}
-	hc := &http.Client{Timeout: 3 * time.Second}
-	resp, err := ltGet(hc, fmt.Sprintf("%s/api/v1/account?by=index&value=%d", BaseURL, AcctIdx))
-	if err != nil {
+	snap, ok := fetchLtAccountCached(1500*time.Millisecond, 0)
+	if !ok || snap == nil {
 		return 0, false
 	}
-	body, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	var res struct {
-		Accounts []struct {
-			TotalOrderCount int `json:"total_order_count"`
-			Positions       []struct {
-				MarketID       int64 `json:"market_id"`
-				OpenOrderCount int   `json:"open_order_count"`
-			} `json:"positions"`
-		} `json:"accounts"`
-	}
-	if json.Unmarshal(body, &res) != nil || len(res.Accounts) == 0 {
-		return 0, false
-	}
-	for _, p := range res.Accounts[0].Positions {
+	for _, p := range snap.Positions {
 		if p.MarketID == m.ID {
 			return p.OpenOrderCount, true
 		}
@@ -1157,19 +1142,28 @@ func waitExactLtCloseTrade(sym string, minTsMs int64, maxWait time.Duration) (vw
 }
 
 func fetchExactLtCloseTrade(sym string, minTsMs int64) (vwapPx, realPnl float64, found bool) {
-	hc := &http.Client{Timeout: 3 * time.Second}
+	if time.Now().UnixMilli() < ltRestCoolUntil.Load() {
+		return 0, 0, false
+	}
 	u := fmt.Sprintf("%s/api/v1/trades?account_index=%d&limit=20&sort_by=timestamp", BaseURL, AcctIdx)
 	if txCli != nil {
 		if tok, eTok := txCli.GetAuthToken(time.Now().Add(10 * time.Minute)); eTok == nil && tok != "" {
 			u += "&auth=" + url.QueryEscape(tok)
 		}
 	}
-	resp, err := ltGet(hc, u)
+	resp, err := ltGet(ltRestHTTP, u)
 	if err != nil {
 		return 0, 0, false
 	}
 	b, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
+	if resp.StatusCode == 429 || resp.StatusCode == 403 {
+		ltRestCoolUntil.Store(time.Now().Add(12 * time.Second).UnixMilli())
+		return 0, 0, false
+	}
+	if resp.StatusCode != 200 {
+		return 0, 0, false
+	}
 	var tr struct {
 		Trades []struct {
 			Sym       string `json:"market_symbol"`
@@ -1835,8 +1829,34 @@ func stepLiveSlot(rt *LiveSlotRuntime, now time.Time) {
 		}
 
 		// Did Lighter Maker fill (fully or partially >= MinB)?
-		// HEDGE-FIRST (<8ms): Fire Peer Market Hedge IMMEDIATELY upon WS fill, BEFORE canceling remainder on Lighter!
+		// STRICT SIGN CHECK: Verify ltPos sign matches rt.LtSide (BID => >0, ASK => <0)! Never hedge same-side on a wrong-sign orphan!
 		if math.Abs(ltPos) >= m.MinB {
+			expectedSign := 1.0
+			if rt.LtSide == "ASK" {
+				expectedSign = -1.0
+			}
+			if ltPos*expectedSign < 0 {
+				fmt.Printf("[WRONG_SIGN_ORPHAN strat=%s sym=%s want=%s gotPos=%.4f] Flattening Lighter leg instead of same-side hedge!\n",
+					rt.StratID, rt.Sym, rt.LtSide, ltPos)
+				cancelLtOrderByCOISync(rt.Sym, rt.LtCOI)
+				_, _ = closeLtLegGuaranteedSync(rt.Sym, ltPos, lb, la)
+				liveMu.Lock()
+				rt.State = "IDLE"
+				rt.Sym = ""
+				rt.LtCOI = 0
+				rt.CancelSent = false
+				rt.CoolUntil = time.Now().Add(8 * time.Second)
+				liveMu.Unlock()
+				return
+			}
+			// Derive hedge side mathematically from actual ltPos sign so double-long/double-short is impossible!
+			if ltPos > 0 {
+				rt.LtSide = "BID"
+				rt.PeerSide = "SELL"
+			} else {
+				rt.LtSide = "ASK"
+				rt.PeerSide = "BUY"
+			}
 			fillQty := math.Abs(ltPos)
 			if ltAvg <= 0 {
 				ltAvg = rt.LtLimitPx
@@ -1976,20 +1996,28 @@ func stepLiveSlot(rt *LiveSlotRuntime, now time.Time) {
 			return
 		}
 
-		// If CancelSent is already in flight (wait 2.2s past speed-bump + zkLighter settlement + verify open_order_count==0 & pos==0 before IDLE!):
+		// If CancelSent is already in flight (wait 4.5s AFTER cancelAll() returns + require confirmed REST ok && oo==0 && pos==0 before IDLE!):
 		if rt.CancelSent {
-			if now.Sub(rt.CancelAt) >= 2200*time.Millisecond {
+			if time.Since(rt.CancelAt) >= 4500*time.Millisecond {
 				if sq, _, okT := fetchLtTradeFillByCOI(rt.Sym, rt.LtCOI); okT && math.Abs(sq) >= m.MinB {
 					rt.CancelSent = false
 					return // next tick will catch math.Abs(ltPos) >= m.MinB and hedge it immediately!
 				}
-				if rp, _ := fetchLtPosREST(rt.Sym); math.Abs(rp) >= m.MinB {
-					rt.CancelSent = false
-					return // next tick will catch math.Abs(ltPos) >= m.MinB and hedge it immediately!
+				rp, _, okPos := fetchLtPosRESTChecked(rt.Sym)
+				if !okPos {
+					return // NEVER reset to IDLE while Lighter REST is rate-limited/unconfirmed!
 				}
-				if oo, okOO := fetchLtMarketOpenOrderCountREST(rt.Sym); okOO && oo > 0 {
+				if math.Abs(rp) >= m.MinB {
+					rt.CancelSent = false
+					return // next tick will catch math.Abs(ltPos) >= m.MinB and hedge (or flatten if wrong sign)!
+				}
+				oo, okOO := fetchLtMarketOpenOrderCountREST(rt.Sym)
+				if !okOO {
+					return
+				}
+				if oo > 0 {
 					cancelAll()
-					rt.CancelAt = now
+					rt.CancelAt = time.Now()
 					return
 				}
 				liveMu.Lock()
@@ -1997,7 +2025,7 @@ func stepLiveSlot(rt *LiveSlotRuntime, now time.Time) {
 				rt.Sym = ""
 				rt.LtCOI = 0
 				rt.CancelSent = false
-				rt.CoolUntil = now.Add(1200 * time.Millisecond)
+				rt.CoolUntil = time.Now().Add(1200 * time.Millisecond)
 				liveMu.Unlock()
 			}
 			return
@@ -2035,7 +2063,7 @@ func stepLiveSlot(rt *LiveSlotRuntime, now time.Time) {
 			liveMu.Unlock()
 			cancelLtOrderByCOISync(rt.Sym, rt.LtCOI)
 			rt.CancelSent = true
-			rt.CancelAt = now
+			rt.CancelAt = time.Now()
 		}
 		return
 	}
@@ -2048,8 +2076,8 @@ func stepLiveSlot(rt *LiveSlotRuntime, now time.Time) {
 		if st == nil {
 			return
 		}
-		// Refresh live Lighter REST BBO every 1.2s while HEDGED so stale WS ghost levels can NEVER trigger fake convergence!
-		lb, la := refreshLtRestBBOIfDue(rt.Sym, &rt.LastLtRestBBO, 1200*time.Millisecond)
+		// Refresh live Lighter REST BBO every 3.5s while HEDGED (avoids 429 rate-limit while keeping WS fresh):
+		lb, la := refreshLtRestBBOIfDue(rt.Sym, &rt.LastLtRestBBO, 3500*time.Millisecond)
 		peerSym, qDec, pxDec, _, _, _, mFeeBp, tFeeBp, pBid, pAsk, _, jumpBps, fx, _, _, okP := getPeerSpecAndBook(rt.PeerVenue, rt.Sym, now)
 		if !okP || lb <= 0 || la <= lb {
 			return
@@ -2154,8 +2182,8 @@ func stepLiveSlot(rt *LiveSlotRuntime, now time.Time) {
 		if st == nil {
 			return
 		}
-		// Keep Lighter BBO fresh via REST every 1.0s while Peer Maker exit is resting on the book!
-		lb, la := refreshLtRestBBOIfDue(rt.Sym, &rt.LastLtRestBBO, 1000*time.Millisecond)
+		// Keep Lighter BBO fresh via REST every 3.5s while Peer Maker exit is resting on the book:
+		lb, la := refreshLtRestBBOIfDue(rt.Sym, &rt.LastLtRestBBO, 3500*time.Millisecond)
 		peerSym, qDec, _, _, _, _, mFeeBp, _, pBid, pAsk, _, _, fx, _, _, okP := getPeerSpecAndBook(rt.PeerVenue, rt.Sym, now)
 		if !okP {
 			peerSym = rt.PeerSym
@@ -2323,7 +2351,7 @@ func stepLiveSlot(rt *LiveSlotRuntime, now time.Time) {
 	}
 	liveMu.Unlock()
 
-	if halted || clipUsd < 9.5 || now.Before(rt.CoolUntil) || now.UnixMilli() < quotaCoolUntil.Load() {
+	if halted || clipUsd < 9.5 || now.Before(rt.CoolUntil) || now.UnixMilli() < quotaCoolUntil.Load() || now.UnixMilli() < ltRestCoolUntil.Load() {
 		return
 	}
 
@@ -2606,6 +2634,9 @@ func stepLiveSlot(rt *LiveSlotRuntime, now time.Time) {
 		}
 
 		// Claim symbol lock atomically while IOC is in flight across 305ms Lighter speed-bump:
+		if rpPre, _, okPre := fetchLtPosRESTChecked(gSym); !okPre || math.Abs(rpPre) >= m.MinB {
+			return
+		}
 		liveMu.Lock()
 		if !canSendLtTxLocked(now.UnixMilli(), false) || isSymUsedByAnySlotLocked(gSym, rt.SlotKey) {
 			liveMu.Unlock()
@@ -2628,6 +2659,23 @@ func stepLiveSlot(rt *LiveSlotRuntime, now time.Time) {
 			rt.CoolUntil = time.Now().Add(2500 * time.Millisecond)
 			liveMu.Unlock()
 			return
+		}
+		expS9 := 1.0
+		if gLtSide == "ASK" {
+			expS9 = -1.0
+		}
+		if ltPos*expS9 < 0 {
+			_, _ = closeLtLegGuaranteedSync(gSym, ltPos, rb, ra)
+			liveMu.Lock()
+			rt.Sym = ""
+			rt.CoolUntil = time.Now().Add(8 * time.Second)
+			liveMu.Unlock()
+			return
+		}
+		if ltPos > 0 {
+			gLtSide, gPeerSide = "BID", "SELL"
+		} else {
+			gLtSide, gPeerSide = "ASK", "BUY"
 		}
 		fillQty := math.Abs(ltPos)
 		if ltAvg <= 0 {
@@ -2850,8 +2898,12 @@ func stepLiveSlot(rt *LiveSlotRuntime, now time.Time) {
 		return
 	}
 
-	// Verify live Lighter REST BBO right before placing Maker order so stale WS levels never cross/underprice entry:
-	if rb, ra := fetchLtBookREST(markets[bestSym].ID); rb > 0 && ra > rb {
+	// Verify live Lighter REST BBO right before placing Maker order; NEVER quote on stale WS prices if REST fails/429s!
+	rb, ra := fetchLtBookREST(markets[bestSym].ID)
+	if rb <= 0 || ra <= rb {
+		return
+	}
+	{
 		_, qDecChk, pxDecChk, _, _, _, _, tFeeChk, pBidChk, pAskChk, _, _, fxChk, _, _, okChk := getPeerSpecAndBook(rt.PeerVenue, bestSym, now)
 		if !okChk {
 			return
@@ -2951,12 +3003,12 @@ func stepLiveSlot(rt *LiveSlotRuntime, now time.Time) {
 	rt.Sym = bestSym
 	liveMu.Unlock()
 
-	// Verify Lighter is 100% flat on bestSym BEFORE quoting so a stale/untracked orphan can NEVER trigger a double-sided bogus hedge!
-	if rp, _ := fetchLtPosREST(bestSym); math.Abs(rp) >= markets[bestSym].MinB {
+	// Verify Lighter REST positively confirms 100% flat on bestSym BEFORE quoting!
+	if rp, _, okP := fetchLtPosRESTChecked(bestSym); !okP || math.Abs(rp) >= markets[bestSym].MinB {
 		liveMu.Lock()
 		rt.State = "IDLE"
 		rt.Sym = ""
-		rt.CoolUntil = now.Add(5 * time.Second)
+		rt.CoolUntil = time.Now().Add(5 * time.Second)
 		liveMu.Unlock()
 		return
 	}
@@ -3549,26 +3601,11 @@ func sweepUntrackedLtOrphansSync() {
 	if remotePaused.Load() || breakerTripped.Load() {
 		return
 	}
-	hc := &http.Client{Timeout: 3 * time.Second}
-	resp, err := ltGet(hc, fmt.Sprintf("%s/api/v1/account?by=index&value=%d", BaseURL, AcctIdx))
-	if err != nil {
+	snap, okS := fetchLtAccountCached(2500*time.Millisecond, 0)
+	if !okS || snap == nil {
 		return
 	}
-	body, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	var res struct {
-		Accounts []struct {
-			Positions []struct {
-				MarketID int64  `json:"market_id"`
-				Position string `json:"position"`
-				Sign     int    `json:"sign"`
-			} `json:"positions"`
-		} `json:"accounts"`
-	}
-	if json.Unmarshal(body, &res) != nil || len(res.Accounts) == 0 {
-		return
-	}
-	for _, p := range res.Accounts[0].Positions {
+	for _, p := range snap.Positions {
 		sym, ok := idToSym[p.MarketID]
 		if !ok {
 			continue
@@ -3819,11 +3856,11 @@ func runLiveMicroArenaLoop() {
 	evaluateForwardArenaIdleSafeRotation()
 	writeLiveArenaTelemetry(time.Now())
 
-	// Staggered Lighter REST BBO resync (1 coin / 950ms = ~15s cycle across universe, 0 TX quota!) so WS books NEVER hold stale un-deleted levels:
+	// Gentle staggered Lighter REST BBO resync (1 coin / 4.5s = 0 rate-limit pressure) so WS books stay clean without 429s:
 	go func() {
 		idx := 0
 		syms := []string{"BTC", "ETH", "SOL", "BNB", "HYPE", "XAU", "NVDA", "QQQ", "SPY", "TSLA", "AAPL", "GOOGL", "LIT", "VVV", "ENA", "NEAR", "SUI", "XRP", "UNI", "AAVE"}
-		t := time.NewTicker(950 * time.Millisecond)
+		t := time.NewTicker(4500 * time.Millisecond)
 		defer t.Stop()
 		for {
 			<-t.C
@@ -3838,12 +3875,14 @@ func runLiveMicroArenaLoop() {
 		}
 	}()
 
-	// Keep TLS TCP pools to fapi.binance.com, fapi.asterdex.com, and mainnet.zklighter.elliot.ai warm every 4s (<8ms hedge):
+	// Keep TLS TCP pools to fapi.binance.com, fapi.asterdex.com, and mainnet.zklighter.elliot.ai warm:
 	go func() {
 		t := time.NewTicker(4 * time.Second)
 		defer t.Stop()
+		cnt := 0
 		for {
 			<-t.C
+			cnt++
 			if remotePaused.Load() {
 				return
 			}
@@ -3855,9 +3894,11 @@ func runLiveMicroArenaLoop() {
 				_, _ = io.Copy(io.Discard, r2.Body)
 				r2.Body.Close()
 			}
-			if r3, e3 := txHTTP.Get(BaseURL + "/api/v1/time"); e3 == nil {
-				_, _ = io.Copy(io.Discard, r3.Body)
-				r3.Body.Close()
+			if cnt%4 == 0 && time.Now().UnixMilli() >= ltRestCoolUntil.Load() {
+				if r3, e3 := txHTTP.Get(BaseURL + "/api/v1/time"); e3 == nil {
+					_, _ = io.Copy(io.Discard, r3.Body)
+					r3.Body.Close()
+				}
 			}
 		}
 	}()
