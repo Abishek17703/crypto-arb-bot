@@ -2155,8 +2155,7 @@ func main() {
 		flattenBnDnAndSweep()
 		flattenAsterAllSync()
 	} else {
-		flattenAsterAllSync()
-		fmt.Println("[HOT_RELOAD] Adopted active 1:1 BN_USDC hedged positions seamlessly; swept legacy Aster flat!")
+		fmt.Println("[HOT_RELOAD] Adopted active 1:1 hedged positions seamlessly across Lighter+Binance+Aster!")
 	}
 	emitBnAuditLine()
 

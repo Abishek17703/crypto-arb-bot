@@ -216,7 +216,7 @@ func discoverAsterMarkets() {
 	rwaBases := map[string]bool{
 		"NVDA": true, "AAPL": true, "TSLA": true, "QQQ": true, "SPY": true,
 		"AMZN": true, "META": true, "COIN": true, "MSTR": true, "GOOGL": true,
-		"AMD": true, "INTC": true, "XAU": true,
+		"AMD": true, "INTC": true, "XAU": true, "HOOD": true, "PLTR": true,
 	}
 	loaded := 0
 	for _, s := range ex.Symbols {

@@ -162,7 +162,9 @@ type LiveSlotRuntime struct {
 	SubIdx         int
 	StratID        string
 	PeerVenue      string // "BN_USDC" or "ASTER_C" or "ASTER_RWA"
-	PeerMakerFirst bool   // true for S10/S1: rests 0% GTX Maker on BN/Aster first -> 0% Lighter IOC hedge!
+	PeerMakerFirst bool   // rests 0% GTX Maker on BN/Aster first
+	PureLtLeadLag  bool   // true for E2: 0.00bp-fee Binance impulse -> Lighter lag 25s sniper!
+	DecaySec       float64
 	Symbols        []string
 	ClipUsd        float64
 	ScaleMult489   float64 // Full-$489 Arena slotUsd / micro ClipUsd
@@ -312,6 +314,123 @@ func applyTierClipLocked(acct *LiveStratAccount) {
 	if acct == nil {
 		return
 	}
+
+	// -------------------------------------------------------------------------
+	// STATE E2: LT_SNIPE_OPEN (Pure 0.00bp-Fee Lighter #770015 25s Momentum-Lag Scalp!)
+	// -------------------------------------------------------------------------
+	if rt.State == "LT_SNIPE_OPEN" {
+		m := markets[rt.Sym]
+		var lb, la, ltPos float64
+		if st := mktStates[rt.Sym]; st != nil {
+			st.mu.Lock()
+			lb, la, ltPos = st.ltBid, st.ltAsk, st.pos
+			st.mu.Unlock()
+		}
+		if lb <= 0 || la <= lb {
+			lb, la = fetchLtBookREST(m.ID)
+		}
+		if lb <= 0 || la <= lb {
+			return
+		}
+		holdS := now.Sub(rt.OpenedAt).Seconds()
+		var mark, pnlBp float64
+		if rt.LtSide == "BID" {
+			mark = lb
+			pnlBp = ((mark - rt.EntryLtPx) / rt.EntryLtPx) * 10000.0
+		} else {
+			mark = la
+			pnlBp = ((rt.EntryLtPx - mark) / rt.EntryLtPx) * 10000.0
+		}
+		tpBp := rt.ExitNetBp
+		if holdS >= 10.0 {
+			tpBp = 1.2
+		}
+		if halted || pnlBp >= tpBp || holdS >= rt.MaxHoldSec || pnlBp <= -7.5 {
+			closeStartMs := time.Now().UnixMilli()
+			expPos := rt.HedgedQty
+			if rt.LtSide == "ASK" {
+				expPos = -rt.HedgedQty
+			}
+			if math.Abs(ltPos) >= m.MinB {
+				expPos = ltPos
+			}
+			ltExitPx, ltLatMs := closeLtLegGuaranteedSync(rt.Sym, expPos, lb, la)
+			if ltExitPx <= 0 {
+				ltExitPx = mark
+			}
+			qty := rt.HedgedQty
+			ltGross := (ltExitPx - rt.EntryLtPx) * qty
+			if rt.LtSide == "ASK" {
+				ltGross = (rt.EntryLtPx - ltExitPx) * qty
+			}
+			time.Sleep(220 * time.Millisecond)
+			if exPx, exPnl, okEx := fetchExactLtCloseTrade(rt.Sym, closeStartMs); okEx {
+				ltExitPx = exPx
+				ltGross = exPnl
+			}
+			notional := qty * rt.EntryLtPx
+			netBps := 0.0
+			if notional > 0 {
+				netBps = (ltGross / notional) * 10000.0
+			}
+			closeSide := "SELL"
+			if rt.LtSide == "ASK" {
+				closeSide = "BUY"
+			}
+			reason := "E2_0FEE_SNIPE_TP"
+			if pnlBp <= -7.5 {
+				reason = "E2_0FEE_SNIPE_SL"
+			} else if holdS >= rt.MaxHoldSec && pnlBp < tpBp {
+				reason = "E2_0FEE_SNIPE_TIME"
+			}
+			nowMs := time.Now().UnixMilli()
+			closedSym := rt.Sym
+			liveMu.Lock()
+			acct.TakerFills++
+			acct.RoundTrips++
+			acct.RealizedGross = roundTo(acct.RealizedGross+ltGross, 4)
+			acct.Cash = roundTo(acct.StartCash+acct.RealizedGross-acct.FeesPaid+acct.FundingUsd, 4)
+			acct.GrossVolumeUsd = roundTo(acct.GrossVolumeUsd+notional, 2)
+			if ltGross > 0 {
+				acct.WinTrips++
+				acct.GrossWinUsd = roundTo(acct.GrossWinUsd+ltGross, 4)
+			} else if ltGross < 0 {
+				acct.GrossLossUsd = roundTo(acct.GrossLossUsd+math.Abs(ltGross), 4)
+			}
+			acct.RecentTripPnls = append(acct.RecentTripPnls, roundTo(ltGross, 4))
+			if len(acct.RecentTripPnls) > 12 {
+				acct.RecentTripPnls = append([]float64(nil), acct.RecentTripPnls[len(acct.RecentTripPnls)-12:]...)
+			}
+			if acct.GrossLossUsd > 1e-6 {
+				acct.ProfitFactor = roundTo(acct.GrossWinUsd/acct.GrossLossUsd, 2)
+			} else if acct.GrossWinUsd > 0 {
+				acct.ProfitFactor = 99.0
+			}
+			appendLiveFillLocked(LiveFillAudit{
+				TsMs:      nowMs,
+				StratID:   rt.StratID,
+				Venue:     "LT_STD",
+				Symbol:    closedSym,
+				Side:      closeSide,
+				ExecType:  "LT_IOC_CLOSE",
+				FillPx:    ltExitPx,
+				SignalPx:  mark,
+				Qty:       qty,
+				Notional:  roundTo(notional, 2),
+				FeeUsd:    0.0,
+				Realized:  roundTo(ltGross, 4),
+				LatencyMs: ltLatMs,
+				Tag:       reason,
+			})
+			rt.State = "IDLE"
+			rt.Sym = ""
+			rt.HedgedQty = 0
+			rt.CoolUntil = time.Now().Add(6 * time.Second)
+			liveMu.Unlock()
+			recordStratClose(rt.TradeID, rt.StratID, "PURE_LT_"+closedSym, closedSym, notional, holdS, netBps, ltGross, 0, ltGross, 0, reason)
+		}
+		return
+	}
 	acct.TierLabel = tierLabelFor(acct.Tier, acct.Tier3ClipUsd)
 	switch acct.Tier {
 	case 1:
@@ -358,34 +477,105 @@ func initLiveMicroArena() {
 		desc           string
 		peerVenue      string
 		peerMakerFirst bool
+		pureLtLeadLag  bool
 		tier3Clip      float64
 		startCash      float64
 		minRawEdgeBp   float64
 		entryBp        float64
 		takerGrabBp    float64
 		exitBp         float64
+		decaySec       float64
+		maxHoldSec     float64
 		syms           []string
 	}{
+		{
+			id:           "LIVE_E1_RWA_GOLD_BLITZ",
+			forwardID:    "E1_RWA_GOLD_BLITZ",
+			name:         "E1: US Open Equities + Gold XAU Blitz (1.25bp Fee, 120s Turn)",
+			venueDesc:    "LT #770015 0% M -> Aster RWA 1.25bp (120s Fast Recycle)",
+			desc:         "0% Lighter Maker (>=3.75bp raw = +2.5bp net) -> <8ms 1.25bp Aster RWA/Gold Taker -> 0% Aster Maker exit.",
+			peerVenue:    "ASTER_RWA",
+			tier3Clip:    40.0,
+			startCash:    50.0,
+			minRawEdgeBp: 2.75,
+			entryBp:      4.0,
+			exitBp:       2.2,
+			decaySec:     120.0,
+			maxHoldSec:   420.0,
+			syms:         []string{"XAU", "NVDA", "QQQ", "SPY", "TSLA", "AAPL", "GOOGL", "AMZN", "META", "COIN", "HOOD", "PLTR"},
+		},
+		{
+			id:            "LIVE_E2_BN_LEAD_LT_0FEE",
+			forwardID:     "E2_BN_LEAD_LT_0FEE",
+			name:          "E2: 0.00bp-Fee Binance Impulse -> Lighter Lag Sniper (25s Scalp)",
+			venueDesc:     "BN 1.5s Impulse -> Pure LT #770015 (0.00bp 4-Leg Fee!)",
+			desc:          "Pure $0.00-fee Lighter #770015 momentum-lag sniper (+3.5bp TP / 25s exit / -7.5bp stop).",
+			peerVenue:     "BN_USDC",
+			pureLtLeadLag: true,
+			tier3Clip:     55.0,
+			startCash:     50.0,
+			minRawEdgeBp:  1.5,
+			entryBp:       4.5,
+			exitBp:        3.5,
+			decaySec:      10.0,
+			maxHoldSec:    25.0,
+			syms:          []string{"BTC", "ETH", "SOL", "HYPE", "XRP", "NEAR", "SUI", "ENA", "AVAX"},
+		},
+		{
+			id:           "LIVE_E3_MAJORS_FAST_TURN",
+			forwardID:    "E3_MAJORS_FAST_TURN",
+			name:         "E3: ETH/SOL/BNB/HYPE High-Velocity 90s Turnover",
+			venueDesc:    "LT #770015 0% M -> BN USDC-M (90s Fast Step-Down)",
+			desc:         "Unlocks ETH, SOL, BNB, HYPE (+BTC at Tier 3) with 90s step-down (+0.8bp) and 6m recycle.",
+			peerVenue:    "BN_USDC",
+			tier3Clip:    62.0,
+			startCash:    50.0,
+			minRawEdgeBp: 2.0,
+			entryBp:      6.0,
+			exitBp:       2.0,
+			decaySec:     90.0,
+			maxHoldSec:   360.0,
+			syms:         []string{"BTC", "ETH", "SOL", "BNB", "HYPE", "XRP", "AAVE", "NEAR", "ENA", "SUI", "UNI"},
+		},
+		{
+			id:           "LIVE_E4_CROSSED_HOT_ALTS",
+			forwardID:    "E4_CROSSED_HOT_ALTS",
+			name:         "E4: Crossed-Book Harvester (Gold/Equities >=4.75bp + LIT/VVV)",
+			venueDesc:    "LT #770015 0% IOC + Aster (+3.5bp Locked at Entry!)",
+			desc:         "Instant 0% Lighter IOC + <8ms Aster Taker ONLY when live books are genuinely crossed.",
+			peerVenue:    "ASTER_RWA",
+			tier3Clip:    40.0,
+			startCash:    50.0,
+			minRawEdgeBp: 3.5,
+			entryBp:      4.75,
+			takerGrabBp:  4.75,
+			exitBp:       2.0,
+			decaySec:     90.0,
+			maxHoldSec:   360.0,
+			syms:         []string{"XAU", "QQQ", "SPY", "TSLA", "AAPL", "GOOGL", "NVDA", "LIT", "VVV", "HYPE"},
+		},
 		{
 			id:           "LIVE_S7_BN_HIGH_CONV",
 			forwardID:    "S7_BN_HIGH_CONV_RAW",
 			name:         "S7: High-Conviction >=8.5bp Raw Spread (LT <-> BN USDC-M)",
 			venueDesc:    "LT #770015 0% M -> BN USDC-M (4.00bp Fee, Zero FX Drift)",
-			desc:         "Primary Slot #1: 0% Lighter Maker (>=8.5bp positive raw spread) -> <8ms BN USDC-M hedge -> 0% BN Maker exit.",
+			desc:         "0% Lighter Maker (>=8.5bp positive raw spread) -> <8ms BN USDC-M hedge -> 0% BN Maker exit.",
 			peerVenue:    "BN_USDC",
 			tier3Clip:    55.0,
 			startCash:    60.0,
 			minRawEdgeBp: 4.5,
 			entryBp:      8.5,
 			exitBp:       3.5,
-			syms:         []string{"UNI", "HYPE", "ENA", "NEAR", "WLD", "AAVE", "SUI", "ARB", "AVAX", "LINK", "DOGE", "XRP"},
+			decaySec:     480.0,
+			maxHoldSec:   1200.0,
+			syms:         []string{"ETH", "SOL", "BNB", "UNI", "HYPE", "ENA", "NEAR", "WLD", "AAVE", "SUI", "ARB", "AVAX", "LINK", "DOGE", "XRP"},
 		},
 		{
 			id:           "LIVE_S9_PURE_CROSSED_GRAB",
 			forwardID:    "S9_PURE_CROSSED_TAKER",
-			name:         "S9: Pure Crossed-Book Taker Grab (Bid_A - Ask_B >= +8.5bp)",
+			name:         "S9: Pure Crossed-Book Taker Grab (BN_USDC >= +8.5bp)",
 			venueDesc:    "LT #770015 0% IOC <-> BN USDC-M (+4.5bp Locked at Entry!)",
-			desc:         "Burst Slot #2: Fires 0% Lighter IOC + <8ms BN USDC-M hedge ONLY when true crossed book >= +8.5bp -> 0% BN Maker exit.",
+			desc:         "Fires 0% Lighter IOC + <8ms BN USDC-M hedge ONLY when true crossed book >= +8.5bp.",
 			peerVenue:    "BN_USDC",
 			tier3Clip:    50.0,
 			startCash:    50.0,
@@ -393,21 +583,9 @@ func initLiveMicroArena() {
 			entryBp:      8.5,
 			takerGrabBp:  8.5,
 			exitBp:       2.5,
-			syms:         []string{"UNI", "HYPE", "ENA", "NEAR", "WLD", "AAVE", "SUI", "ARB", "AVAX", "TRUMP", "TIA", "CRV", "ETHFI", "LINK", "DOGE", "XRP"},
-		},
-		{
-			id:           "LIVE_S2_LT_BN_FAST_ROTATE",
-			forwardID:    "S2_LT_BN_FAST_ROTATE",
-			name:         "S2: 0% Lighter Maker -> BN USDC-M Fast Rotate (4.00bp Fee)",
-			venueDesc:    "LT #770015 0% M -> BN USDC-M (Fast 6m Step-Down)",
-			desc:         "Fast Slot #3: 0% Lighter Maker (>=6.5bp positive raw spread) -> <8ms BN USDC-M hedge -> 0% BN Maker exit.",
-			peerVenue:    "BN_USDC",
-			tier3Clip:    55.0,
-			startCash:    50.0,
-			minRawEdgeBp: 2.5,
-			entryBp:      6.5,
-			exitBp:       2.5,
-			syms:         []string{"UNI", "HYPE", "ENA", "NEAR", "WLD", "AAVE", "SUI", "ARB", "AVAX", "TRUMP", "TIA", "CRV", "ETHFI", "LINK", "DOGE", "XRP"},
+			decaySec:     360.0,
+			maxHoldSec:   1200.0,
+			syms:         []string{"ETH", "SOL", "BNB", "UNI", "HYPE", "ENA", "NEAR", "WLD", "AAVE", "SUI", "ARB", "AVAX", "TRUMP", "TIA", "CRV", "ETHFI", "LINK", "DOGE", "XRP"},
 		},
 	}
 
@@ -419,7 +597,7 @@ func initLiveMicroArena() {
 			Name:           d.name,
 			Desc:           d.desc,
 			VenueDesc:      d.venueDesc,
-			Tier:           0, // Starts strictly in Tier 0 (Forward Testing Only) until 45m $5+/hr & PF >= 1.35 proven!
+			Tier:           0,
 			TierLabel:      tierLabelFor(0, d.tier3Clip),
 			TierChangedMs:  nowInitMs,
 			Tier3ClipUsd:   d.tier3Clip,
@@ -440,6 +618,7 @@ func initLiveMicroArena() {
 				StratID:        d.id,
 				PeerVenue:      d.peerVenue,
 				PeerMakerFirst: d.peerMakerFirst,
+				PureLtLeadLag:  d.pureLtLeadLag,
 				Symbols:        append([]string(nil), d.syms...),
 				OrigPeerVenue:  d.peerVenue,
 				OrigSymbols:    append([]string(nil), d.syms...),
@@ -449,9 +628,10 @@ func initLiveMicroArena() {
 				EntryDisloc:    d.entryBp,
 				TakerGrabBp:    d.takerGrabBp,
 				ExitNetBp:      d.exitBp,
+				DecaySec:       d.decaySec,
 				CancelTolBp:    2.0,
-				MaxRestSec:     25.0,
-				MaxHoldSec:     2700.0, // 45m breathing room for natural 1:1 hedged convergence (zero tight per-trade SL!)
+				MaxRestSec:     22.0,
+				MaxHoldSec:     d.maxHoldSec,
 				State:          "IDLE",
 				WakeCh:         make(chan struct{}, 1),
 			}
@@ -483,7 +663,7 @@ func loadLiveArenaState() {
 					sk = sn.StratID + ":0"
 				}
 				rt := liveSlots[sk]
-				if rt == nil || (sn.State != "HEDGED" && sn.State != "PEER_EXIT_OPEN") || sn.HedgedQty <= 0 {
+				if rt == nil || (sn.State != "HEDGED" && sn.State != "PEER_EXIT_OPEN" && sn.State != "LT_SNIPE_OPEN") || sn.HedgedQty <= 0 {
 					continue
 				}
 				rt.State = sn.State
@@ -1786,8 +1966,8 @@ func stepLiveSlot(rt *LiveSlotRuntime, now time.Time) {
 		if rt.LegacyWindDown || (acct.Tier <= 0 && !acct.Halted) {
 			// Breakeven / minor-profit graceful wind-down (+0.15bp net after all fees!):
 			reqNetBp = 0.15
-		} else if holdS >= 600.0 && holdS < rt.MaxHoldSec {
-			reqNetBp = math.Max(1.0, rt.ExitNetBp-1.0)
+		} else if rt.DecaySec > 0 && holdS >= rt.DecaySec && holdS < rt.MaxHoldSec {
+			reqNetBp = math.Max(0.8, rt.ExitNetBp-1.2)
 		} else if holdS >= rt.MaxHoldSec {
 			reqNetBp = 0.30
 		}
@@ -1970,6 +2150,120 @@ func stepLiveSlot(rt *LiveSlotRuntime, now time.Time) {
 	// S9 PURE CROSSED-BOOK TAKER-GRAB MODE (rt.TakerGrabBp > 0):
 	// Fires 0% Lighter IOC + <8ms Peer Taker ONLY when true raw crossed spread >= TakerGrabBp!
 	// -------------------------------------------------------------------------
+	if rt.PureLtLeadLag {
+		if !canQuote {
+			return
+		}
+		for _, sym := range rt.Symbols {
+			if isSymUsedByAnySlot(sym, rt.SlotKey) {
+				continue
+			}
+			m, okM := markets[sym]
+			st := mktStates[sym]
+			if !okM || st == nil {
+				continue
+			}
+			st.mu.Lock()
+			lb, la, ltPos, lTS := st.ltBid, st.ltAsk, st.pos, st.lastBookTS
+			st.mu.Unlock()
+			if math.Abs(ltPos) >= m.MinB || lb <= 0 || la <= lb || now.Sub(lTS) > 4*time.Second || ((la-lb)/lb)*10000.0 > 4.0 {
+				continue
+			}
+			_, _, _, _, _, _, _, _, pBid, pAsk, _, jumpBps, fx, warmTicks, bookAge, okP := getPeerSpecAndBook("BN_USDC", sym, now)
+			if !okP || warmTicks < 6 || bookAge > 3*time.Second || math.Abs(jumpBps) < rt.EntryDisloc {
+				continue
+			}
+			ltMid := 0.5 * (lb + la)
+			ltStep := math.Pow10(-m.SzDec)
+			qty := roundTo(math.Floor((clipUsd/ltMid)/ltStep+1e-9)*ltStep, m.SzDec)
+			if qty*ltMid < 10.5 && (qty+ltStep)*ltMid <= clipUsd+4.5 {
+				qty = roundTo(qty+ltStep, m.SzDec)
+			}
+			if qty < m.MinB || qty*ltMid < 10.5 {
+				continue
+			}
+			pBidUsd, pAskUsd := pBid*fx, pAsk*fx
+			var snipeSide, sideHuman string
+			var iocPx, sigPx float64
+			if jumpBps >= rt.EntryDisloc && ((pBidUsd-la)/la)*10000.0 >= rt.MinRawEdgeBp {
+				rb, ra := fetchLtBookREST(m.ID)
+				if rb <= 0 || ra <= rb || ((pBidUsd-ra)/ra)*10000.0 < rt.MinRawEdgeBp {
+					continue
+				}
+				snipeSide, sideHuman = "BID", "BUY"
+				sigPx = ra
+				iocPx = roundTo(ra*1.0008, m.PxDec)
+			} else if jumpBps <= -rt.EntryDisloc && ((lb-pAskUsd)/pAskUsd)*10000.0 >= rt.MinRawEdgeBp {
+				rb, ra := fetchLtBookREST(m.ID)
+				if rb <= 0 || ra <= rb || ((rb-pAskUsd)/pAskUsd)*10000.0 < rt.MinRawEdgeBp {
+					continue
+				}
+				snipeSide, sideHuman = "ASK", "SELL"
+				sigPx = rb
+				iocPx = roundTo(rb*0.9992, m.PxDec)
+			} else {
+				continue
+			}
+			liveMu.Lock()
+			if !canSendLtTxLocked(now.UnixMilli(), false) || isSymUsedByAnySlotLocked(sym, rt.SlotKey) {
+				liveMu.Unlock()
+				return
+			}
+			recordLtTxLocked(now.UnixMilli())
+			rt.Sym = sym
+			liveMu.Unlock()
+
+			t0 := time.Now()
+			coi, okSend := placeLtHedgeIOC(sym, snipeSide, iocPx, qty, false)
+			var fPos, fAvg float64
+			if okSend {
+				fPos, fAvg = waitLtPositionFill(sym, coi, m.MinB, 4200*time.Millisecond)
+			}
+			latMs := time.Since(t0).Milliseconds()
+			if math.Abs(fPos) < m.MinB {
+				liveMu.Lock()
+				rt.Sym = ""
+				rt.CoolUntil = time.Now().Add(3 * time.Second)
+				liveMu.Unlock()
+				return
+			}
+			fq := math.Abs(fPos)
+			if fAvg <= 0 {
+				fAvg = sigPx
+			}
+			tid := time.Now().UnixMilli()
+			liveMu.Lock()
+			acct.TakerFills++
+			acct.GrossVolumeUsd = roundTo(acct.GrossVolumeUsd+fq*fAvg, 2)
+			appendLiveFillLocked(LiveFillAudit{
+				TsMs:      tid,
+				StratID:   rt.StratID,
+				Venue:     "LT_STD",
+				Symbol:    sym,
+				Side:      sideHuman,
+				ExecType:  "LT_IOC_0FEE_SNIPE",
+				FillPx:    fAvg,
+				SignalPx:  sigPx,
+				Qty:       fq,
+				Notional:  roundTo(fq*fAvg, 2),
+				FeeUsd:    0.0,
+				LatencyMs: latMs,
+				Tag:       "E2_SNIPE_OPEN",
+			})
+			rt.State = "LT_SNIPE_OPEN"
+			rt.LtSide = snipeSide
+			rt.HedgedQty = fq
+			rt.EntryLtPx = fAvg
+			rt.EntryFeeUsd = 0
+			rt.OpenedAt = time.Now()
+			rt.TradeID = tid
+			liveMu.Unlock()
+			recordStratOpen(tid, rt.StratID, "PURE_LT_"+sym+"_"+sideHuman, sym, fq*fAvg, jumpBps, fmt.Sprintf("E2LeadLag jump=%+.1fbp Lt0pct@%.5f(%dms)", jumpBps, fAvg, latMs))
+			return
+		}
+		return
+	}
+
 	if rt.TakerGrabBp > 0 {
 		if !canQuote {
 			return
@@ -2532,6 +2826,27 @@ func writeLiveArenaTelemetry(now time.Time) {
 					stateParts = append(stateParts, rt.State)
 				}
 			}
+			if rt.State == "LT_SNIPE_OPEN" && rt.HedgedQty > 0 {
+				if st := mktStates[rt.Sym]; st != nil {
+					st.mu.Lock()
+					lb, la := st.ltBid, st.ltAsk
+					st.mu.Unlock()
+					ltQty := rt.HedgedQty
+					ltMark := lb
+					if rt.LtSide == "ASK" {
+						ltQty = -rt.HedgedQty
+						ltMark = la
+					}
+					if ltMark > 0 {
+						if ltQty > 0 {
+							upnl += rt.HedgedQty * (ltMark - rt.EntryLtPx)
+						} else {
+							upnl += rt.HedgedQty * (rt.EntryLtPx - ltMark)
+						}
+					}
+					snaps = append(snaps, LivePosView{Venue: "LT_STD", Symbol: rt.Sym, Qty: ltQty, AvgPx: rt.EntryLtPx, OpenedMs: rt.OpenedAt.UnixMilli(), UpdatedMs: nowMs, Tag: rt.State})
+				}
+			}
 			if (rt.State == "HEDGED" || rt.State == "PEER_EXIT_OPEN") && rt.HedgedQty > 0 {
 				var pairUpnl, pairMidUpnl float64
 				pairUpnl -= rt.EntryFeeUsd
@@ -2850,9 +3165,11 @@ func evaluateForwardArenaIdleSafeRotation() {
 		return
 	}
 	var fa struct {
+		NowTsMs     int64   `json:"nowTsMs"`
 		UptimeHours float64 `json:"uptimeHours"`
 		Strategies  []struct {
 			ID               string  `json:"id"`
+			StratBootMs      int64   `json:"stratBootMs"`
 			HourlyRunRate    float64 `json:"hourlyRunRate"`
 			Rolling45mHourly float64 `json:"rolling45mHourly"`
 			ProfitFactor     float64 `json:"profitFactor"`
@@ -2864,18 +3181,27 @@ func evaluateForwardArenaIdleSafeRotation() {
 		return
 	}
 	type fwdStat struct {
-		hr45  float64
-		pf    float64
-		maxDD float64
-		trips int64
+		hr45   float64
+		pf     float64
+		maxDD  float64
+		trips  int64
+		ageMin float64
 	}
 	fMap := map[string]fwdStat{}
+	refNow := fa.NowTsMs
+	if refNow <= 0 {
+		refNow = time.Now().UnixMilli()
+	}
 	for _, s := range fa.Strategies {
 		r := s.Rolling45mHourly
-		if r == 0 && fa.UptimeHours >= 0.25 {
+		if r == 0 {
 			r = s.HourlyRunRate
 		}
-		fMap[s.ID] = fwdStat{hr45: r, pf: s.ProfitFactor, maxDD: s.MaxDrawdownUsd, trips: s.RoundTrips}
+		ageM := fa.UptimeHours * 60.0
+		if s.StratBootMs > 0 {
+			ageM = float64(refNow-s.StratBootMs) / 60000.0
+		}
+		fMap[s.ID] = fwdStat{hr45: r, pf: s.ProfitFactor, maxDD: s.MaxDrawdownUsd, trips: s.RoundTrips, ageMin: ageM}
 	}
 
 	nowMs := time.Now().UnixMilli()
@@ -2937,7 +3263,7 @@ func evaluateForwardArenaIdleSafeRotation() {
 		switch acct.Tier {
 		case 0:
 			// Tier 0 -> Tier 1 ($12 Micro): 45m+ Forward Lab uptime, Closed $/hr >= $2.50, PF >= 1.50, >= 5 Trips, MaxDD < $6.00
-			if fa.UptimeHours >= 0.75 && fs.hr45 >= 2.50 && fs.pf >= 1.50 && fs.trips >= 5 && fs.maxDD < 6.00 {
+			if fs.ageMin >= 20.0 && fs.hr45 >= 3.00 && fs.pf >= 1.40 && fs.trips >= 4 && fs.maxDD < 6.00 {
 				acct.Tier = 1
 				acct.StratActiveMs = nowMs
 				acct.TierChangedMs = nowMs
@@ -3150,7 +3476,7 @@ func runLiveMicroArenaLoop() {
 	// Staggered Lighter REST BBO resync (1 coin / 950ms = ~15s cycle across universe, 0 TX quota!) so WS books NEVER hold stale un-deleted levels:
 	go func() {
 		idx := 0
-		syms := []string{"UNI", "HYPE", "ENA", "NEAR", "WLD", "AAVE", "SUI", "ARB", "AVAX", "TRUMP", "TIA", "CRV", "ETHFI", "LINK", "DOGE", "XRP"}
+		syms := []string{"BTC", "ETH", "SOL", "BNB", "HYPE", "XAU", "NVDA", "QQQ", "SPY", "TSLA", "AAPL", "GOOGL", "LIT", "VVV", "ENA", "NEAR", "SUI", "XRP", "UNI", "AAVE"}
 		t := time.NewTicker(950 * time.Millisecond)
 		defer t.Stop()
 		for {
