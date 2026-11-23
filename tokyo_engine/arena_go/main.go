@@ -2332,7 +2332,7 @@ func updateMarkToMarketAndWriteTelemetry() {
 		}
 
 		s.StatusNote = fmt.Sprintf("Closed $%+.3f | Open $%+.3f | PF %.2f | Trips %d",
-			realGain, upnl, s.ProfitFactor, s.RoundTrips)
+			realGain, s.UnrealizedPnL, s.ProfitFactor, s.RoundTrips)
 
 		if s.Rolling45mHourly > bestHr || (bestID == "" && s.RealizedHourly > bestHr) {
 			bestHr = s.Rolling45mHourly
