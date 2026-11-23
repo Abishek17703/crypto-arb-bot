@@ -15,12 +15,14 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"os/signal"
 	"runtime"
 	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/elliottech/lighter-go/client"
@@ -2120,6 +2122,16 @@ func main() {
 		fmt.Printf("[ASTER_INIT_ERR] %v\n", err)
 	}
 	initLiveMicroArena()
+	sigCh := make(chan os.Signal, 2)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		<-sigCh
+		liveMu.Lock()
+		lastLiveSaveMs = 0
+		liveMu.Unlock()
+		writeLiveArenaTelemetry(time.Now())
+		os.Exit(0)
+	}()
 	_, _, _ = fetchAsterAccountMargin()
 	writeLiveArenaTelemetry(time.Now())
 	loadDnHistory()
