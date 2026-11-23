@@ -30,7 +30,7 @@ import (
 )
 
 const (
-	BotVersion = "v108.1"
+	BotVersion = "v108.3"
 	BaseURL    = "https://mainnet.zklighter.elliot.ai"
 	WsURL      = "wss://mainnet.zklighter.elliot.ai/stream"
 	AcctIdx    = int64(770015)
@@ -238,6 +238,7 @@ func wakeEngine() {
 	case engineWakeCh <- struct{}{}:
 	default:
 	}
+	wakeAllLiveSlots()
 }
 
 func roundTo(v float64, dec int) float64 {

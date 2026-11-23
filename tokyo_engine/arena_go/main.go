@@ -26,7 +26,7 @@ const (
 	TargetHourly   = 5.00
 	ArenaOutPath   = "/tmp/forward_arena.json"
 	ArenaStatePath = "/opt/crypto-arb-bot/forward_arena_state.json"
-	ArenaVer       = "ARENA-v6.1-NATURAL-CONV"
+	ArenaVer       = "ARENA-v6.3-PARITY"
 
 	VenueBnUsdc   = "BN_USDC"
 	VenueBnUsdt   = "BN_USDT"
@@ -77,6 +77,8 @@ type LtMarketSpec struct {
 	BnPriceDec    int
 	BnQtyDec      int
 	BnTick        float64
+	BnStep        float64
+	BnMinNot      float64
 }
 
 type BnUsdcSpec struct {
@@ -86,6 +88,8 @@ type BnUsdcSpec struct {
 	PriceDec int
 	QtyDec   int
 	TickSize float64
+	StepSize float64
+	MinNot   float64
 }
 
 type BookLevel struct {
@@ -185,9 +189,10 @@ type FillAudit struct {
 }
 
 type EquityPoint struct {
-	TsMs   int64   `json:"ts"`
-	Equity float64 `json:"eq"`
-	Cash   float64 `json:"cash,omitempty"`
+	TsMs      int64   `json:"ts"`
+	Equity    float64 `json:"eq"`
+	MidEq     float64 `json:"midEq,omitempty"`
+	Cash      float64 `json:"cash,omitempty"`
 }
 
 type StrategyAccount struct {
@@ -1258,7 +1263,11 @@ func onStrategyFillHookLocked(stratID, venue, sym, side string, fillPx, qty floa
 	if isExit {
 		hTag = stratPrefix(stratID) + "_CLOSE"
 	}
-	placeTakerLocked(stratID, peerVenue, peerSym, hedgeSide, hQty, sigPx, 25.0, isExit, hTag, nowMs)
+	maxSlip := 18.0
+	if peerVenue == VenueLtStd || peerVenue == VenueLtPrem {
+		maxSlip = 12.0 // Exact 12bp Lighter IOC bound matching live_arena.go!
+	}
+	placeTakerLocked(stratID, peerVenue, peerSym, hedgeSide, hQty, sigPx, maxSlip, isExit, hTag, nowMs)
 }
 
 func cancelStaleOrRefreshMakerLocked(stratID, venue, sym, side string, targetPx, qty, cancelTolBp float64, reduceOnly bool, tag string, maxAgeMs int64, nowMs int64) {
@@ -1553,8 +1562,37 @@ func runCrossVenuePairArbLocked(cfg PairArbCfg, commonQtyDec int, minBase float6
 		return
 	}
 
-	qty := roundTo(cfg.SlotUsd/mMidUsd, commonQtyDec)
-	if qty < minBase || qty*mMidUsd < 10.5 {
+	// Exact Live commonStep Lot-Size Rounding Parity:
+	stepM := math.Pow10(-commonQtyDec)
+	stepH := math.Pow10(-commonQtyDec)
+	minNot := 10.5
+	if sp := ltSpecs[symBase(cfg.MakerSym)]; sp != nil {
+		ltStep := math.Pow10(-sp.SizeDecimals)
+		if cfg.MakerVenue == VenueLtStd || cfg.MakerVenue == VenueLtPrem {
+			stepM = ltStep
+		} else {
+			stepH = ltStep
+		}
+		if sp.MinQuote > minNot {
+			minNot = sp.MinQuote + 0.5
+		}
+	}
+	if bs := bnUsdcSpecs[cfg.MakerSym]; bs != nil && bs.StepSize > 0 {
+		stepM = bs.StepSize
+	} else if as := asterSpecs[cfg.MakerSym]; as != nil && as.StepSize > 0 {
+		stepM = as.StepSize
+	}
+	if bs := bnUsdcSpecs[cfg.HedgeSym]; bs != nil && bs.StepSize > 0 {
+		stepH = bs.StepSize
+	} else if as := asterSpecs[cfg.HedgeSym]; as != nil && as.StepSize > 0 {
+		stepH = as.StepSize
+	}
+	commonStep := math.Max(stepM, stepH)
+	qty := roundTo(math.Floor((cfg.SlotUsd/mMidUsd)/commonStep+1e-9)*commonStep, commonQtyDec)
+	if qty*mMidUsd < minNot && (qty+commonStep)*mMidUsd <= cfg.SlotUsd+4.5 {
+		qty = roundTo(qty+commonStep, commonQtyDec)
+	}
+	if qty < minBase || qty*mMidUsd < minNot {
 		return
 	}
 	depthMul := cfg.MinPeerDepthMul
@@ -2155,6 +2193,7 @@ func updateMarkToMarketAndWriteTelemetry() {
 	for _, id := range stratOrder {
 		s := strats[id]
 		upnl := 0.0
+		midUpnl := 0.0
 		snaps := make([]Position, 0, len(s.Positions))
 		for _, p := range s.Positions {
 			if math.Abs(p.Qty) <= 1e-9 {
@@ -2162,17 +2201,21 @@ func updateMarkToMarketAndWriteTelemetry() {
 			}
 			b := books[bookKey(venueBookPrefix(p.Venue), p.Symbol)]
 			mark := p.AvgPx
+			midMark := p.AvgPx
 			if b != nil && b.Bid > 0 && b.Ask > 0 {
+				midMark = 0.5 * (b.Bid + b.Ask)
 				if p.Qty > 0 {
-					mark = b.Bid // conservative liquidation mark!
+					mark = b.Bid // conservative liquidation mark for MaxDD!
 				} else {
 					mark = b.Ask
 				}
 			}
 			if p.Qty > 0 {
 				upnl += math.Abs(p.Qty)*(mark-p.AvgPx) - p.EntryFee
+				midUpnl += math.Abs(p.Qty)*(midMark-p.AvgPx) - p.EntryFee
 			} else {
 				upnl += math.Abs(p.Qty)*(p.AvgPx-mark) - p.EntryFee
+				midUpnl += math.Abs(p.Qty)*(p.AvgPx-midMark) - p.EntryFee
 			}
 			snaps = append(snaps, *p)
 		}
@@ -2180,6 +2223,9 @@ func updateMarkToMarketAndWriteTelemetry() {
 		s.UnrealizedPnL = roundTo(upnl, 4)
 		s.Cash = roundTo(s.StartCash+s.RealizedGross-s.FeesPaid+s.FundingUsd, 4)
 		s.Equity = roundTo(s.Cash+upnl, 4)
+		// Noise-free Signal Equity: uses Fair-Mid uPnL (clamped <= 0 so phantom unrealized spikes never inflate $/hr, and instant entry bid-ask cross noise never distorts run rate!):
+		sigUpnl := math.Min(0.0, midUpnl)
+		sigEq := roundTo(s.Cash+sigUpnl, 4)
 		if s.Equity > s.PeakEquity {
 			s.PeakEquity = s.Equity
 		}
@@ -2187,22 +2233,22 @@ func updateMarkToMarketAndWriteTelemetry() {
 		if dd > s.MaxDrawdownUsd {
 			s.MaxDrawdownUsd = roundTo(dd, 4)
 		}
-		netGain := s.Equity - s.StartCash
+		netGain := sigEq - s.StartCash
 		realGain := s.Cash - s.StartCash
 		stratStart := bootMs
 		if s.StratBootMs > bootMs {
 			stratStart = s.StratBootMs
 		}
 		stratUpHr := math.Max(float64(nowMs-stratStart)/3600000.0, 1.0/3600.0)
-		// Avoid wild extrapolation in first 3 minutes
-		denomHr := math.Max(stratUpHr, 0.05)
+		// NOISE-FREE FLOOR: Minimum 15m (0.25h) time denominator so 1-2 minute trades NEVER extrapolate to fake +/-$80/hr spikes!
+		denomHr := math.Max(stratUpHr, 0.25)
 		s.HourlyRunRate = roundTo(netGain/denomHr, 3)
 		s.RealizedHourly = roundTo(realGain/denomHr, 3)
 		s.ActiveMakers = makerCntByStrat[id]
 		s.PosSnap = snaps
 
 		if len(s.EquityCurve) == 0 || nowMs-s.EquityCurve[len(s.EquityCurve)-1].TsMs >= 30000 {
-			s.EquityCurve = append(s.EquityCurve, EquityPoint{TsMs: nowMs, Equity: s.Equity, Cash: s.Cash})
+			s.EquityCurve = append(s.EquityCurve, EquityPoint{TsMs: nowMs, Equity: s.Equity, MidEq: sigEq, Cash: s.Cash})
 			if len(s.EquityCurve) > 2940 { // 2940 * 30s = 24.5 hours full rolling window!
 				s.EquityCurve = append([]EquityPoint(nil), s.EquityCurve[len(s.EquityCurve)-2940:]...)
 			}
@@ -2221,20 +2267,22 @@ func updateMarkToMarketAndWriteTelemetry() {
 					break
 				}
 			}
-			dtHr := float64(nowMs-refPt.TsMs) / 3600000.0
-			if dtHr < minDtHr {
-				return s.HourlyRunRate
+			dtHr := math.Max(float64(nowMs-refPt.TsMs)/3600000.0, minDtHr)
+			refSig := refPt.MidEq
+			if refSig <= 0 {
+				refSig = refPt.Equity
 			}
-			// STRICT KISS GOVERNANCE: Govern strictly on Total Equity (Closed + Open Basis), NEVER hide open losses!
-			return roundTo((s.Equity-refPt.Equity)/dtHr, 3)
+			return roundTo((sigEq-refSig)/dtHr, 3)
 		}
 
-		s.Rolling15mHourly = calcRoll(15*60*1000, 0.12)
+		s.Rolling15mHourly = calcRoll(15*60*1000, 0.25)
 		s.Rolling45mHourly = calcRoll(45*60*1000, 0.25)
 		s.Rolling2hHourly = calcRoll(2*3600*1000, 0.50)
 		s.Rolling4hHourly = calcRoll(4*3600*1000, 0.50)
 		s.Rolling24hHourly = calcRoll(24*3600*1000, 0.50)
-		if s.RoundTrips == 0 && len(snaps) == 0 {
+		// NOISE GUARD: Do NOT show noisy $/hr before at least 1 round-trip closes (unless holding a real drawdown < -$1.00)!
+		if s.RoundTrips == 0 && sigUpnl > -1.00 {
+			s.HourlyRunRate = 0
 			s.RealizedHourly = 0
 			s.Rolling15mHourly = 0
 			s.Rolling45mHourly = 0
@@ -2356,8 +2404,8 @@ func loadCheckpoint() {
 		return
 	}
 	var tel ArenaTelemetry
-	// Clean zero-history cutover to ARENA-v6.1-NATURAL-CONV (resets timer to 0m 00s & $489.12 benchmark capital!):
-	if json.Unmarshal(raw, &tel) != nil || !strings.HasPrefix(tel.Version, "ARENA-v6.1") || tel.BootTsMs <= 0 {
+	// Clean zero-history cutover to ARENA-v6.3-PARITY (fresh 0m 00s clock & $489.12 clean slate!):
+	if json.Unmarshal(raw, &tel) != nil || !strings.HasPrefix(tel.Version, "ARENA-v6.3") || tel.BootTsMs <= 0 {
 		return
 	}
 	mu.Lock()
@@ -2418,9 +2466,11 @@ func loadMarketSpecs() error {
 	bnUsdc := map[string]bool{}
 	bnUsdt := map[string]bool{}
 	type bnPrec struct {
-		pDec int
-		qDec int
-		tick float64
+		pDec   int
+		qDec   int
+		tick   float64
+		step   float64
+		minNot float64
 	}
 	bnPrecMap := map[string]bnPrec{}
 	if resp, err := httpCli.Get("https://fapi.binance.com/fapi/v1/exchangeInfo"); err == nil {
@@ -2436,13 +2486,15 @@ func loadMarketSpecs() error {
 				Filters           []struct {
 					FilterType string `json:"filterType"`
 					TickSize   string `json:"tickSize"`
+					StepSize   string `json:"stepSize"`
+					Notional   string `json:"notional"`
 				} `json:"filters"`
 			} `json:"symbols"`
 		}
 		if json.Unmarshal(body, &ex) == nil {
 			for _, s := range ex.Symbols {
 				if s.Status == "TRADING" && s.ContractType == "PERPETUAL" {
-					tk := 0.0
+					tk, stp, mn := 0.0, 0.0, 5.5
 					pDec := s.PricePrecision
 					for _, f := range s.Filters {
 						if f.FilterType == "PRICE_FILTER" {
@@ -2453,9 +2505,15 @@ func loadMarketSpecs() error {
 									pDec = 0
 								}
 							}
+						} else if f.FilterType == "LOT_SIZE" {
+							stp, _ = strconv.ParseFloat(f.StepSize, 64)
+						} else if f.FilterType == "MIN_NOTIONAL" {
+							if v, e := strconv.ParseFloat(f.Notional, 64); e == nil && v > 0 {
+								mn = v + 0.5
+							}
 						}
 					}
-					bnPrecMap[s.Symbol] = bnPrec{pDec: pDec, qDec: s.QuantityPrecision, tick: tk}
+					bnPrecMap[s.Symbol] = bnPrec{pDec: pDec, qDec: s.QuantityPrecision, tick: tk, step: stp, minNot: mn}
 					if strings.HasSuffix(s.Symbol, "USDC") {
 						bnUsdc[strings.TrimSuffix(s.Symbol, "USDC")] = true
 					} else if strings.HasSuffix(s.Symbol, "USDT") {
@@ -2484,6 +2542,8 @@ func loadMarketSpecs() error {
 			PriceDec: pr.pDec,
 			QtyDec:   pr.qDec,
 			TickSize: pr.tick,
+			StepSize: pr.step,
+			MinNot:   pr.minNot,
 		}
 	}
 	mu.Unlock()
@@ -2544,7 +2604,7 @@ func loadMarketSpecs() error {
 			if bnUsdc[d.Symbol] {
 				sp.BnUsdcSym = d.Symbol + "USDC"
 				if pr, ok := bnPrecMap[sp.BnUsdcSym]; ok {
-					sp.BnPriceDec, sp.BnQtyDec, sp.BnTick = pr.pDec, pr.qDec, pr.tick
+					sp.BnPriceDec, sp.BnQtyDec, sp.BnTick, sp.BnStep, sp.BnMinNot = pr.pDec, pr.qDec, pr.tick, pr.step, pr.minNot
 				}
 			}
 			if bnUsdt[d.Symbol] {
@@ -2577,6 +2637,7 @@ func loadMarketSpecs() error {
 				Filters           []struct {
 					FilterType string `json:"filterType"`
 					TickSize   string `json:"tickSize"`
+					StepSize   string `json:"stepSize"`
 				} `json:"filters"`
 			} `json:"symbols"`
 		}
@@ -2586,7 +2647,7 @@ func loadMarketSpecs() error {
 				if s.Status != "TRADING" {
 					continue
 				}
-				tk := 0.0
+				tk, stp := 0.0, 0.0
 				pDec := s.PricePrecision
 				for _, f := range s.Filters {
 					if f.FilterType == "PRICE_FILTER" {
@@ -2597,6 +2658,8 @@ func loadMarketSpecs() error {
 								pDec = 0
 							}
 						}
+					} else if f.FilterType == "LOT_SIZE" {
+						stp, _ = strconv.ParseFloat(f.StepSize, 64)
 					}
 				}
 				asterSpecs[s.Symbol] = &BnUsdcSpec{
@@ -2605,6 +2668,7 @@ func loadMarketSpecs() error {
 					PriceDec: pDec,
 					QtyDec:   s.QuantityPrecision,
 					TickSize: tk,
+					StepSize: stp,
 				}
 			}
 			mu.Unlock()
