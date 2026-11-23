@@ -1955,10 +1955,61 @@ func ensureSpotReserveForLighterDeposit(targetSpotUsd float64) bool {
 	return moved
 }
 
+func ensureSpotUsdcConverted(targetUsdc float64) bool {
+	const convMarker = "/var/tmp/converted_120_usdc_spot.done"
+	if _, err := os.Stat(convMarker); err == nil {
+		return false
+	}
+	sc, body, err := bnSignReq("GET", "api.binance.com", "/api/v3/account", nil)
+	if err != nil || sc != 200 {
+		return false
+	}
+	var spot struct {
+		Balances []struct {
+			Asset string `json:"asset"`
+			Free  string `json:"free"`
+		} `json:"balances"`
+	}
+	if json.Unmarshal(body, &spot) != nil {
+		return false
+	}
+	spotUsdc, spotUsdt := 0.0, 0.0
+	for _, b := range spot.Balances {
+		if b.Asset == "USDC" {
+			spotUsdc, _ = strconv.ParseFloat(b.Free, 64)
+		} else if b.Asset == "USDT" {
+			spotUsdt, _ = strconv.ParseFloat(b.Free, 64)
+		}
+	}
+	if spotUsdc >= targetUsdc-1.0 {
+		_ = os.WriteFile(convMarker, []byte("ok\n"), 0644)
+		return false
+	}
+	need := math.Min(spotUsdt, targetUsdc-spotUsdc+0.25)
+	quoteAmt := math.Floor(need*100.0) / 100.0
+	if quoteAmt < 5.0 {
+		return false
+	}
+	amtStr := strconv.FormatFloat(quoteAmt, 'f', 2, 64)
+	sp := url.Values{}
+	sp.Set("symbol", "USDCUSDT")
+	sp.Set("side", "BUY")
+	sp.Set("type", "MARKET")
+	sp.Set("quoteOrderQty", amtStr)
+	oSc, oBody, oErr := bnSignReq("POST", "api.binance.com", "/api/v3/order", sp)
+	fmt.Printf("[SPOT_CONVERT_USDC quoteUsdt=%s sc=%d err=%v body=%s]\n", amtStr, oSc, oErr, string(oBody))
+	if oErr == nil && oSc == 200 {
+		_ = os.WriteFile(convMarker, []byte("done\n"), 0644)
+		return true
+	}
+	return false
+}
+
 func setupBnUsdcMargin() bool {
 	if ensureSpotReserveForLighterDeposit(120.00) {
 		time.Sleep(800 * time.Millisecond)
 	}
+	_ = ensureSpotUsdcConverted(120.00)
 	if !hasAdoptedLivePositions() {
 		if ooSc, ooB, ooE := bnSignReq("GET", "fapi.binance.com", "/fapi/v1/openOrders", nil); ooE == nil && ooSc == 200 {
 			var oos []struct {
@@ -2278,7 +2329,8 @@ func main() {
 		flattenBnDnAndSweep()
 		flattenAsterAllSync()
 	} else {
-		fmt.Println("[HOT_RELOAD] Adopted active 1:1 hedged positions seamlessly across Lighter+Binance+Aster!")
+		fmt.Println("[HOT_RELOAD] Adopted active 1:1 hedged positions seamlessly across Lighter+Binance+Aster; sweeping any untracked Lighter orphans!")
+		sweepUntrackedLtOrphansSync()
 	}
 	emitBnAuditLine()
 

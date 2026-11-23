@@ -690,6 +690,15 @@ func isSymUsedByAnySlotLocked(sym, excludeSlotKey string) bool {
 	return false
 }
 
+func hasAnyLtEntryOpenLocked(excludeSlotKey string) bool {
+	for k, other := range liveSlots {
+		if k != excludeSlotKey && other != nil && (other.State == "LT_ENTRY_OPEN" || other.State == "LT_QUOTING") {
+			return true
+		}
+	}
+	return false
+}
+
 func isSymUsedByAnySlot(sym, excludeSlotKey string) bool {
 	liveMu.Lock()
 	defer liveMu.Unlock()
@@ -726,7 +735,7 @@ func placeLtPostOnlyOrderSync(sym, side string, px, qty float64, reduceOnly bool
 		ro = 1
 	}
 	coi = coiSeq.Add(1)
-	exp := time.Now().Add(24 * time.Hour).UnixMilli()
+	exp := time.Now().Add(10 * time.Minute).UnixMilli()
 	dbg := fmt.Sprintf("LT_PO_%s_%s px=%.5f sz=%.5f ro=%d", sym, side, pxF, qty, ro)
 	err := sendSignedTx(fmt.Sprintf("po_%d", coi), dbg, func(opts *types.TransactOpts) (uint8, string, error) {
 		ti, e := txCli.GetCreateOrderTransaction(&types.CreateOrderTxReq{
@@ -752,22 +761,45 @@ func placeLtPostOnlyOrderSync(sym, side string, px, qty float64, reduceOnly bool
 	return coi, true
 }
 
-func cancelLtOrderByCOISync(sym string, coi int64) {
+func fetchLtMarketOpenOrderCountREST(sym string) (int, bool) {
 	m, exists := markets[sym]
-	if !exists || coi <= 0 {
+	if !exists {
+		return 0, false
+	}
+	hc := &http.Client{Timeout: 3 * time.Second}
+	resp, err := ltGet(hc, fmt.Sprintf("%s/api/v1/account?by=index&value=%d", BaseURL, AcctIdx))
+	if err != nil {
+		return 0, false
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	var res struct {
+		Accounts []struct {
+			TotalOrderCount int `json:"total_order_count"`
+			Positions       []struct {
+				MarketID       int64 `json:"market_id"`
+				OpenOrderCount int   `json:"open_order_count"`
+			} `json:"positions"`
+		} `json:"accounts"`
+	}
+	if json.Unmarshal(body, &res) != nil || len(res.Accounts) == 0 {
+		return 0, false
+	}
+	for _, p := range res.Accounts[0].Positions {
+		if p.MarketID == m.ID {
+			return p.OpenOrderCount, true
+		}
+	}
+	return 0, true
+}
+
+func cancelLtOrderByCOISync(sym string, coi int64) {
+	if coi <= 0 {
 		return
 	}
-	_ = sendSignedTx(fmt.Sprintf("c_%d", coi), "cancel_"+sym, func(opts *types.TransactOpts) (uint8, string, error) {
-		ti, e := txCli.GetCancelOrderTransaction(&types.CancelOrderTxReq{
-			MarketIndex: m.ID,
-			Index:       coi,
-		}, opts)
-		if e != nil {
-			return 0, "", e
-		}
-		s, e := ti.GetTxInfo()
-		return ti.GetTxType(), s, e
-	})
+	// zkLighter CancelOrderTxReq ignores ClientOrderIndex on mainnet (leaving zombie orders live!);
+	// With max 1 concurrent LT_ENTRY_OPEN globally, CancelAllOrders wipes 100% of resting book orders reliably in 1 TX!
+	cancelAll()
 }
 
 func peerTopDepthUsd(peerVenue, peerSym, hedgeSide string) float64 {
@@ -1031,11 +1063,11 @@ func closeLtLegGuaranteedSync(sym string, expectedPos float64, lb, la float64) (
 	// 1:1 FORWARD PARITY (<450ms total close!):
 	// Lighter #770015 is ALREADY 0.00% Taker Fee! Skip the 650ms PostOnly detour so the book cannot move against us after Peer Maker exit fills!
 	closeSide := "BID"
-	closePx := roundTo(la*1.0025, m.PxDec) // 25bp-bounded 0% Lighter IOC close matching Forward Lab!
+	closePx := roundTo(la*1.0075, m.PxDec) // 75bp-bounded Stage 1 IOC so volatile US open closes always fill
 	exitEstPx = la
 	if curPos > 0 {
 		closeSide = "ASK"
-		closePx = roundTo(lb*0.9975, m.PxDec)
+		closePx = roundTo(lb*0.9925, m.PxDec)
 		exitEstPx = lb
 	}
 
@@ -1084,7 +1116,7 @@ func closeLtLegGuaranteedSync(sym string, expectedPos float64, lb, la float64) (
 		}
 	}
 
-	// STAGE 2: Final 25bp-bounded fallback ONLY if Stage 1 truly missed after 3.2s zkLighter indexing window:
+	// STAGE 2: Final 200bp-bounded fallback if book jumped during 305ms speed-bump:
 	if remPos, _ := fetchLtPosREST(sym); math.Abs(remPos) > targetAbs {
 		remSlice := math.Abs(remPos) - targetAbs
 		if remSlice >= m.MinB {
@@ -1093,16 +1125,16 @@ func closeLtLegGuaranteedSync(sym string, expectedPos float64, lb, la float64) (
 				lb2, la2 = lb, la
 			}
 			rSide := "BID"
-			rPx := roundTo(la2*1.0025, m.PxDec)
+			rPx := roundTo(la2*1.0200, m.PxDec)
 			if remPos > 0 {
 				rSide = "ASK"
-				rPx = roundTo(lb2*0.9975, m.PxDec)
+				rPx = roundTo(lb2*0.9800, m.PxDec)
 			}
 			liveMu.Lock()
 			recordLtTxLocked(time.Now().UnixMilli())
 			liveMu.Unlock()
 			_, _ = placeLtHedgeIOC(sym, rSide, rPx, remSlice, true)
-			time.Sleep(1100 * time.Millisecond)
+			time.Sleep(1500 * time.Millisecond)
 			_, _ = fetchLtPosREST(sym)
 		}
 	}
@@ -1397,7 +1429,7 @@ func stepLiveSlot(rt *LiveSlotRuntime, now time.Time) {
 	clipUsd := rt.ClipUsd
 	curState := rt.State
 	liveMu.Unlock()
-	if acct == nil || curState == "CLOSING" || curState == "HEDGING_LT" {
+	if acct == nil || curState == "CLOSING" || curState == "HEDGING_LT" || curState == "LT_QUOTING" {
 		return
 	}
 
@@ -1944,21 +1976,28 @@ func stepLiveSlot(rt *LiveSlotRuntime, now time.Time) {
 			return
 		}
 
-		// If CancelSent is already in flight (wait 3.5s past speed-bump + zkLighter settlement + COI check so late fills NEVER escape unhedged!):
+		// If CancelSent is already in flight (wait 2.2s past speed-bump + zkLighter settlement + verify open_order_count==0 & pos==0 before IDLE!):
 		if rt.CancelSent {
-			if now.Sub(rt.CancelAt) >= 3500*time.Millisecond {
+			if now.Sub(rt.CancelAt) >= 2200*time.Millisecond {
 				if sq, _, okT := fetchLtTradeFillByCOI(rt.Sym, rt.LtCOI); okT && math.Abs(sq) >= m.MinB {
+					rt.CancelSent = false
 					return // next tick will catch math.Abs(ltPos) >= m.MinB and hedge it immediately!
 				}
 				if rp, _ := fetchLtPosREST(rt.Sym); math.Abs(rp) >= m.MinB {
+					rt.CancelSent = false
 					return // next tick will catch math.Abs(ltPos) >= m.MinB and hedge it immediately!
+				}
+				if oo, okOO := fetchLtMarketOpenOrderCountREST(rt.Sym); okOO && oo > 0 {
+					cancelAll()
+					rt.CancelAt = now
+					return
 				}
 				liveMu.Lock()
 				rt.State = "IDLE"
 				rt.Sym = ""
 				rt.LtCOI = 0
 				rt.CancelSent = false
-				rt.CoolUntil = now.Add(1500 * time.Millisecond)
+				rt.CoolUntil = now.Add(1200 * time.Millisecond)
 				liveMu.Unlock()
 			}
 			return
@@ -2904,17 +2943,32 @@ func stepLiveSlot(rt *LiveSlotRuntime, now time.Time) {
 	}
 
 	liveMu.Lock()
-	if !canSendLtTxLocked(now.UnixMilli(), false) || isSymUsedByAnySlotLocked(bestSym, rt.SlotKey) {
+	if hasAnyLtEntryOpenLocked(rt.SlotKey) || !canSendLtTxLocked(now.UnixMilli(), false) || isSymUsedByAnySlotLocked(bestSym, rt.SlotKey) {
 		liveMu.Unlock()
 		return
 	}
-	recordLtTxLocked(now.UnixMilli())
+	rt.State = "LT_QUOTING"
 	rt.Sym = bestSym
+	liveMu.Unlock()
+
+	// Verify Lighter is 100% flat on bestSym BEFORE quoting so a stale/untracked orphan can NEVER trigger a double-sided bogus hedge!
+	if rp, _ := fetchLtPosREST(bestSym); math.Abs(rp) >= markets[bestSym].MinB {
+		liveMu.Lock()
+		rt.State = "IDLE"
+		rt.Sym = ""
+		rt.CoolUntil = now.Add(5 * time.Second)
+		liveMu.Unlock()
+		return
+	}
+
+	liveMu.Lock()
+	recordLtTxLocked(now.UnixMilli())
 	liveMu.Unlock()
 
 	coi, placed := placeLtPostOnlyMakerSync(bestSym, bestLtSide, bestLtPx, bestQty)
 	if !placed {
 		liveMu.Lock()
+		rt.State = "IDLE"
 		rt.Sym = ""
 		rt.CoolUntil = now.Add(2 * time.Second)
 		liveMu.Unlock()
@@ -3533,7 +3587,12 @@ func sweepUntrackedLtOrphansSync() {
 		liveMu.Lock()
 		tracked := false
 		for _, rt := range liveSlots {
-			if rt != nil && rt.Sym == sym {
+			if rt == nil || rt.Sym != sym {
+				continue
+			}
+			if rt.State == "HEDGED" || rt.State == "PEER_EXIT_OPEN" || rt.State == "CLOSING" ||
+				rt.State == "LT_SNIPE_OPEN" || rt.State == "HEDGING_LT" ||
+				((rt.State == "LT_ENTRY_OPEN" || rt.State == "LT_QUOTING") && time.Since(rt.PlacedAt) < 12*time.Second) {
 				tracked = true
 				break
 			}
@@ -3844,7 +3903,7 @@ func runLiveMicroArenaLoop() {
 				_, _, _ = fetchAsterAccountMargin()
 			}()
 		}
-		if now.Sub(lastOrphanCheck) >= 30*time.Second {
+		if now.Sub(lastOrphanCheck) >= 15*time.Second {
 			lastOrphanCheck = now
 			go func() {
 				reconcileGhostSlotsWithRealExchanges()
