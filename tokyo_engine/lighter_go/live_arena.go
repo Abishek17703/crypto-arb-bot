@@ -328,9 +328,9 @@ func initLiveMicroArena() {
 	nowMs := time.Now().UnixMilli()
 	activePreset = bnPresets["S7_BN_HIGH_CONV_RAW"]
 	liveAcct = &LiveStratAccount{
-		ID:             "LIVE_AUTO_LT_BN_USDC",
+		ID:             activePreset.ForwardID,
 		ForwardStratID: activePreset.ForwardID,
-		Name:           "Auto-Select Winner: Lighter 0% <-> Binance USDC-M",
+		Name:           activePreset.Label,
 		Desc:           "Single-loop engine: auto-picks top 45m Forward Lab LT<->BN winner when idle and scales $20 -> $45 -> $75 (3 slots, -$8 stop).",
 		VenueDesc:      "LT #770015 0% <-> BN USDC-M (4bp In / 0% Out)",
 		Tier:           0,
@@ -393,7 +393,9 @@ func loadLiveArenaState() {
 		liveAcct.HaltReason = st.HaltReason
 		if p, ok := bnPresets[st.ForwardStratID]; ok {
 			activePreset = p
+			liveAcct.ID = p.ForwardID
 			liveAcct.ForwardStratID = p.ForwardID
+			liveAcct.Name = p.Label
 			liveAcct.RotatedNote = p.Label
 		}
 		applyTierLocked()
@@ -1454,6 +1456,7 @@ func evaluateForwardWinnerAndTiers() {
 		UptimeHours float64 `json:"uptimeHours"`
 		Strategies  []struct {
 			ID               string  `json:"id"`
+			Name             string  `json:"name"`
 			StratBootMs      int64   `json:"stratBootMs"`
 			HourlyRunRate    float64 `json:"hourlyRunRate"`
 			Rolling45mHourly float64 `json:"rolling45mHourly"`
@@ -1469,7 +1472,7 @@ func evaluateForwardWinnerAndTiers() {
 	if refNow <= 0 {
 		refNow = time.Now().UnixMilli()
 	}
-	bestID, bestHr, bestPF, bestDD := "", -1e9, 0.0, 999.0
+	bestID, bestName, bestHr, bestPF, bestDD := "", "", -1e9, 0.0, 999.0
 	var bestTrips int64
 	bestAgeMin := 0.0
 	for _, s := range fa.Strategies {
@@ -1485,7 +1488,7 @@ func evaluateForwardWinnerAndTiers() {
 			ageM = float64(refNow-s.StratBootMs) / 60000.0
 		}
 		if ageM >= 45.0 && hr >= 2.0 && s.ProfitFactor >= 1.40 && s.RoundTrips >= 5 && s.MaxDrawdownUsd < 40.0 && hr > bestHr {
-			bestID, bestHr, bestPF, bestDD, bestTrips, bestAgeMin = s.ID, hr, s.ProfitFactor, s.MaxDrawdownUsd, s.RoundTrips, ageM
+			bestID, bestName, bestHr, bestPF, bestDD, bestTrips, bestAgeMin = s.ID, s.Name, hr, s.ProfitFactor, s.MaxDrawdownUsd, s.RoundTrips, ageM
 		}
 	}
 
@@ -1505,7 +1508,13 @@ func evaluateForwardWinnerAndTiers() {
 		}
 		if allIdle && (lastPresetSwitchMs == 0 || nowMs-lastPresetSwitchMs >= 45*60*1000) && bestID != activePreset.ForwardID {
 			activePreset = bnPresets[bestID]
+			liveAcct.ID = bestID
 			liveAcct.ForwardStratID = bestID
+			if bestName != "" {
+				liveAcct.Name = bestName
+			} else {
+				liveAcct.Name = activePreset.Label
+			}
 			liveAcct.RotatedNote = activePreset.Label
 			lastPresetSwitchMs = nowMs
 			fmt.Printf("[AUTO_SELECT_WINNER preset=%s fwd45=$%+.2f/hr PF=%.2f trips=%d]\n", bestID, bestHr, bestPF, bestTrips)
@@ -1554,7 +1563,13 @@ func evaluateForwardWinnerAndTiers() {
 	case 0:
 		if bestID != "" && bestAgeMin >= 45.0 && bestDD < 40.0 && (liveAcct.HaltReason == "" || dwellMin >= 15.0) {
 			activePreset = bnPresets[bestID]
+			liveAcct.ID = bestID
 			liveAcct.ForwardStratID = bestID
+			if bestName != "" {
+				liveAcct.Name = bestName
+			} else {
+				liveAcct.Name = activePreset.Label
+			}
 			liveAcct.RotatedNote = activePreset.Label
 			liveAcct.Tier = 1
 			liveAcct.StratActiveMs = nowMs
