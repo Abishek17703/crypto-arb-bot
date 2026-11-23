@@ -2263,9 +2263,7 @@ func updateMarkToMarketAndWriteTelemetry() {
 		s.UnrealizedPnL = roundTo(rawMarkUpnl-openEntryFees-openExitFees, 4)
 		s.Equity = roundTo(s.StartCash+s.ClosedNetUsd+s.UnrealizedPnL, 4)
 		s.WithdrawableUsd = s.Equity
-		// Noise-free Signal Equity: Fair-Mid open PnL after entry fee clamped <= 0 so bid-ask cross noise never inflates $/hr:
 		sigUpnl := math.Min(0.0, rawMidUpnl-openEntryFees)
-		sigEq := roundTo(s.StartCash+s.ClosedNetUsd+sigUpnl, 4)
 		if s.Equity > s.PeakEquity {
 			s.PeakEquity = s.Equity
 		}
@@ -2273,22 +2271,23 @@ func updateMarkToMarketAndWriteTelemetry() {
 		if dd > s.MaxDrawdownUsd {
 			s.MaxDrawdownUsd = roundTo(dd, 4)
 		}
-		netGain := sigEq - s.StartCash
+		netGain := s.ClosedNetUsd
 		realGain := s.ClosedNetUsd
 		stratStart := bootMs
 		if s.StratBootMs > bootMs {
 			stratStart = s.StratBootMs
 		}
 		stratUpHr := math.Max(float64(nowMs-stratStart)/3600000.0, 1.0/3600.0)
-		// NOISE-FREE FLOOR: Minimum 15m (0.25h) time denominator so 1-2 minute trades NEVER extrapolate to fake +/-$80/hr spikes!
+		// NOISE-FREE CLOSED-TRADES-ONLY RUN RATE: Minimum 15m (0.25h) time denominator; zero open unrealized basis noise!
 		denomHr := math.Max(stratUpHr, 0.25)
+		closedCashNow := roundTo(s.StartCash+s.ClosedNetUsd, 4)
 		s.HourlyRunRate = roundTo(netGain/denomHr, 3)
 		s.RealizedHourly = roundTo(realGain/denomHr, 3)
 		s.ActiveMakers = makerCntByStrat[id]
 		s.PosSnap = snaps
 
 		if len(s.EquityCurve) == 0 || nowMs-s.EquityCurve[len(s.EquityCurve)-1].TsMs >= 30000 {
-			s.EquityCurve = append(s.EquityCurve, EquityPoint{TsMs: nowMs, Equity: s.Equity, MidEq: sigEq, Cash: s.Cash})
+			s.EquityCurve = append(s.EquityCurve, EquityPoint{TsMs: nowMs, Equity: s.Equity, MidEq: closedCashNow, Cash: closedCashNow})
 			if len(s.EquityCurve) > 2940 { // 2940 * 30s = 24.5 hours full rolling window!
 				s.EquityCurve = append([]EquityPoint(nil), s.EquityCurve[len(s.EquityCurve)-2940:]...)
 			}
@@ -2296,7 +2295,7 @@ func updateMarkToMarketAndWriteTelemetry() {
 
 		calcRoll := func(winMs int64, minDtHr float64) float64 {
 			if len(s.EquityCurve) < 2 {
-				return s.HourlyRunRate
+				return s.RealizedHourly
 			}
 			tgt := nowMs - winMs
 			refPt := s.EquityCurve[0]
@@ -2308,11 +2307,11 @@ func updateMarkToMarketAndWriteTelemetry() {
 				}
 			}
 			dtHr := math.Max(float64(nowMs-refPt.TsMs)/3600000.0, minDtHr)
-			refSig := refPt.MidEq
-			if refSig <= 0 {
-				refSig = refPt.Equity
+			refClosed := refPt.Cash
+			if refClosed <= 0 {
+				refClosed = s.StartCash
 			}
-			return roundTo((sigEq-refSig)/dtHr, 3)
+			return roundTo((closedCashNow-refClosed)/dtHr, 3)
 		}
 
 		s.Rolling15mHourly = calcRoll(15*60*1000, 0.25)

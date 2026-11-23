@@ -617,15 +617,19 @@ func hasAdoptedLivePositions() bool {
 	return false
 }
 
-func isSymUsedByAnySlot(sym, excludeSlotKey string) bool {
-	liveMu.Lock()
-	defer liveMu.Unlock()
+func isSymUsedByAnySlotLocked(sym, excludeSlotKey string) bool {
 	for k, other := range liveSlots {
-		if k != excludeSlotKey && other != nil && other.State != "IDLE" && other.Sym == sym {
+		if k != excludeSlotKey && other != nil && other.Sym != "" && other.Sym == sym {
 			return true
 		}
 	}
 	return false
+}
+
+func isSymUsedByAnySlot(sym, excludeSlotKey string) bool {
+	liveMu.Lock()
+	defer liveMu.Unlock()
+	return isSymUsedByAnySlotLocked(sym, excludeSlotKey)
 }
 
 func appendLiveFillLocked(f LiveFillAudit) {
@@ -1338,19 +1342,49 @@ func stepLiveSlot(rt *LiveSlotRuntime, now time.Time) {
 					}
 				}
 				flatFee := (execQ * math.Max(apFlat, avgP) * fx) * (tFeeBp / 10000.0)
+				netFlat := roundTo(flatPnl-flatFee, 4)
+				failSym := rt.Sym
+				nowMs := time.Now().UnixMilli()
 				liveMu.Lock()
 				acct.MakerFills++
 				acct.TakerFills++
+				acct.RoundTrips++
 				acct.RealizedGross = roundTo(acct.RealizedGross+flatPnl, 4)
 				acct.FeesPaid = roundTo(acct.FeesPaid+flatFee, 4)
 				acct.Cash = roundTo(acct.StartCash+acct.RealizedGross-acct.FeesPaid+acct.FundingUsd, 4)
+				if netFlat > 0 {
+					acct.WinTrips++
+					acct.GrossWinUsd = roundTo(acct.GrossWinUsd+netFlat, 4)
+				} else if netFlat < 0 {
+					acct.GrossLossUsd = roundTo(acct.GrossLossUsd+math.Abs(netFlat), 4)
+				}
+				if acct.GrossLossUsd > 1e-6 {
+					acct.ProfitFactor = roundTo(acct.GrossWinUsd/acct.GrossLossUsd, 2)
+				} else if acct.GrossWinUsd > 0 {
+					acct.ProfitFactor = 99.0
+				}
+				appendLiveFillLocked(LiveFillAudit{
+					TsMs:     nowMs,
+					StratID:  rt.StratID,
+					Venue:    rt.PeerVenue,
+					Symbol:   peerSym,
+					Side:     flatSide,
+					ExecType: "S10_IOC_MISS_FLAT",
+					FillPx:   apFlat,
+					SignalPx: avgP,
+					Qty:      execQ,
+					Notional: roundTo(execQ*math.Max(apFlat, avgP)*fx, 2),
+					FeeUsd:   roundTo(flatFee, 4),
+					Realized: netFlat,
+					Tag:      "S10_IOC_MISS_FLAT",
+				})
 				rt.State = "IDLE"
 				rt.Sym = ""
 				rt.PeerSym = ""
 				rt.EntryPeerOid = 0
 				rt.CoolUntil = time.Now().Add(8 * time.Second)
 				liveMu.Unlock()
-				fmt.Printf("[S10_IOC_MISS_FALLBACK sym=%s execQ=%.4f flatPnl=$%+.4f fee=$%.4f]\n", rt.Sym, execQ, flatPnl, flatFee)
+				fmt.Printf("[S10_IOC_MISS_FALLBACK sym=%s execQ=%.4f flatPnl=$%+.4f fee=$%.4f]\n", failSym, execQ, flatPnl, flatFee)
 				return
 			}
 
@@ -2059,9 +2093,9 @@ func stepLiveSlot(rt *LiveSlotRuntime, now time.Time) {
 			ensureAsterLeverage(gPeerSym, lev)
 		}
 
-		// Claim symbol lock while IOC is in flight across 305ms Lighter speed-bump:
+		// Claim symbol lock atomically while IOC is in flight across 305ms Lighter speed-bump:
 		liveMu.Lock()
-		if !canSendLtTxLocked(now.UnixMilli(), false) {
+		if !canSendLtTxLocked(now.UnixMilli(), false) || isSymUsedByAnySlotLocked(gSym, rt.SlotKey) {
 			liveMu.Unlock()
 			return
 		}
@@ -2349,8 +2383,12 @@ func stepLiveSlot(rt *LiveSlotRuntime, now time.Time) {
 	}
 
 	if rt.PeerMakerFirst {
-		// Lock rt.Sym BEFORE resting Peer GTX Maker so no other slot or sweeper races on the same symbol!
+		// Lock rt.Sym atomically BEFORE resting Peer GTX Maker so no other slot or sweeper races on the same symbol!
 		liveMu.Lock()
+		if isSymUsedByAnySlotLocked(bestSym, rt.SlotKey) {
+			liveMu.Unlock()
+			return
+		}
 		rt.Sym = bestSym
 		liveMu.Unlock()
 
@@ -2382,9 +2420,20 @@ func stepLiveSlot(rt *LiveSlotRuntime, now time.Time) {
 		return
 	}
 
+	liveMu.Lock()
+	if isSymUsedByAnySlotLocked(bestSym, rt.SlotKey) {
+		liveMu.Unlock()
+		return
+	}
+	rt.Sym = bestSym
+	liveMu.Unlock()
+
 	coi, placed := placeLtPostOnlyMakerSync(bestSym, bestLtSide, bestLtPx, bestQty)
 	if !placed {
+		liveMu.Lock()
+		rt.Sym = ""
 		rt.CoolUntil = now.Add(2 * time.Second)
+		liveMu.Unlock()
 		return
 	}
 
@@ -2562,7 +2611,6 @@ func writeLiveArenaTelemetry(now time.Time) {
 		acct.Equity = roundTo(acct.Cash+upnl, 4)
 		acct.WithdrawableUsd = acct.Equity
 		sigUpnl := math.Min(0.0, midUpnl)
-		sigEq := roundTo(acct.Cash+sigUpnl, 4)
 		if acct.Equity > acct.PeakEquity {
 			acct.PeakEquity = acct.Equity
 		}
@@ -2571,10 +2619,8 @@ func writeLiveArenaTelemetry(now time.Time) {
 			acct.MaxDrawdownUsd = roundTo(dd, 4)
 		}
 
-		netStrat := acct.Equity - acct.StartCash
-		sigNetStrat := sigEq - acct.StartCash
-		realStrat := acct.Cash - acct.StartCash
-		combinedNet += netStrat
+		realStrat := acct.ClosedNetUsd
+		combinedNet += realStrat
 
 		// Per-strategy individual active timer & tier dwell timer:
 		if acct.Tier > 0 {
@@ -2606,17 +2652,17 @@ func writeLiveArenaTelemetry(now time.Time) {
 		}
 
 		if len(acct.EquityCurve) == 0 || nowMs-acct.EquityCurve[len(acct.EquityCurve)-1].TsMs >= 30000 {
-			acct.EquityCurve = append(acct.EquityCurve, LiveEqPoint{TsMs: nowMs, Cash: acct.Cash, Eq: acct.Equity, MidEq: sigEq})
+			acct.EquityCurve = append(acct.EquityCurve, LiveEqPoint{TsMs: nowMs, Cash: acct.Cash, Eq: acct.Equity, MidEq: acct.Cash})
 			if len(acct.EquityCurve) > 540 { // 4.5h rolling history
 				acct.EquityCurve = append([]LiveEqPoint(nil), acct.EquityCurve[len(acct.EquityCurve)-540:]...)
 			}
 		}
 
-		// NOISE-FREE LIVE RUN RATE: Uses strategy's own active live timer (min 15m / 0.25h floor) & fair-mid clamped equity!
+		// NOISE-FREE CLOSED-TRADES-ONLY LIVE RUN RATE: Uses strategy's active timer (min 15m / 0.25h floor) & closed Cash only!
 		stratDenomHr := math.Max(acct.ActiveElapsedS/3600.0, 0.25)
-		acct.HourlyRunRate = roundTo(sigNetStrat/stratDenomHr, 3)
 		acct.RealizedHourly = roundTo(realStrat/stratDenomHr, 3)
-		roll4h := acct.HourlyRunRate
+		acct.HourlyRunRate = acct.RealizedHourly
+		roll4h := acct.RealizedHourly
 		targetTs := nowMs - 45*60*1000
 		if len(acct.EquityCurve) >= 2 {
 			refPt := acct.EquityCurve[0]
@@ -2628,14 +2674,13 @@ func writeLiveArenaTelemetry(now time.Time) {
 				}
 			}
 			dtHr := math.Max(float64(nowMs-refPt.TsMs)/3600000.0, 0.25)
-			refSig := refPt.MidEq
-			if refSig <= 0 {
-				refSig = refPt.Eq
+			refCash := refPt.Cash
+			if refCash <= 0 {
+				refCash = acct.StartCash
 			}
-			roll4h = roundTo((sigEq-refSig)/dtHr, 3)
+			roll4h = roundTo((acct.Cash-refCash)/dtHr, 3)
 		}
-		// NOISE GUARD: Zero live $/hr before at least 1 real round-trip closes (unless holding real drawdown < -$0.25)!
-		if acct.Tier <= 0 || (acct.RoundTrips == 0 && sigUpnl > -0.25) {
+		if acct.Tier <= 0 || (acct.RoundTrips == 0 && sigUpnl > -0.25 && math.Abs(realStrat) < 0.0005) {
 			acct.HourlyRunRate = 0.0
 			acct.RealizedHourly = 0.0
 			roll4h = 0.0

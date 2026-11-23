@@ -159,7 +159,7 @@ var (
 	nonceSeq    atomic.Int64
 	coiSeq      atomic.Int64
 	txMu        sync.Mutex
-	useWsSend   = true
+	useWsSend   = false
 	cancelQueue = make(chan func(), 128)
 	txQueue     = make(chan func(), 128)
 
@@ -496,28 +496,44 @@ func sendSignedTx(id, dbg string, build func(*types.TransactOpts) (uint8, string
 			return nil
 		}
 	}
-	form := url.Values{}
-	form.Set("tx_type", strconv.Itoa(int(txType)))
-	form.Set("tx_info", txInfo)
-	resp, err := txHTTP.PostForm(BaseURL+"/api/v1/sendTx", form)
-	if err != nil {
-		return err
-	}
-	body, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	ms := time.Since(t0).Milliseconds()
-	if resp.StatusCode != 200 || !strings.Contains(string(body), `"code":200`) {
-		fmt.Printf("[SENDTX %s %s %dms] status=%d body=%s\n", id, dbg, ms, resp.StatusCode, string(body))
+	for attempt := 0; attempt < 2; attempt++ {
+		if attempt > 0 {
+			txType, txInfo, err = build(nextOpts())
+			if err != nil {
+				return err
+			}
+		}
+		form := url.Values{}
+		form.Set("tx_type", strconv.Itoa(int(txType)))
+		form.Set("tx_info", txInfo)
+		resp, err := txHTTP.PostForm(BaseURL+"/api/v1/sendTx", form)
+		if err != nil {
+			return err
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		ms := time.Since(t0).Milliseconds()
+		if resp.StatusCode == 200 && strings.Contains(string(body), `"code":200`) {
+			fmt.Printf("[TX_OK %s %s] %dms\n", id, dbg, ms)
+			return nil
+		}
+		fmt.Printf("[SENDTX %s %s %dms try=%d] status=%d body=%s\n", id, dbg, ms, attempt+1, resp.StatusCode, string(body))
 		if resp.StatusCode == 429 {
 			quotaCoolUntil.Store(time.Now().Add(5 * time.Second).UnixMilli())
+			if n, e2 := txCli.HTTP().GetNextNonce(AcctIdx, KeyIdx); e2 == nil {
+				nonceSeq.Store(n)
+			}
+			return fmt.Errorf("sendTx 429")
 		}
 		if n, e2 := txCli.HTTP().GetNextNonce(AcctIdx, KeyIdx); e2 == nil {
 			nonceSeq.Store(n)
 		}
+		if attempt == 0 && (strings.Contains(string(body), "nonce") || strings.Contains(string(body), "21104")) {
+			continue
+		}
 		return fmt.Errorf("sendTx failed")
 	}
-	fmt.Printf("[TX_OK %s %s] %dms\n", id, dbg, ms)
-	return nil
+	return fmt.Errorf("sendTx failed")
 }
 
 func cancelAll() {
