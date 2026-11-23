@@ -1943,9 +1943,12 @@ func stepLiveSlot(rt *LiveSlotRuntime, now time.Time) {
 			return
 		}
 
-		// If CancelSent is already in flight (wait 1.5s past speed-bump + zkLighter settlement so late fills NEVER escape unhedged!):
+		// If CancelSent is already in flight (wait 3.5s past speed-bump + zkLighter settlement + COI check so late fills NEVER escape unhedged!):
 		if rt.CancelSent {
-			if now.Sub(rt.CancelAt) >= 1500*time.Millisecond {
+			if now.Sub(rt.CancelAt) >= 3500*time.Millisecond {
+				if sq, _, okT := fetchLtTradeFillByCOI(rt.Sym, rt.LtCOI); okT && math.Abs(sq) >= m.MinB {
+					return // next tick will catch math.Abs(ltPos) >= m.MinB and hedge it immediately!
+				}
 				if rp, _ := fetchLtPosREST(rt.Sym); math.Abs(rp) >= m.MinB {
 					return // next tick will catch math.Abs(ltPos) >= m.MinB and hedge it immediately!
 				}
@@ -2900,10 +2903,11 @@ func stepLiveSlot(rt *LiveSlotRuntime, now time.Time) {
 	}
 
 	liveMu.Lock()
-	if isSymUsedByAnySlotLocked(bestSym, rt.SlotKey) {
+	if !canSendLtTxLocked(now.UnixMilli(), false) || isSymUsedByAnySlotLocked(bestSym, rt.SlotKey) {
 		liveMu.Unlock()
 		return
 	}
+	recordLtTxLocked(now.UnixMilli())
 	rt.Sym = bestSym
 	liveMu.Unlock()
 
@@ -2917,7 +2921,6 @@ func stepLiveSlot(rt *LiveSlotRuntime, now time.Time) {
 	}
 
 	liveMu.Lock()
-	recordLtTxLocked(now.UnixMilli())
 	acct.MakerPlaced++
 	rt.State = "LT_ENTRY_OPEN"
 	rt.Sym = bestSym
@@ -3528,7 +3531,7 @@ func sweepUntrackedLtOrphansSync() {
 		liveMu.Lock()
 		tracked := false
 		for _, rt := range liveSlots {
-			if rt != nil && rt.State != "IDLE" && rt.Sym == sym {
+			if rt != nil && rt.Sym == sym {
 				tracked = true
 				break
 			}
@@ -3631,7 +3634,7 @@ func sweepUntrackedPeerOrphansSync() {
 			liveMu.Lock()
 			tracked := false
 			for _, rt := range liveSlots {
-				if rt != nil && rt.State != "IDLE" && (rt.PeerSym == r.Symbol || rt.Sym == base) {
+				if rt != nil && (rt.PeerSym == r.Symbol || rt.Sym == base) {
 					tracked = true
 					break
 				}
