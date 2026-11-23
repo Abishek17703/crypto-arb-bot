@@ -1220,50 +1220,71 @@ func refreshLtRestBBOIfDue(sym string, last *time.Time, minInterval time.Duratio
 
 func finalizeSlotClose(rt *LiveSlotRuntime, peerExitPx, peerExitFeeBp float64, execType, reason string, exitLatMs int64, now time.Time) {
 	closeStartMs := time.Now().UnixMilli()
-	m := markets[rt.Sym]
+	liveMu.Lock()
+	if rt.State == "IDLE" || rt.State == "CLOSING" || rt.Sym == "" || rt.HedgedQty <= 0 {
+		liveMu.Unlock()
+		return
+	}
+	rt.State = "CLOSING"
+	cSym := rt.Sym
+	cPeerSym := rt.PeerSym
+	cPeerVenue := rt.PeerVenue
+	cLtSide := rt.LtSide
+	cPeerSide := rt.PeerSide
+	qty := rt.HedgedQty
+	cEntryLtPx := rt.EntryLtPx
+	cEntryPeerPx := rt.EntryPeerPx
+	fx := rt.EntryFx
+	cEntryFeeUsd := rt.EntryFeeUsd
+	cEntryPeerFee := rt.EntryPeerFee
+	cOpenedAt := rt.OpenedAt
+	cTradeID := rt.TradeID
+	cStratID := rt.StratID
+	wasLegacyWindDown := rt.LegacyWindDown
+	liveMu.Unlock()
+
+	m := markets[cSym]
 	var lb, la, ltPos float64
-	if st := mktStates[rt.Sym]; st != nil {
+	if st := mktStates[cSym]; st != nil {
 		st.mu.Lock()
 		lb, la, ltPos = st.ltBid, st.ltAsk, st.pos
 		st.mu.Unlock()
 	}
-	expectedLtPos := -rt.HedgedQty
-	if rt.LtSide == "BID" {
-		expectedLtPos = rt.HedgedQty
+	expectedLtPos := -qty
+	if cLtSide == "BID" {
+		expectedLtPos = qty
 	}
 	if math.Abs(ltPos) >= m.MinB {
 		expectedLtPos = ltPos
 	}
-	ltExitPx, ltLatMs := closeLtLegGuaranteedSync(rt.Sym, expectedLtPos, lb, la)
+	ltExitPx, ltLatMs := closeLtLegGuaranteedSync(cSym, expectedLtPos, lb, la)
 	if ltExitPx <= 0 {
-		ltExitPx = rt.EntryLtPx
+		ltExitPx = cEntryLtPx
 	}
 
-	qty := rt.HedgedQty
-	fx := rt.EntryFx
 	if fx <= 0 {
 		fx = 1.0
 	}
-	notional := qty * rt.EntryLtPx
-	entryFeeUsd := rt.EntryFeeUsd
-	if entryFeeUsd <= 0 && rt.EntryPeerFee > 0 {
-		entryFeeUsd = (qty * rt.EntryPeerPx * fx) * (rt.EntryPeerFee / 10000.0)
+	notional := qty * cEntryLtPx
+	entryFeeUsd := cEntryFeeUsd
+	if entryFeeUsd <= 0 && cEntryPeerFee > 0 {
+		entryFeeUsd = (qty * cEntryPeerPx * fx) * (cEntryPeerFee / 10000.0)
 	}
 	exitFeeUsd := (qty * peerExitPx * fx) * (peerExitFeeBp / 10000.0)
 	totalFeeUsd := entryFeeUsd + exitFeeUsd
 
 	var ltGross, peerGross float64
-	if rt.LtSide == "ASK" {
+	if cLtSide == "ASK" {
 		// Short Lighter, Long Peer
-		ltGross = (rt.EntryLtPx - ltExitPx) * qty
-		peerGross = (peerExitPx - rt.EntryPeerPx) * fx * qty
+		ltGross = (cEntryLtPx - ltExitPx) * qty
+		peerGross = (peerExitPx - cEntryPeerPx) * fx * qty
 	} else {
 		// Long Lighter, Short Peer
-		ltGross = (ltExitPx - rt.EntryLtPx) * qty
-		peerGross = (rt.EntryPeerPx - peerExitPx) * fx * qty
+		ltGross = (ltExitPx - cEntryLtPx) * qty
+		peerGross = (cEntryPeerPx - peerExitPx) * fx * qty
 	}
 	// PENNY-EXACT EXCHANGE RECONCILIATION: Poll up to 3.8s for zkLighter block indexer so 100% of closes match on-chain PnL!
-	if exPx, exLtPnl, okEx := waitExactLtCloseTrade(rt.Sym, closeStartMs, 3800*time.Millisecond); okEx {
+	if exPx, exLtPnl, okEx := waitExactLtCloseTrade(cSym, closeStartMs, 3800*time.Millisecond); okEx {
 		ltExitPx = exPx
 		ltGross = exLtPnl
 	}
@@ -1273,21 +1294,20 @@ func finalizeSlotClose(rt *LiveSlotRuntime, peerExitPx, peerExitFeeBp float64, e
 	if notional > 0 {
 		netBps = netUsd / notional * 10000.0
 	}
-	holdSec := now.Sub(rt.OpenedAt).Seconds()
+	holdSec := now.Sub(cOpenedAt).Seconds()
 
 	closePeerSide := "SELL"
-	if rt.PeerSide == "SELL" {
+	if cPeerSide == "SELL" {
 		closePeerSide = "BUY"
 	}
 	closeLtSide := "BUY"
-	if rt.LtSide == "BID" {
+	if cLtSide == "BID" {
 		closeLtSide = "SELL"
 	}
 
 	nowMs := now.UnixMilli()
-	wasLegacyWindDown := rt.LegacyWindDown
 	liveMu.Lock()
-	acct := liveStrats[rt.StratID]
+	acct := liveStrats[cStratID]
 	if acct != nil && !wasLegacyWindDown {
 		// Book BOTH entryFeeUsd + exitFeeUsd (totalFeeUsd) and grossTotal ONLY when the round-trip closes so 0/0 closed ALWAYS shows $0.0000!
 		acct.RealizedGross = roundTo(acct.RealizedGross+grossTotal, 4)
@@ -1321,9 +1341,9 @@ func finalizeSlotClose(rt *LiveSlotRuntime, peerExitPx, peerExitFeeBp float64, e
 	}
 	appendLiveFillLocked(LiveFillAudit{
 		TsMs:      nowMs,
-		StratID:   rt.StratID,
-		Venue:     rt.PeerVenue,
-		Symbol:    rt.PeerSym,
+		StratID:   cStratID,
+		Venue:     cPeerVenue,
+		Symbol:    cPeerSym,
 		Side:      closePeerSide,
 		ExecType:  execType,
 		FillPx:    peerExitPx,
@@ -1337,9 +1357,9 @@ func finalizeSlotClose(rt *LiveSlotRuntime, peerExitPx, peerExitFeeBp float64, e
 	})
 	appendLiveFillLocked(LiveFillAudit{
 		TsMs:      nowMs,
-		StratID:   rt.StratID,
+		StratID:   cStratID,
 		Venue:     "LT_STD",
-		Symbol:    rt.Sym,
+		Symbol:    cSym,
 		Side:      closeLtSide,
 		ExecType:  "LT_IOC_CLOSE",
 		FillPx:    ltExitPx,
@@ -1351,12 +1371,6 @@ func finalizeSlotClose(rt *LiveSlotRuntime, peerExitPx, peerExitFeeBp float64, e
 		LatencyMs: ltLatMs,
 		Tag:       reason,
 	})
-	closedSym := rt.Sym
-	closedLtSide := rt.LtSide
-	closedPeerVenue := rt.PeerVenue
-	closedPeerSide := rt.PeerSide
-	closedTradeID := rt.TradeID
-	closedStratID := rt.StratID
 	rt.State = "IDLE"
 	rt.Sym = ""
 	rt.PeerSym = ""
@@ -1370,9 +1384,9 @@ func finalizeSlotClose(rt *LiveSlotRuntime, peerExitPx, peerExitFeeBp float64, e
 	rt.CoolUntil = now.Add(3 * time.Second)
 	liveMu.Unlock()
 
-	recordStratClose(closedTradeID, closedStratID,
-		fmt.Sprintf("LT_%s_%s+%s_%s", closedSym, closedLtSide, closedPeerVenue, closedPeerSide),
-		closedSym, notional, holdSec, netBps, netUsd, peerGross-totalFeeUsd, ltGross, totalFeeUsd, reason)
+	recordStratClose(cTradeID, cStratID,
+		fmt.Sprintf("LT_%s_%s+%s_%s", cSym, cLtSide, cPeerVenue, cPeerSide),
+		cSym, notional, holdSec, netBps, netUsd, peerGross-totalFeeUsd, ltGross, totalFeeUsd, reason)
 }
 
 func stepLiveSlot(rt *LiveSlotRuntime, now time.Time) {
@@ -1380,8 +1394,9 @@ func stepLiveSlot(rt *LiveSlotRuntime, now time.Time) {
 	acct := liveStrats[rt.StratID]
 	halted := acct != nil && (acct.Halted || acct.Tier <= 0)
 	clipUsd := rt.ClipUsd
+	curState := rt.State
 	liveMu.Unlock()
-	if acct == nil {
+	if acct == nil || curState == "CLOSING" || curState == "HEDGING_LT" {
 		return
 	}
 
@@ -1417,33 +1432,45 @@ func stepLiveSlot(rt *LiveSlotRuntime, now time.Time) {
 		}
 		if halted || pnlBp >= tpBp || holdS >= rt.MaxHoldSec || pnlBp <= -7.5 {
 			closeStartMs := time.Now().UnixMilli()
-			expPos := rt.HedgedQty
-			if rt.LtSide == "ASK" {
-				expPos = -rt.HedgedQty
+			liveMu.Lock()
+			if rt.State != "LT_SNIPE_OPEN" || rt.Sym == "" || rt.HedgedQty <= 0 {
+				liveMu.Unlock()
+				return
+			}
+			rt.State = "CLOSING"
+			closedSym := rt.Sym
+			cLtSide := rt.LtSide
+			qty := rt.HedgedQty
+			cEntryLtPx := rt.EntryLtPx
+			cTradeID := rt.TradeID
+			liveMu.Unlock()
+
+			expPos := qty
+			if cLtSide == "ASK" {
+				expPos = -qty
 			}
 			if math.Abs(ltPos) >= m.MinB {
 				expPos = ltPos
 			}
-			ltExitPx, ltLatMs := closeLtLegGuaranteedSync(rt.Sym, expPos, lb, la)
+			ltExitPx, ltLatMs := closeLtLegGuaranteedSync(closedSym, expPos, lb, la)
 			if ltExitPx <= 0 {
 				ltExitPx = mark
 			}
-			qty := rt.HedgedQty
-			ltGross := (ltExitPx - rt.EntryLtPx) * qty
-			if rt.LtSide == "ASK" {
-				ltGross = (rt.EntryLtPx - ltExitPx) * qty
+			ltGross := (ltExitPx - cEntryLtPx) * qty
+			if cLtSide == "ASK" {
+				ltGross = (cEntryLtPx - ltExitPx) * qty
 			}
-			if exPx, exPnl, okEx := waitExactLtCloseTrade(rt.Sym, closeStartMs, 3800*time.Millisecond); okEx {
+			if exPx, exPnl, okEx := waitExactLtCloseTrade(closedSym, closeStartMs, 3800*time.Millisecond); okEx {
 				ltExitPx = exPx
 				ltGross = exPnl
 			}
-			notional := qty * rt.EntryLtPx
+			notional := qty * cEntryLtPx
 			netBps := 0.0
 			if notional > 0 {
 				netBps = (ltGross / notional) * 10000.0
 			}
 			closeSide := "SELL"
-			if rt.LtSide == "ASK" {
+			if cLtSide == "ASK" {
 				closeSide = "BUY"
 			}
 			reason := "E2_0FEE_SNIPE_TP"
@@ -1453,7 +1480,6 @@ func stepLiveSlot(rt *LiveSlotRuntime, now time.Time) {
 				reason = "E2_0FEE_SNIPE_TIME"
 			}
 			nowMs := time.Now().UnixMilli()
-			closedSym := rt.Sym
 			liveMu.Lock()
 			acct.TakerFills++
 			acct.RoundTrips++
@@ -1496,7 +1522,7 @@ func stepLiveSlot(rt *LiveSlotRuntime, now time.Time) {
 			rt.HedgedQty = 0
 			rt.CoolUntil = time.Now().Add(6 * time.Second)
 			liveMu.Unlock()
-			recordStratClose(rt.TradeID, rt.StratID, "PURE_LT_"+closedSym, closedSym, notional, holdS, netBps, ltGross, 0, ltGross, 0, reason)
+			recordStratClose(cTradeID, rt.StratID, "PURE_LT_"+closedSym, closedSym, notional, holdS, netBps, ltGross, 0, ltGross, 0, reason)
 		}
 		return
 	}
