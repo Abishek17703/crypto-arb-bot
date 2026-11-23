@@ -1699,8 +1699,6 @@ func settleHourlyFundingLocked(nowMs int64) {
 				rBp := bnFund1hBp[p.Symbol]
 				s.FundingUsd -= notional * (rBp / 10000.0)
 			}
-				s.FundingUsd -= notional * (rBp / 10000.0)
-			}
 		}
 		s.Cash = s.StartCash + s.RealizedGross - s.FeesPaid + s.FundingUsd
 	}
