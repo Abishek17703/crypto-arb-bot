@@ -22,11 +22,11 @@ import (
 )
 
 const (
-	StartBudgetUSD = 489.12 // Exact real capital ($91.69 Lighter + $397.43 Binance)
+	StartBudgetUSD = 223.04 // Exact real 3-venue Perp capital ($90.69 Lighter + $82.31 Binance Perp + $50.04 Aster)
 	TargetHourly   = 5.00
 	ArenaOutPath   = "/tmp/forward_arena.json"
 	ArenaStatePath = "/opt/crypto-arb-bot/forward_arena_state.json"
-	ArenaVer       = "ARENA-v5.0-L2-REAL-PHYSICS"
+	ArenaVer       = "ARENA-v5.1-CLEAN-REALISM"
 
 	VenueBnUsdc   = "BN_USDC"
 	VenueBnUsdt   = "BN_USDT"
@@ -133,6 +133,7 @@ type SimMakerOrder struct {
 	InitQueueAheadUsd float64
 	PlacedMs          int64
 	ReadyMs           int64
+	Activated         bool
 	CancelReqMs       int64
 	CancelEffMs       int64
 	ReduceOnly        bool
@@ -158,6 +159,7 @@ type Position struct {
 	Symbol    string  `json:"symbol"`
 	Qty       float64 `json:"qty"` // >0 long, <0 short
 	AvgPx     float64 `json:"avgPx"`
+	EntryFee  float64 `json:"entryFee,omitempty"`
 	OpenedMs  int64   `json:"openedMs"`
 	UpdatedMs int64   `json:"updatedMs"`
 	Tag       string  `json:"tag"`
@@ -221,6 +223,7 @@ type StrategyAccount struct {
 	GrossVolumeUsd  float64              `json:"grossVolumeUsd"`
 	TxTimestamps    []int64              `json:"-"`
 	Positions       map[string]*Position `json:"-"`
+	PendingPairPnl  map[string]float64   `json:"-"`
 	PosSnap         []Position           `json:"positions"`
 	ActiveMakers    int                  `json:"activeMakers"`
 	EquityCurve     []EquityPoint        `json:"equityCurve"`
@@ -443,45 +446,52 @@ func initStrategies() {
 		},
 		{
 			ID:        "S4_ASTER_LT_BN_RWA_15X",
-			Name:      "20x Tokenized Equity Arb (Aster 1.25bp RWA <-> LT)",
-			Desc:      "Trades AAPL, NVDA, TSLA, QQQ, SPY, AMZN, META, COIN, MSTR, GOOGL, AMD, INTC, XAU between Lighter Prem (0.30bp M) & Aster RWA (0% M / 1.25bp T = ONLY 3.55bp 4-leg fee!) at 12x hedged.",
-			VenueDesc: "ASTER_RWA 1.25bp + LT_PREM (12x)",
-			MaxLevCap: 14.0,
+			Name:      "Tokenized Equity Arb (0% LT #770015 <-> Aster 1.25bp RWA)",
+			Desc:      "Exact #770015 0%-fee Lighter Std + Aster RWA (0% M / 1.25bp T = ONLY 1.25bp total 4-leg fee!) on NVDA, AAPL, TSLA, QQQ, SPY, AMZN, META, COIN, MSTR, GOOGL, AMD, INTC at real $50 clips.",
+			VenueDesc: "LT_STD 0% + ASTER_RWA 1.25bp ($50)",
+			MaxLevCap: 5.5,
 		},
 		{
 			ID:        "S5_LT_STD_MARGIN_STRICT",
-			Name:      "Margin-Strict Real-$489 Portfolio (LT Std + BN + Aster)",
-			Desc:      "Exact real-account deployable blueprint: combines top-2 winners (S2+S3) capped strictly at <=3.6x leverage ($1,750 max/side) matching our exact #770015 0%-fee account limits.",
-			VenueDesc: "LT_STD 0% + BN_USDC / ASTER (<=3.6x)",
-			MaxLevCap: 4.5,
+			Name:      "Margin-Strict Real-$223 Portfolio (LT Std + BN + Aster)",
+			Desc:      "Exact real-account deployable blueprint: combines S2+S3 at real $45 hedged clips capped strictly within #770015 ($90) + Binance ($82) + Aster ($50) Perp margin.",
+			VenueDesc: "LT_STD 0% + BN_USDC / ASTER ($45)",
+			MaxLevCap: 3.5,
 		},
 		{
 			ID:        "S6_FUNDING_CARRY_SCALP",
-			Name:      "Positive-Carry Basis Scalp (VVV 207% APR, XMR, CRCL)",
-			Desc:      "ONLY enters the positive hourly funding leg (Short LT / Long Hedge on VVV +2.4bp/h, XMR +1.1bp/h, MSTR +1.5bp/h, CRCL +1.3bp/h, COIN +0.9bp/h) — collects carry while waiting for convergence.",
-			VenueDesc: "Positive-Carry DN + 8bp Target",
-			MaxLevCap: 6.5,
+			Name:      "Positive-Carry Basis Scalp (VVV, XMR, MSTR, COIN)",
+			Desc:      "ONLY enters the positive hourly funding leg (Short LT / Long Hedge on VVV, XMR, MSTR, CRCL, COIN) at real $50 clips — collects hourly carry while waiting for convergence.",
+			VenueDesc: "Positive-Carry DN ($50 Clips)",
+			MaxLevCap: 4.5,
 		},
 		{
 			ID:        "S7_HIGH_CONV_LT_STD_DN",
-			Name:      "High-Conviction >=7bp Lighter Std <-> BN USDC Arb",
-			Desc:      "Same proven 4.0bp total-fee S2 architecture, filtered strictly to >=7.0bp dislocations with larger $780 clips for higher win rate & lower drawdown.",
-			VenueDesc: "LT_STD 0% + BN_USDC (>=7bp)",
-			MaxLevCap: 7.5,
+			Name:      "High-Conviction >=7.5bp Lighter Std <-> BN USDC Arb",
+			Desc:      "Proven 4.0bp total-fee S2 architecture filtered strictly to >=7.5bp dislocations at real $55 clips for higher win rate & lower adverse selection.",
+			VenueDesc: "LT_STD 0% + BN_USDC (>=7.5bp, $55)",
+			MaxLevCap: 5.0,
 		},
 		{
 			ID:        "S8_BN_USDC_PAIR_STATARB",
 			Name:      "0%-Maker Binance USDC-M Cointegrated Pair Stat-Arb",
-			Desc:      "Fixed exit-order non-churn + -40bp divergence stop! Beta-neutral Z-score mean-reversion on BTC/ETH, SOL/AVAX, UNI/AAVE, NEAR/SUI, ARB/WLD, ENA/HYPE at 10x.",
-			VenueDesc: "BN_USDC 0% Pairs (-40bp SL)",
-			MaxLevCap: 10.0,
+			Desc:      "Beta-neutral Z-score mean-reversion on BTC/ETH, SOL/AVAX, UNI/AAVE, NEAR/SUI, ARB/WLD, ENA/HYPE at real $60 clips (-40bp SL).",
+			VenueDesc: "BN_USDC 0% Pairs ($60 Clips)",
+			MaxLevCap: 5.0,
 		},
 		{
 			ID:        "S9_LT_TAKER_SPIKE_GRAB",
 			Name:      "Instant Taker-Grab (>=11bp Cross-Spread) + 0% Maker Exit",
-			Desc:      "Tests instant dual-Taker spike capture: fires 0% Lighter IOC (305ms speed-bump) + 4ms BN_USDC / 8ms Aster Taker hedge when crossed spread >=11bp above EMA, exiting via 0% Maker.",
-			VenueDesc: "LT_STD 0% IOC (305ms) + BN/ASTER",
-			MaxLevCap: 5.5,
+			Desc:      "Instant dual-Taker spike capture: fires 0% Lighter IOC (305ms+RTT) + Binance/Aster L2 Taker hedge when crossed spread >=11bp above EMA at real $50 clips, exiting via 0% Maker.",
+			VenueDesc: "LT_STD 0% IOC + BN/ASTER ($50)",
+			MaxLevCap: 5.0,
+		},
+		{
+			ID:        "S10_BN_ASTER_MAKER_FIRST",
+			Name:      "Flipped Maker: 0% BN/Aster Maker -> 0% LT IOC (0bp Fee!)",
+			Desc:      "Eliminates Lighter 8bp stale-quote pickoff: rests 0% GTX Maker on fast Binance USDC-M / Aster first -> hedges via 0% Lighter IOC -> exits via 0% Maker (0.00bp entry fee!).",
+			VenueDesc: "BN/ASTER 0% M -> LT_STD 0% IOC ($50)",
+			MaxLevCap: 5.0,
 		},
 	}
 
@@ -493,6 +503,7 @@ func initStrategies() {
 		s.Equity = StartBudgetUSD
 		s.PeakEquity = StartBudgetUSD
 		s.Positions = map[string]*Position{}
+		s.PendingPairPnl = map[string]float64{}
 		strats[s.ID] = s
 		stratOrder = append(stratOrder, s.ID)
 	}
@@ -756,10 +767,20 @@ func placeTakerLocked(stratID, venue, sym, side string, qty, signalPx, maxSlipBp
 	return id
 }
 
+func symBase(sym string) string {
+	s := strings.TrimSuffix(sym, "USDC")
+	s = strings.TrimSuffix(s, "USDT")
+	s = strings.TrimSuffix(s, "USD1")
+	return s
+}
+
 func applyFillLocked(stratID, venue, sym, side, execType string, fillPx, sigPx, qty, feeBp, qInit float64, latMs int64, reduceOnly bool, tag string, nowMs int64) {
 	s := strats[stratID]
 	if s == nil || qty <= 1e-9 || fillPx <= 0 {
 		return
+	}
+	if s.PendingPairPnl == nil {
+		s.PendingPairPnl = map[string]float64{}
 	}
 	pk := posKey(venue, sym)
 	p := s.Positions[pk]
@@ -783,23 +804,29 @@ func applyFillLocked(stratID, venue, sym, side, execType string, fillPx, sigPx, 
 	feeUsd := notional * (feeBp / 10000.0) // negative feeBp = rebate!
 
 	realizedDelta := 0.0
-	closedTrip := false
+	closedLeg := false
+	deferredEntryFee := 0.0
+	releasedEntryFee := 0.0
 	if p == nil {
 		p = &Position{
 			Venue:     venue,
 			Symbol:    sym,
 			Qty:       signedQty,
 			AvgPx:     fillPx,
+			EntryFee:  feeUsd,
 			OpenedMs:  nowMs,
 			UpdatedMs: nowMs,
 			Tag:       tag,
 		}
 		s.Positions[pk] = p
+		deferredEntryFee = feeUsd
 	} else if (p.Qty > 0 && signedQty > 0) || (p.Qty < 0 && signedQty < 0) {
 		newAbs := math.Abs(p.Qty) + qty
 		p.AvgPx = (math.Abs(p.Qty)*p.AvgPx + qty*fillPx) / newAbs
 		p.Qty += signedQty
+		p.EntryFee += feeUsd
 		p.UpdatedMs = nowMs
+		deferredEntryFee = feeUsd
 	} else {
 		closeQty := math.Min(math.Abs(p.Qty), qty)
 		if p.Qty > 0 {
@@ -809,23 +836,30 @@ func applyFillLocked(stratID, venue, sym, side, execType string, fillPx, sigPx, 
 		}
 		remSigned := p.Qty + signedQty
 		if math.Abs(remSigned) <= 1e-8 {
+			releasedEntryFee = p.EntryFee
 			delete(s.Positions, pk)
-			closedTrip = true
+			closedLeg = true
 		} else if (p.Qty > 0 && remSigned > 0) || (p.Qty < 0 && remSigned < 0) {
+			frac := closeQty / math.Max(math.Abs(p.Qty), 1e-9)
+			releasedEntryFee = p.EntryFee * frac
+			p.EntryFee -= releasedEntryFee
 			p.Qty = remSigned
 			p.UpdatedMs = nowMs
 		} else {
+			releasedEntryFee = p.EntryFee
 			p.Qty = remSigned
 			p.AvgPx = fillPx
+			p.EntryFee = 0
 			p.OpenedMs = nowMs
 			p.UpdatedMs = nowMs
 			p.Tag = tag
-			closedTrip = true
+			closedLeg = true
 		}
 	}
 
+	bookedFee := (feeUsd - deferredEntryFee) + releasedEntryFee
 	s.RealizedGross += realizedDelta
-	s.FeesPaid += feeUsd
+	s.FeesPaid += bookedFee
 	s.Cash = s.StartCash + s.RealizedGross - s.FeesPaid + s.FundingUsd
 	s.GrossVolumeUsd += notional
 	if strings.HasPrefix(execType, "MAKER") || strings.HasPrefix(execType, "PICKOFF") {
@@ -836,10 +870,32 @@ func applyFillLocked(stratID, venue, sym, side, execType string, fillPx, sigPx, 
 	} else {
 		s.TakerFills++
 	}
-	if closedTrip {
-		s.RoundTrips++
-		if realizedDelta-feeUsd > 0 {
-			s.WinTrips++
+
+	// Count 1 RoundTrip & WinTrip ONLY when BOTH hedged legs of the base symbol (or stat-arb pair) are 100% flat!
+	if closedLeg {
+		groupKey := symBase(sym)
+		if stratID == "S8_BN_USDC_PAIR_STATARB" {
+			groupKey = "PAIR"
+		}
+		legNet := realizedDelta - bookedFee
+		stillOpen := false
+		for _, op := range s.Positions {
+			if math.Abs(op.Qty) > 1e-8 {
+				if stratID == "S8_BN_USDC_PAIR_STATARB" || symBase(op.Symbol) == groupKey {
+					stillOpen = true
+					break
+				}
+			}
+		}
+		if stillOpen {
+			s.PendingPairPnl[groupKey] += legNet
+		} else {
+			combTripNet := s.PendingPairPnl[groupKey] + legNet
+			delete(s.PendingPairPnl, groupKey)
+			s.RoundTrips++
+			if combTripNet > 0 {
+				s.WinTrips++
+			}
 		}
 	}
 
@@ -1012,10 +1068,25 @@ func processDueTakersLocked(nowMs int64) {
 		}
 	}
 
-	// Expire completed cancels
+	// Expire completed cancels & reject GTX/PostOnly Maker orders if book crossed while in wire transit!
 	for id, mo := range makerOrders {
 		if mo.CancelReqMs > 0 && nowMs >= mo.CancelEffMs {
 			delete(makerOrders, id)
+			continue
+		}
+		if !mo.Activated && nowMs >= mo.ReadyMs {
+			b := books[bookKey(venueBookPrefix(mo.Venue), mo.Symbol)]
+			if b != nil && b.Bid > 0 && b.Ask > 0 {
+				if (mo.Side == "BUY" && mo.LimitPx >= b.Ask-1e-12) || (mo.Side == "SELL" && mo.LimitPx <= b.Bid+1e-12) {
+					// Real GTX / PostOnly rejection at matching engine arrival!
+					if st := strats[mo.StratID]; st != nil {
+						st.MakerCancelled++
+					}
+					delete(makerOrders, id)
+					continue
+				}
+			}
+			mo.Activated = true
 		}
 	}
 }
@@ -1268,7 +1339,7 @@ func runCrossVenuePairArbLocked(cfg PairArbCfg, commonQtyDec int, minBase float6
 	}
 
 	qty := roundTo(cfg.SlotUsd/mMid, commonQtyDec)
-	if qty < minBase || qty*mMid < 20.0 {
+	if qty < minBase || qty*mMid < 10.5 {
 		return
 	}
 	shortDislocBp := (((bM.Ask - hAskUsd) / hAskUsd) * 10000.0) - eqBasisBp
@@ -1307,7 +1378,7 @@ func runCrossVenuePairArbLocked(cfg PairArbCfg, commonQtyDec int, minBase float6
 
 func evalStrategiesLocked(nowMs int64) {
 	// ------------------------------------------------------------------------
-	// S1: Clean LT Prem Maker + 0% BN USDC-M Maker Exit (Bug-Fixed v1/v3!)
+	// S1: Clean LT Prem Maker + 0% BN USDC-M Maker Exit (Reference Prem Benchmark)
 	// ------------------------------------------------------------------------
 	s1Syms := []string{"UNI", "HYPE", "ENA", "NEAR", "WLD", "AAVE", "SUI", "ARB", "AVAX", "PENGU", "TRUMP", "TIA", "WLFI", "KAITO", "CRV", "ETHFI", "LINK", "DOGE", "XRP"}
 	for _, sym := range s1Syms {
@@ -1325,9 +1396,9 @@ func evalStrategiesLocked(nowMs int64) {
 			MakerSym:      sym,
 			HedgeVenue:    VenueBnUsdc,
 			HedgeSym:      sp.BnUsdcSym,
-			SlotUsd:       650.0,
+			SlotUsd:       50.0,
 			EntryDislocBp: 6.2,
-			NetTargetBp:   2.2,
+			NetTargetBp:   2.5,
 			MaxHoldMs:     900000,
 			CancelTolBp:   1.0,
 			MaxAgeMs:      20000,
@@ -1335,7 +1406,7 @@ func evalStrategiesLocked(nowMs int64) {
 	}
 
 	// ------------------------------------------------------------------------
-	// S2: 0%-Fee Lighter Standard (#770015) + 0%-Fee BN USDC-M Arb (4bp Total RT Fee!)
+	// S2: 0%-Fee Lighter Standard (#770015) + 0%-Fee BN USDC-M Arb ($50 Real Clips)
 	// ------------------------------------------------------------------------
 	for _, sym := range s1Syms {
 		sp := ltSpecs[sym]
@@ -1352,9 +1423,9 @@ func evalStrategiesLocked(nowMs int64) {
 			MakerSym:      sym,
 			HedgeVenue:    VenueBnUsdc,
 			HedgeSym:      sp.BnUsdcSym,
-			SlotUsd:       650.0,
-			EntryDislocBp: 4.8,
-			NetTargetBp:   2.2,
+			SlotUsd:       50.0,
+			EntryDislocBp: 5.5,
+			NetTargetBp:   2.5,
 			MaxHoldMs:     900000,
 			CancelTolBp:   2.5,
 			MaxAgeMs:      45000,
@@ -1362,7 +1433,7 @@ func evalStrategiesLocked(nowMs int64) {
 	}
 
 	// ------------------------------------------------------------------------
-	// S3: Lighter (0% Std) <-> AsterDEX (0% Maker / 4bp Taker) Crypto Arb!
+	// S3: Lighter (0% Std) <-> AsterDEX (0% Maker / 4bp Taker) Crypto Arb ($45 Real Clips)
 	// ------------------------------------------------------------------------
 	s3Crypto := []string{"LIT", "VVV", "XMR", "HYPE", "ENA", "NEAR", "UNI", "AAVE", "AVAX", "SUI", "ARB", "WLD"}
 	for _, sym := range s3Crypto {
@@ -1381,9 +1452,9 @@ func evalStrategiesLocked(nowMs int64) {
 			MakerSym:      sym,
 			HedgeVenue:    VenueAsterC,
 			HedgeSym:      sym + "USDT",
-			SlotUsd:       580.0,
-			EntryDislocBp: 5.5,
-			NetTargetBp:   2.2,
+			SlotUsd:       45.0,
+			EntryDislocBp: 7.0,
+			NetTargetBp:   3.0,
 			MaxHoldMs:     900000,
 			CancelTolBp:   2.5,
 			MaxAgeMs:      45000,
@@ -1392,8 +1463,7 @@ func evalStrategiesLocked(nowMs int64) {
 	}
 
 	// ------------------------------------------------------------------------
-	// S4: 20x Tokenized Equity Arb (Aster 1.25bp RWA <-> Lighter Prem 0.30bp M)
-	// Total 4-leg fee = 0.30 + 1.25 + 0.00 + 2.00 = ONLY 3.55bp at 12x hedged!
+	// S4: Tokenized Equity Arb (0% Lighter #770015 <-> Aster 1.25bp RWA = ONLY 1.25bp 4-leg fee!)
 	// ------------------------------------------------------------------------
 	s4Rwa := []string{"NVDA", "AAPL", "TSLA", "QQQ", "SPY", "AMZN", "META", "COIN", "MSTR", "GOOGL", "AMD", "INTC"}
 	for _, sym := range s4Rwa {
@@ -1408,23 +1478,22 @@ func evalStrategiesLocked(nowMs int64) {
 		}
 		runCrossVenuePairArbLocked(PairArbCfg{
 			StratID:       "S4_ASTER_LT_BN_RWA_15X",
-			MakerVenue:    VenueLtPrem,
+			MakerVenue:    VenueLtStd,
 			MakerSym:      sym,
 			HedgeVenue:    VenueAsterRWA,
 			HedgeSym:      sym + "USDT",
-			SlotUsd:       1100.0,
-			EntryDislocBp: 5.0,
-			NetTargetBp:   2.0,
+			SlotUsd:       50.0,
+			EntryDislocBp: 6.0,
+			NetTargetBp:   2.5,
 			MaxHoldMs:     900000,
-			CancelTolBp:   1.2,
-			MaxAgeMs:      25000,
+			CancelTolBp:   1.5,
+			MaxAgeMs:      30000,
 			FxAdjHedge:    true,
 		}, dec, sp.MinBase, nowMs)
 	}
 
 	// ------------------------------------------------------------------------
-	// S5: Margin-Strict Real-$489.12 Portfolio (LT Std + BN_USDC / ASTER_C)
-	// Hard-capped <= $1,750 per side (max 2-3 pairs) matching #770015 margins!
+	// S5: Margin-Strict Real-$223 Portfolio (LT Std + BN_USDC / ASTER_C, $45 Clips)
 	// ------------------------------------------------------------------------
 	for _, sym := range s1Syms {
 		sp := ltSpecs[sym]
@@ -1441,9 +1510,9 @@ func evalStrategiesLocked(nowMs int64) {
 			MakerSym:      sym,
 			HedgeVenue:    VenueBnUsdc,
 			HedgeSym:      sp.BnUsdcSym,
-			SlotUsd:       550.0,
-			EntryDislocBp: 5.5,
-			NetTargetBp:   2.3,
+			SlotUsd:       45.0,
+			EntryDislocBp: 6.5,
+			NetTargetBp:   2.6,
 			MaxHoldMs:     900000,
 			CancelTolBp:   2.5,
 			MaxAgeMs:      45000,
@@ -1465,9 +1534,9 @@ func evalStrategiesLocked(nowMs int64) {
 			MakerSym:      sym,
 			HedgeVenue:    VenueAsterC,
 			HedgeSym:      sym + "USDT",
-			SlotUsd:       520.0,
-			EntryDislocBp: 6.2,
-			NetTargetBp:   2.4,
+			SlotUsd:       45.0,
+			EntryDislocBp: 7.5,
+			NetTargetBp:   3.0,
 			MaxHoldMs:     900000,
 			CancelTolBp:   2.5,
 			MaxAgeMs:      45000,
@@ -1476,8 +1545,7 @@ func evalStrategiesLocked(nowMs int64) {
 	}
 
 	// ------------------------------------------------------------------------
-	// S6: Positive-Carry Basis Scalp (ONLY enters positive hourly funding side!)
-	// VVV (+2.36bp/h), MSTR (+1.51bp/h), CRCL (+1.27bp/h), XMR (+1.14bp/h), COIN (+0.86bp/h)
+	// S6: Positive-Carry Basis Scalp ($50 Real Clips)
 	// ------------------------------------------------------------------------
 	s6Carry := []string{"VVV", "XMR", "MSTR", "CRCL", "COIN", "LIT"}
 	for _, sym := range s6Carry {
@@ -1508,19 +1576,19 @@ func evalStrategiesLocked(nowMs int64) {
 			MakerSym:      sym,
 			HedgeVenue:    hv,
 			HedgeSym:      hs,
-			SlotUsd:       700.0,
-			EntryDislocBp: 4.0, // Positive carry means time is our friend — hold calmly!
+			SlotUsd:       50.0,
+			EntryDislocBp: 4.5,
 			NetTargetBp:   2.5,
 			MaxHoldMs:     3600000,
 			CancelTolBp:   2.5,
 			MaxAgeMs:      45000,
-			CarryBias:     -1, // ONLY Short Lighter / Long Aster
+			CarryBias:     -1,
 			FxAdjHedge:    true,
 		}, dec, sp.MinBase, nowMs)
 	}
 
 	// ------------------------------------------------------------------------
-	// S7: High-Conviction >=7.0bp Lighter Std <-> BN USDC-M Arb ($780 clips)
+	// S7: High-Conviction >=7.5bp Lighter Std <-> BN USDC-M Arb ($55 Real Clips)
 	// ------------------------------------------------------------------------
 	for _, sym := range s1Syms {
 		sp := ltSpecs[sym]
@@ -1537,9 +1605,9 @@ func evalStrategiesLocked(nowMs int64) {
 			MakerSym:      sym,
 			HedgeVenue:    VenueBnUsdc,
 			HedgeSym:      sp.BnUsdcSym,
-			SlotUsd:       780.0,
-			EntryDislocBp: 7.0,
-			NetTargetBp:   2.5,
+			SlotUsd:       55.0,
+			EntryDislocBp: 7.5,
+			NetTargetBp:   3.0,
 			MaxHoldMs:     900000,
 			CancelTolBp:   2.5,
 			MaxAgeMs:      45000,
@@ -1650,8 +1718,8 @@ func evalStrategiesLocked(nowMs int64) {
 		if nowMs < stratCoolMap["S8:"+pk] {
 			continue
 		}
-		qtyA := roundTo(900.0/midA, bsA.QtyDec)
-		if qtyA*midA < 25.0 {
+		qtyA := roundTo(60.0/midA, bsA.QtyDec)
+		if qtyA*midA < 12.0 {
 			continue
 		}
 		entryTag := "E|" + VenueBnUsdc + "|" + sB + "|DM"
@@ -1665,8 +1733,7 @@ func evalStrategiesLocked(nowMs int64) {
 	}
 
 	// ------------------------------------------------------------------------
-	// S9: Instant Taker-Grab (>=11bp Cross-Spread Spike) + 0% Maker Exit
-	// Tests whether 0%-fee Lighter IOC (305ms speed-bump) + 4ms/8ms Hedge beats Maker!
+	// S9: Instant Taker-Grab (>=11bp Cross-Spread Spike) + 0% Maker Exit ($50 Real Clips)
 	// ------------------------------------------------------------------------
 	for _, sym := range s1Syms {
 		sp := ltSpecs[sym]
@@ -1683,9 +1750,9 @@ func evalStrategiesLocked(nowMs int64) {
 			MakerSym:       sym,
 			HedgeVenue:     VenueBnUsdc,
 			HedgeSym:       sp.BnUsdcSym,
-			SlotUsd:        550.0,
+			SlotUsd:        50.0,
 			TakerGrabMinBp: 11.0,
-			NetTargetBp:    2.2,
+			NetTargetBp:    2.5,
 			MaxHoldMs:      900000,
 		}, dec, sp.MinBase, nowMs)
 	}
@@ -1705,11 +1772,63 @@ func evalStrategiesLocked(nowMs int64) {
 			MakerSym:       sym,
 			HedgeVenue:     VenueAsterC,
 			HedgeSym:       sym + "USDT",
-			SlotUsd:        550.0,
+			SlotUsd:        50.0,
 			TakerGrabMinBp: 11.0,
-			NetTargetBp:    2.2,
+			NetTargetBp:    2.5,
 			MaxHoldMs:      900000,
 			FxAdjHedge:     true,
+		}, dec, sp.MinBase, nowMs)
+	}
+
+	// ------------------------------------------------------------------------
+	// S10: Flipped Maker-First! 0% BN USDC-M / Aster Maker -> 0% Lighter IOC Hedge
+	// Zero entry fee (0bp + 0bp = 0.00bp!) and zero Lighter stale-quote pickoff!
+	// ------------------------------------------------------------------------
+	for _, sym := range s1Syms {
+		sp := ltSpecs[sym]
+		if sp == nil || sp.BnUsdcSym == "" {
+			continue
+		}
+		dec := sp.SizeDecimals
+		if sp.BnQtyDec < dec {
+			dec = sp.BnQtyDec
+		}
+		runCrossVenuePairArbLocked(PairArbCfg{
+			StratID:       "S10_BN_ASTER_MAKER_FIRST",
+			MakerVenue:    VenueBnUsdc,
+			MakerSym:      sp.BnUsdcSym,
+			HedgeVenue:    VenueLtStd,
+			HedgeSym:      sym,
+			SlotUsd:       50.0,
+			EntryDislocBp: 6.5,
+			NetTargetBp:   2.5,
+			MaxHoldMs:     900000,
+			CancelTolBp:   1.5,
+			MaxAgeMs:      20000,
+		}, dec, sp.MinBase, nowMs)
+	}
+	for _, sym := range []string{"VVV", "XMR", "LIT"} {
+		sp := ltSpecs[sym]
+		as := asterSpecs[sym+"USDT"]
+		if sp == nil || as == nil {
+			continue
+		}
+		dec := sp.SizeDecimals
+		if as.QtyDec < dec {
+			dec = as.QtyDec
+		}
+		runCrossVenuePairArbLocked(PairArbCfg{
+			StratID:       "S10_BN_ASTER_MAKER_FIRST",
+			MakerVenue:    VenueAsterC,
+			MakerSym:      sym + "USDT",
+			HedgeVenue:    VenueLtStd,
+			HedgeSym:      sym,
+			SlotUsd:       45.0,
+			EntryDislocBp: 7.5,
+			NetTargetBp:   2.8,
+			MaxHoldMs:     900000,
+			CancelTolBp:   1.8,
+			MaxAgeMs:      25000,
 		}, dec, sp.MinBase, nowMs)
 	}
 }
@@ -1773,9 +1892,9 @@ func updateMarkToMarketAndWriteTelemetry() {
 				}
 			}
 			if p.Qty > 0 {
-				upnl += math.Abs(p.Qty) * (mark - p.AvgPx)
+				upnl += math.Abs(p.Qty)*(mark-p.AvgPx) - p.EntryFee
 			} else {
-				upnl += math.Abs(p.Qty) * (p.AvgPx - mark)
+				upnl += math.Abs(p.Qty)*(p.AvgPx-mark) - p.EntryFee
 			}
 			snaps = append(snaps, *p)
 		}
@@ -1841,12 +1960,20 @@ func updateMarkToMarketAndWriteTelemetry() {
 		s.Rolling2hHourly = calcRoll(2*3600*1000, 0.50)
 		s.Rolling4hHourly = calcRoll(4*3600*1000, 0.50)
 		s.Rolling24hHourly = calcRoll(24*3600*1000, 0.50)
+		if s.RoundTrips == 0 {
+			s.RealizedHourly = 0
+			s.Rolling15mHourly = 0
+			s.Rolling45mHourly = 0
+			s.Rolling2hHourly = 0
+			s.Rolling4hHourly = 0
+			s.Rolling24hHourly = 0
+		}
 
-		s.StatusNote = fmt.Sprintf("Net $%+.2f ($%+.2f/hr) | Fills:%dM/%dT (Pickoff:%d) | Pos:%d | Resting:%d",
-			netGain, s.HourlyRunRate, s.MakerFills, s.TakerFills, s.PickoffFills, len(snaps), s.ActiveMakers)
+		s.StatusNote = fmt.Sprintf("Closed $%+.3f (%d/%d wins) | OpenBasis $%+.3f | Fills:%dM/%dT (%dP)",
+			realGain, s.WinTrips, s.RoundTrips, upnl, s.MakerFills, s.TakerFills, s.PickoffFills)
 
-		if s.HourlyRunRate > bestHr {
-			bestHr = s.HourlyRunRate
+		if s.Rolling45mHourly > bestHr || (bestID == "" && s.RealizedHourly > bestHr) {
+			bestHr = s.Rolling45mHourly
 			bestID = id
 		}
 		outStrats = append(outStrats, s)
@@ -1955,8 +2082,8 @@ func loadCheckpoint() {
 		return
 	}
 	var tel ArenaTelemetry
-	// Clean epoch cutover to ARENA-v5.x L2 Real-Physics (scratches optimistic v4.x top-of-book history!):
-	if json.Unmarshal(raw, &tel) != nil || !strings.HasPrefix(tel.Version, "ARENA-v5.") || tel.BootTsMs <= 0 {
+	// Clean zero-history cutover to ARENA-v5.1-CLEAN-REALISM (resets timer to 0m 00s & $223.04 real capital!):
+	if json.Unmarshal(raw, &tel) != nil || !strings.HasPrefix(tel.Version, "ARENA-v5.1") || tel.BootTsMs <= 0 {
 		return
 	}
 	mu.Lock()
