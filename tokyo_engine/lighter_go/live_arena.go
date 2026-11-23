@@ -1484,7 +1484,7 @@ func evaluateForwardWinnerAndTiers() {
 		if s.StratBootMs > 0 {
 			ageM = float64(refNow-s.StratBootMs) / 60000.0
 		}
-		if ageM >= 45.0 && hr >= 2.0 && s.ProfitFactor >= 1.40 && s.RoundTrips >= 5 && s.MaxDrawdownUsd < 6.0 && hr > bestHr {
+		if ageM >= 45.0 && hr >= 2.0 && s.ProfitFactor >= 1.40 && s.RoundTrips >= 5 && s.MaxDrawdownUsd < 40.0 && hr > bestHr {
 			bestID, bestHr, bestPF, bestDD, bestTrips, bestAgeMin = s.ID, hr, s.ProfitFactor, s.MaxDrawdownUsd, s.RoundTrips, ageM
 		}
 	}
@@ -1552,7 +1552,7 @@ func evaluateForwardWinnerAndTiers() {
 	netGain := liveAcct.Equity - liveAcct.StartCash
 	switch liveAcct.Tier {
 	case 0:
-		if bestID != "" && bestAgeMin >= 45.0 && bestDD < 6.0 {
+		if bestID != "" && bestAgeMin >= 45.0 && bestDD < 40.0 && (liveAcct.HaltReason == "" || dwellMin >= 15.0) {
 			activePreset = bnPresets[bestID]
 			liveAcct.ForwardStratID = bestID
 			liveAcct.RotatedNote = activePreset.Label
