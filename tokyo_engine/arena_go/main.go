@@ -3024,7 +3024,7 @@ func runBinanceDepth20WS() {
 		if end > len(streams) {
 			end = len(streams)
 		}
-		go runDepth20Shard("wss://fstream.binance.com/market/stream?streams=", false, append([]string(nil), streams[i:end]...))
+		go runDepth20Shard("wss://fstream.binance.com/stream?streams=", false, append([]string(nil), streams[i:end]...))
 		time.Sleep(150 * time.Millisecond)
 	}
 }
@@ -3057,7 +3057,12 @@ func runAsterDepth20WS() {
 func runLiveVenueRttProber() {
 	measure := func(url string, dst *atomic.Int64) {
 		t0 := time.Now()
-		resp, err := httpCli.Get(url)
+		req, err := http.NewRequest("GET", url, nil)
+		if err != nil {
+			return
+		}
+		req.Header.Set("User-Agent", "Mozilla/5.0")
+		resp, err := httpCli.Do(req)
 		if err != nil {
 			return
 		}
@@ -3078,11 +3083,11 @@ func runLiveVenueRttProber() {
 	// Warm TCP+TLS pools first so we measure true warm keep-alive order RTT (not cold handshake!)
 	measure("https://fapi.binance.com/fapi/v1/ping", &liveBnRttMs)
 	measure("https://fapi.asterdex.com/fapi/v3/ping", &liveAsterRttMs)
-	measure("https://mainnet.zklighter.elliot.ai/api/v1/time", &liveLtRttMs)
+	measure("https://mainnet.zklighter.elliot.ai/", &liveLtRttMs)
 	for {
 		measure("https://fapi.binance.com/fapi/v1/ping", &liveBnRttMs)
 		measure("https://fapi.asterdex.com/fapi/v3/ping", &liveAsterRttMs)
-		measure("https://mainnet.zklighter.elliot.ai/api/v1/time", &liveLtRttMs)
+		measure("https://mainnet.zklighter.elliot.ai/", &liveLtRttMs)
 		mu.Lock()
 		if feedCounters["bnRttMs"] != nil {
 			feedCounters["bnRttMs"].Store(liveBnRttMs.Load())
