@@ -26,15 +26,22 @@ const (
 	TargetHourly   = 5.00
 	ArenaOutPath   = "/tmp/forward_arena.json"
 	ArenaStatePath = "/opt/crypto-arb-bot/forward_arena_state.json"
-	ArenaVer       = "ARENA-v4.4-MULTI-HORIZON"
+	ArenaVer       = "ARENA-v5.0-L2-REAL-PHYSICS"
 
 	VenueBnUsdc   = "BN_USDC"
 	VenueBnUsdt   = "BN_USDT"
 	VenueLtStd    = "LT_STD"
 	VenueLtPrem   = "LT_PREM"
-	VenueAsterC   = "ASTER_C"   // AsterDEX Crypto: 0% Maker, 4.0bp Taker, 6ms/10ms/8ms Tokyo
+	VenueAsterC   = "ASTER_C"   // AsterDEX Crypto: 0% Maker, 4.0bp Taker, live-measured Tokyo RTT + L2 depth20
 	VenueAsterRWA = "ASTER_RWA" // AsterDEX RWA Equities/Commodities: 0% Maker, 1.25bp Taker!
 	VenuePoly     = "POLY"
+)
+
+var (
+	liveBnRttMs    atomic.Int64 // Live measured Tokyo HTTP RTT to fapi.binance.com
+	liveAsterRttMs atomic.Int64 // Live measured Tokyo HTTP RTT to fapi.asterdex.com
+	liveLtRttMs    atomic.Int64 // Live measured Tokyo HTTP RTT to mainnet.zklighter.elliot.ai
+	liveLtPubLagMs atomic.Int64 // Live measured zkLighter WS trade timestamp -> EC2 arrival lag!
 )
 
 type VenuePhysics struct {
@@ -585,6 +592,68 @@ func queueAtLimitLocked(venue, sym, side string, limitPx float64) (float64, bool
 	return qUsd, true
 }
 
+func liveMeasuredLatMs(venue, op string) int64 {
+	bnRtt := liveBnRttMs.Load()
+	if bnRtt <= 0 {
+		bnRtt = 8
+	}
+	asRtt := liveAsterRttMs.Load()
+	if asRtt <= 0 {
+		asRtt = 14
+	}
+	ltRtt := liveLtRttMs.Load()
+	if ltRtt <= 0 {
+		ltRtt = 85
+	}
+	switch venue {
+	case VenueBnUsdc, VenueBnUsdt:
+		return bnRtt + 2 // real HMAC sign + Tokyo TCP dispatch
+	case VenueAsterC, VenueAsterRWA:
+		return asRtt + 4 // real EIP-712 keccak256 sign + Tokyo TCP dispatch
+	case VenueLtStd:
+		if op == "PLACE" {
+			return ltRtt // 0ms Maker speed-bump, only wire RTT to zkLighter sequencer
+		}
+		return 305 + ltRtt // 300ms Standard speed-bump + real wire RTT to zkLighter sequencer
+	case VenueLtPrem:
+		if op == "PLACE" || op == "CANCEL" {
+			return ltRtt // 0ms Prem Maker/Cancel speed-bump + real wire RTT
+		}
+		return 150 + ltRtt // 150ms Prem Taker speed-bump + real wire RTT
+	}
+	return venuePhys[venue].TakerLatMs
+}
+
+func liveFillNotificationLagMs(venue string) int64 {
+	switch venue {
+	case VenueLtStd, VenueLtPrem:
+		lag := liveLtPubLagMs.Load()
+		if lag <= 0 {
+			lag = liveLtRttMs.Load()
+		}
+		if lag < 25 {
+			lag = 25
+		}
+		if lag > 1500 {
+			lag = 1500
+		}
+		return lag
+	case VenueAsterC, VenueAsterRWA:
+		r := liveAsterRttMs.Load()
+		if r <= 0 {
+			return 8
+		}
+		return r / 2
+	case VenueBnUsdc, VenueBnUsdt:
+		r := liveBnRttMs.Load()
+		if r <= 0 {
+			return 4
+		}
+		return r / 2
+	}
+	return 5
+}
+
 func placeMakerLocked(stratID, venue, sym, side string, limitPx, qty float64, reduceOnly bool, tag string, nowMs int64) int64 {
 	s := strats[stratID]
 	if s == nil || qty <= 0 || limitPx <= 0 {
@@ -606,7 +675,6 @@ func placeMakerLocked(stratID, venue, sym, side string, limitPx, qty float64, re
 	if !canSpendTxLocked(s, venue, nowMs) {
 		return 0
 	}
-	vp := venuePhys[venue]
 	id := ordSeq.Add(1)
 	makerOrders[id] = &SimMakerOrder{
 		ID:                id,
@@ -621,7 +689,7 @@ func placeMakerLocked(stratID, venue, sym, side string, limitPx, qty float64, re
 		QueueAheadUsd:     qUsd,
 		InitQueueAheadUsd: qUsd,
 		PlacedMs:          nowMs,
-		ReadyMs:           nowMs + vp.PlaceLatMs,
+		ReadyMs:           nowMs + liveMeasuredLatMs(venue, "PLACE"),
 		ReduceOnly:        reduceOnly,
 	}
 	s.MakerPlaced++
@@ -641,9 +709,8 @@ func requestCancelMakerLocked(id int64, nowMs int64) {
 	if !canSpendTxLocked(s, o.Venue, nowMs) {
 		return
 	}
-	vp := venuePhys[o.Venue]
 	o.CancelReqMs = nowMs
-	o.CancelEffMs = nowMs + vp.CancelLatMs
+	o.CancelEffMs = nowMs + liveMeasuredLatMs(o.Venue, "CANCEL")
 	s.MakerCancelled++
 }
 
@@ -662,7 +729,15 @@ func placeTakerLocked(stratID, venue, sym, side string, qty, signalPx, maxSlipBp
 	if !isHedge && !canSpendTxLocked(s, venue, nowMs) {
 		return 0
 	}
-	vp := venuePhys[venue]
+	extraFillLag := int64(0)
+	if isHedge {
+		// Wait for real Maker-fill WS notification propagation before Taker hedge/close can even be signed!
+		if strings.HasPrefix(tag, "S") && strings.HasSuffix(tag, "_CLOSE") {
+			extraFillLag = liveFillNotificationLagMs(VenueBnUsdc)
+		} else {
+			extraFillLag = liveFillNotificationLagMs(VenueLtStd)
+		}
+	}
 	id := ordSeq.Add(1)
 	takerOrders[id] = &SimTakerOrder{
 		ID:         id,
@@ -674,7 +749,7 @@ func placeTakerLocked(stratID, venue, sym, side string, qty, signalPx, maxSlipBp
 		Qty:        qty,
 		SignalPx:   signalPx,
 		PlacedMs:   nowMs,
-		ExecAtMs:   nowMs + vp.TakerLatMs,
+		ExecAtMs:   nowMs + extraFillLag + liveMeasuredLatMs(venue, "TAKER"),
 		MaxSlipBp:  maxSlipBp,
 		ReduceOnly: reduceOnly,
 	}
@@ -908,7 +983,7 @@ func processDueTakersLocked(nowMs int64) {
 					rem -= take
 				}
 			} else if b.Ask <= maxPx {
-				take := math.Min(rem, math.Max(b.AskSz, to.Qty))
+				take := math.Min(rem, b.AskSz) // NEVER invent infinite size when L2 isn't loaded yet!
 				cost += take * b.Ask
 				filled += take
 			}
@@ -925,7 +1000,7 @@ func processDueTakersLocked(nowMs int64) {
 					rem -= take
 				}
 			} else if b.Bid >= minPx {
-				take := math.Min(rem, math.Max(b.BidSz, to.Qty))
+				take := math.Min(rem, b.BidSz)
 				cost += take * b.Bid
 				filled += take
 			}
@@ -1880,7 +1955,8 @@ func loadCheckpoint() {
 		return
 	}
 	var tel ArenaTelemetry
-	if json.Unmarshal(raw, &tel) != nil || !strings.HasPrefix(tel.Version, "ARENA-v4.") || tel.BootTsMs <= 0 {
+	// Clean epoch cutover to ARENA-v5.x L2 Real-Physics (scratches optimistic v4.x top-of-book history!):
+	if json.Unmarshal(raw, &tel) != nil || !strings.HasPrefix(tel.Version, "ARENA-v5.") || tel.BootTsMs <= 0 {
 		return
 	}
 	mu.Lock()
@@ -2320,6 +2396,19 @@ func runLighterWS() {
 					sym := ltIDToSym[tr.MarketID]
 					if sym == "" {
 						continue
+					}
+					trTs := tr.Timestamp
+					if trTs > 0 && trTs < 100000000000 {
+						trTs *= 1000
+					}
+					if trTs > 0 && nowMs >= trTs && nowMs-trTs < 5000 {
+						prev := liveLtPubLagMs.Load()
+						lag := nowMs - trTs
+						if prev <= 0 {
+							liveLtPubLagMs.Store(lag)
+						} else {
+							liveLtPubLagMs.Store((prev*7 + lag*3) / 10)
+						}
 					}
 					px, _ := strconv.ParseFloat(tr.Price, 64)
 					sz, _ := strconv.ParseFloat(tr.Size, 64)
@@ -2801,11 +2890,216 @@ func runAsterAggTradeWS() {
 	}
 }
 
+func applyDepthLevelsLocked(venueKey, sym string, rawBids, rawAsks [][]string, nowMs int64) {
+	bids := make([]BookLevel, 0, len(rawBids))
+	for _, row := range rawBids {
+		if len(row) < 2 {
+			continue
+		}
+		p, _ := strconv.ParseFloat(row[0], 64)
+		q, _ := strconv.ParseFloat(row[1], 64)
+		if p > 0 && q > 0 {
+			bids = append(bids, BookLevel{Price: p, Size: q})
+		}
+	}
+	asks := make([]BookLevel, 0, len(rawAsks))
+	for _, row := range rawAsks {
+		if len(row) < 2 {
+			continue
+		}
+		p, _ := strconv.ParseFloat(row[0], 64)
+		q, _ := strconv.ParseFloat(row[1], 64)
+		if p > 0 && q > 0 {
+			asks = append(asks, BookLevel{Price: p, Size: q})
+		}
+	}
+	if len(bids) == 0 || len(asks) == 0 || asks[0].Price <= bids[0].Price {
+		return
+	}
+	b := getBookLocked(venueKey, sym)
+	b.Bids = bids
+	b.Asks = asks
+	b.Bid = bids[0].Price
+	b.BidSz = bids[0].Size
+	b.Ask = asks[0].Price
+	b.AskSz = asks[0].Size
+	b.UpdatedMs = nowMs
+	recordMidLocked(bookKey(venueKey, sym), 0.5*(b.Bid+b.Ask), nowMs)
+}
+
+func runDepth20Shard(baseWs string, isAster bool, streams []string) {
+	url := baseWs + strings.Join(streams, "/")
+	for {
+		conn, _, err := websocket.DefaultDialer.Dial(url, nil)
+		if err != nil {
+			time.Sleep(time.Second)
+			continue
+		}
+		conn.SetPingHandler(func(appData string) error {
+			_ = conn.WriteControl(websocket.PongMessage, []byte(appData), time.Now().Add(5*time.Second))
+			return nil
+		})
+		for {
+			_ = conn.SetReadDeadline(time.Now().Add(30 * time.Second))
+			_, raw, err := conn.ReadMessage()
+			if err != nil {
+				break
+			}
+			var env struct {
+				Stream string `json:"stream"`
+				Data   struct {
+					Sym  string     `json:"s"`
+					Bids [][]string `json:"b"`
+					Asks [][]string `json:"a"`
+					BidsAlt [][]string `json:"bids"`
+					AsksAlt [][]string `json:"asks"`
+				} `json:"data"`
+			}
+			if json.Unmarshal(raw, &env) != nil {
+				continue
+			}
+			sym := env.Data.Sym
+			if sym == "" && strings.Contains(env.Stream, "@") {
+				sym = strings.ToUpper(strings.Split(env.Stream, "@")[0])
+			}
+			if sym == "" {
+				continue
+			}
+			bRows := env.Data.Bids
+			if len(bRows) == 0 {
+				bRows = env.Data.BidsAlt
+			}
+			aRows := env.Data.Asks
+			if len(aRows) == 0 {
+				aRows = env.Data.AsksAlt
+			}
+			if len(bRows) == 0 || len(aRows) == 0 {
+				continue
+			}
+			nowMs := time.Now().UnixMilli()
+			if isAster {
+				incFeed("asterL2")
+				mu.Lock()
+				applyDepthLevelsLocked("ASTER", sym, bRows, aRows, nowMs)
+				mu.Unlock()
+			} else {
+				venueKey := VenueBnUsdt
+				if strings.HasSuffix(sym, "USDC") {
+					venueKey = VenueBnUsdc
+				}
+				incFeed("bnL2")
+				mu.Lock()
+				applyDepthLevelsLocked(venueKey, sym, bRows, aRows, nowMs)
+				mu.Unlock()
+			}
+		}
+		_ = conn.Close()
+		time.Sleep(time.Second)
+	}
+}
+
+func runBinanceDepth20WS() {
+	mu.Lock()
+	streams := []string{}
+	seen := map[string]bool{}
+	for _, sp := range ltSpecs {
+		for _, bs := range []string{sp.BnUsdcSym, sp.BnUsdtSym} {
+			if bs != "" && !seen[bs] {
+				seen[bs] = true
+				streams = append(streams, strings.ToLower(bs)+"@depth20@100ms")
+			}
+		}
+	}
+	for _, bs := range bnUsdcSpecs {
+		for _, s := range []string{bs.UsdcSym, bs.UsdtSym} {
+			if s != "" && !seen[s] {
+				seen[s] = true
+				streams = append(streams, strings.ToLower(s)+"@depth20@100ms")
+			}
+		}
+	}
+	mu.Unlock()
+	for i := 0; i < len(streams); i += 18 {
+		end := i + 18
+		if end > len(streams) {
+			end = len(streams)
+		}
+		go runDepth20Shard("wss://fstream.binance.com/market/stream?streams=", false, append([]string(nil), streams[i:end]...))
+		time.Sleep(150 * time.Millisecond)
+	}
+}
+
+func runAsterDepth20WS() {
+	asterSyms := []string{
+		"LITUSDT", "VVVUSDT", "XMRUSDT", "HYPEUSDT", "ENAUSDT", "NEARUSDT", "UNIUSDT", "AAVEUSDT",
+		"AVAXUSDT", "SUIUSDT", "ARBUSDT", "WLDUSDT",
+		"NVDAUSDT", "AAPLUSDT", "TSLAUSDT", "QQQUSDT", "SPYUSDT", "AMZNUSDT", "METAUSDT",
+		"COINUSDT", "MSTRUSDT", "GOOGLUSDT", "AMDUSDT", "INTCUSDT", "XAUUSDT", "XAGUSDT",
+	}
+	streams := []string{}
+	mu.Lock()
+	for _, s := range asterSyms {
+		if asterSpecs[s] != nil {
+			streams = append(streams, strings.ToLower(s)+"@depth20@100ms")
+		}
+	}
+	mu.Unlock()
+	for i := 0; i < len(streams); i += 16 {
+		end := i + 16
+		if end > len(streams) {
+			end = len(streams)
+		}
+		go runDepth20Shard("wss://fstream.asterdex.com/stream?streams=", true, append([]string(nil), streams[i:end]...))
+		time.Sleep(150 * time.Millisecond)
+	}
+}
+
+func runLiveVenueRttProber() {
+	measure := func(url string, dst *atomic.Int64) {
+		t0 := time.Now()
+		resp, err := httpCli.Get(url)
+		if err != nil {
+			return
+		}
+		_, _ = io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode == 200 {
+			rtt := time.Since(t0).Milliseconds()
+			if rtt > 0 && rtt < 2500 {
+				prev := dst.Load()
+				if prev <= 0 {
+					dst.Store(rtt)
+				} else {
+					dst.Store((prev*7 + rtt*3) / 10)
+				}
+			}
+		}
+	}
+	// Warm TCP+TLS pools first so we measure true warm keep-alive order RTT (not cold handshake!)
+	measure("https://fapi.binance.com/fapi/v1/ping", &liveBnRttMs)
+	measure("https://fapi.asterdex.com/fapi/v3/ping", &liveAsterRttMs)
+	measure("https://mainnet.zklighter.elliot.ai/api/v1/time", &liveLtRttMs)
+	for {
+		measure("https://fapi.binance.com/fapi/v1/ping", &liveBnRttMs)
+		measure("https://fapi.asterdex.com/fapi/v3/ping", &liveAsterRttMs)
+		measure("https://mainnet.zklighter.elliot.ai/api/v1/time", &liveLtRttMs)
+		mu.Lock()
+		if feedCounters["bnRttMs"] != nil {
+			feedCounters["bnRttMs"].Store(liveBnRttMs.Load())
+			feedCounters["asterRttMs"].Store(liveAsterRttMs.Load())
+			feedCounters["ltRttMs"].Store(liveLtRttMs.Load())
+			feedCounters["ltPubLagMs"].Store(liveLtPubLagMs.Load())
+		}
+		mu.Unlock()
+		time.Sleep(4 * time.Second)
+	}
+}
+
 func main() {
 	debug.SetMemoryLimit(240 << 20) // Hard 240 MiB ceiling so Tokyo EC2 never OOM-kills arena_go
 	debug.SetGCPercent(40)
 
-	for _, k := range []string{"ltBook", "ltTrade", "bnBook", "bnTrade", "bnLiq", "hlMids", "asterBook", "asterTrade"} {
+	for _, k := range []string{"ltBook", "ltTrade", "bnBook", "bnL2", "bnTrade", "bnLiq", "hlMids", "asterBook", "asterL2", "asterTrade", "bnRttMs", "asterRttMs", "ltRttMs", "ltPubLagMs"} {
 		feedCounters[k] = &atomic.Int64{}
 	}
 	initStrategies()
@@ -2826,12 +3120,15 @@ func main() {
 		os.Exit(0)
 	}()
 
+	go runLiveVenueRttProber()
 	go runFundingPoller()
 	go runLighterWS()
 	go runBinanceBookAndLiqWS()
+	go runBinanceDepth20WS()
 	go runBinanceAggTradeWS()
 	go runHyperliquidWS()
 	go runAsterBookWS()
+	go runAsterDepth20WS()
 	go runAsterAggTradeWS()
 
 	fmt.Printf("[%s] Live realistic-fill simulation loop started (100%% read-only public feeds, $%.2f virtual budget/strat)\n", ArenaVer, StartBudgetUSD)
