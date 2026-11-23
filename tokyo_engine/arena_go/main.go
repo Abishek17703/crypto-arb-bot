@@ -253,23 +253,6 @@ type StrategyAccount struct {
 	StatusNote      string               `json:"statusNote"`
 }
 
-type PolyMarket struct {
-	Slug        string
-	Question    string
-	YesTokenID  string
-	NoTokenID   string
-	YesBid      float64
-	YesBidSz    float64
-	YesAsk      float64
-	YesAskSz    float64
-	NoBid       float64
-	NoBidSz     float64
-	NoAsk       float64
-	NoAskSz     float64
-	LastTradeMs int64
-	UpdatedMs   int64
-}
-
 type ArenaTelemetry struct {
 	Version        string             `json:"version"`
 	BootTsMs       int64              `json:"bootTsMs"`
@@ -313,13 +296,9 @@ var (
 	ltRawAsks     = map[string]map[string]float64{}
 	books         = map[string]*LiveBook{} // key: venue + ":" + symbol
 	midHist       = map[string][]PriceSample{}
-	hlMids        = map[string]float64{}
-	hlUpdatedMs   int64
 	ltFund1hBp    = map[string]float64{} // hourly funding rate in bps (+ means longs pay shorts)
 	bnFund1hBp    = map[string]float64{}
-	asterFund1hBp = map[string]float64{} // real AsterDEX 1h funding rate in bps from /fapi/v1/premiumIndex
 	liqRecent     = map[string]*ForceLiqEvent{}
-	polyMarkets   = map[string]*PolyMarket{}
 	makerOrders   = map[int64]*SimMakerOrder{}
 	takerOrders   = map[int64]*SimTakerOrder{}
 	strats        = map[string]*StrategyAccount{}
@@ -327,7 +306,6 @@ var (
 	recentFills   = []FillAudit{}
 	closedTrips   = []ClosedTripRecord{}
 	feedCounters  = map[string]*atomic.Int64{}
-	twinRatioEMA  = map[string]float64{}
 	dnBasisEMA    = map[string]float64{}
 	stratCoolMap  = map[string]int64{} // key: stratID+":"+sym -> coolUntilMs
 	httpCli       = &http.Client{
@@ -509,10 +487,17 @@ func l2TopDepthUsdLocked(venue, sym, side string) float64 {
 func initStrategies() {
 	defs := []*StrategyAccount{
 		{
-			ID:        "S1_ASTER_RWA_MAKER_FIRST",
-			Name:      "0% Aster RWA Maker -> 0% Lighter IOC (0.00bp 4-Leg Fee)",
-			Desc:      "0% GTX Maker on Aster RWA Equities (>=4.5bp positive raw spread) -> 0% Lighter #770015 IOC hedge -> 0% Aster Maker exit (3x $240 slots, <=3.0x cap).",
-			VenueDesc: "ASTER_RWA 0% M -> LT_STD 0% IOC",
+			ID:        "S10_BN_USDC_MAKER_FIRST",
+			Name:      "0% BN USDC-M Maker -> 0% Lighter IOC (#1 Leader, 0bp Fee)",
+			Desc:      "Rests 0% GTX Maker on liquid BN USDC-M (>=5.0bp positive raw spread) -> 0% Lighter #770015 IOC hedge -> 0% BN Maker exit (true 0.00bp 4-leg fee!).",
+			VenueDesc: "BN_USDC 0% M -> LT_STD 0% IOC",
+			MaxLevCap: 3.0,
+		},
+		{
+			ID:        "S9_PURE_CROSSED_TAKER",
+			Name:      "Pure Crossed-Book Taker Grab (Bid_A - Ask_B >= +8.5bp)",
+			Desc:      "Fires instant 0% Lighter IOC + <8ms BN USDC-M Taker ONLY when true raw crossed spread >= +8.5bp (>=+4.5bp net locked at entry! 3x $240 slots).",
+			VenueDesc: "LT_STD 0% IOC + BN_USDC (>=8.5bp)",
 			MaxLevCap: 3.0,
 		},
 		{
@@ -523,59 +508,10 @@ func initStrategies() {
 			MaxLevCap: 3.0,
 		},
 		{
-			ID:        "S3_LT_ASTER_DEPTH_STRICT",
-			Name:      "0% Lighter <-> Aster Crypto Depth-Strict (4.00bp Fee)",
-			Desc:      "Strict >=8.5bp positive raw spread + >=3.0x Aster L2 top-book depth + live USDT FX on liquid HYPE, LIT, VVV, XMR, ENA, NEAR, SUI (3x $230 slots).",
-			VenueDesc: "LT_STD 0% M + ASTER_C (>=3x Depth)",
-			MaxLevCap: 3.0,
-		},
-		{
-			ID:        "S4_LT_ASTER_RWA_MAKER",
-			Name:      "0% Lighter Maker -> Aster 1.25bp RWA Equities",
-			Desc:      "0% Lighter #770015 Maker (>=5.0bp positive raw spread) -> 1.25bp Aster RWA Taker -> 0% Aster Maker exit on NVDA, TSLA, AAPL, QQQ, SPY, MSTR, COIN, META.",
-			VenueDesc: "LT_STD 0% M + ASTER_RWA 1.25bp",
-			MaxLevCap: 3.0,
-		},
-		{
-			ID:        "S5_HYBRID_TOP3_PORTFOLIO",
-			Name:      "Hybrid Top-3 Low-Fee Portfolio (S10 + S1 + S6)",
-			Desc:      "Diversified 0–1.25bp portfolio combining BN Maker-First + Aster RWA Maker-First + Positive Carry strictly inside 3x $240 slots (2.94x gross).",
-			VenueDesc: "BN/RWA 0% M + Carry (<=3.0x)",
-			MaxLevCap: 3.0,
-		},
-		{
-			ID:        "S6_POSITIVE_CARRY_YIELD",
-			Name:      "Positive-Carry Yield + Raw Spread (VVV, NVDA, MSTR, XMR)",
-			Desc:      "Shorts overpriced Lighter + Longs cheaper Aster/BN ONLY when rawShortBp >= fee+1.5bp AND real 1h carry >= +0.20bp/h (3x $240 slots).",
-			VenueDesc: "Short LT + Long Peer (+Carry)",
-			MaxLevCap: 3.0,
-		},
-		{
 			ID:        "S7_BN_HIGH_CONV_RAW",
 			Name:      "High-Conviction >=8.5bp Raw Spread (LT <-> BN USDC-M)",
 			Desc:      "Pure USDC-to-USDC high-conviction >=8.5bp positive raw spread Lighter Maker <-> BN USDC-M with zero USDT FX drift (3x $240 slots).",
 			VenueDesc: "LT_STD <-> BN_USDC (>=8.5bp Raw)",
-			MaxLevCap: 3.0,
-		},
-		{
-			ID:        "S8_MAJOR_PAIRS_STATARB",
-			Name:      "Major Liquid Pairs Stat-Arb (BTC/ETH, SOL/AVAX, DOGE/XRP)",
-			Desc:      "Cleaned major-only cointegrated pairs on 60m Z-score (>=18bp entry, >=12.5bp gross / +4.5bp net exit after 8bp fee, -25bp stop; toxic alts removed).",
-			VenueDesc: "BN_USDC Majors Stat-Arb (8bp Fee)",
-			MaxLevCap: 3.0,
-		},
-		{
-			ID:        "S9_PURE_CROSSED_TAKER",
-			Name:      "Pure Crossed-Book Taker Grab (Bid_A - Ask_B >= +8.5bp)",
-			Desc:      "Fires instant 0% Lighter IOC + Peer Taker ONLY when true raw crossed spread >= +8.5bp (>=+4.5bp net locked at entry! 3x $240 slots).",
-			VenueDesc: "LT_STD 0% IOC + BN/ASTER (>=8.5bp)",
-			MaxLevCap: 3.0,
-		},
-		{
-			ID:        "S10_BN_USDC_MAKER_FIRST",
-			Name:      "0% BN USDC-M Maker -> 0% Lighter IOC (#1 Leader, 0bp Fee)",
-			Desc:      "Rests 0% GTX Maker on liquid BN USDC-M (>=5.0bp positive raw spread) -> 0% Lighter #770015 IOC hedge -> 0% BN Maker exit (true 0.00bp 4-leg fee!).",
-			VenueDesc: "BN_USDC 0% M -> LT_STD 0% IOC",
 			MaxLevCap: 3.0,
 		},
 	}
@@ -967,34 +903,12 @@ func applyFillLocked(stratID, venue, sym, side, execType string, fillPx, sigPx, 
 	// Count 1 RoundTrip, WinTrip & ProfitFactor ONLY when BOTH hedged legs of the base symbol (or stat-arb pair) are 100% flat!
 	if closedLeg {
 		groupKey := symBase(sym)
-		pairSyms := []string{}
-		if stratID == "S8_MAJOR_PAIRS_STATARB" {
-			switch groupKey {
-			case "BTC", "ETH":
-				groupKey = "BTC:ETH"
-				pairSyms = []string{"BTC", "ETH"}
-			case "SOL", "AVAX":
-				groupKey = "SOL:AVAX"
-				pairSyms = []string{"SOL", "AVAX"}
-			case "DOGE", "XRP":
-				groupKey = "DOGE:XRP"
-				pairSyms = []string{"DOGE", "XRP"}
-			case "LINK", "AAVE":
-				groupKey = "LINK:AAVE"
-				pairSyms = []string{"LINK", "AAVE"}
-			}
-		}
 		legNet := realizedDelta - bookedFee
 		stillOpen := false
 		for _, op := range s.Positions {
 			if math.Abs(op.Qty) > 1e-8 {
 				ob := symBase(op.Symbol)
-				if len(pairSyms) == 2 {
-					if ob == pairSyms[0] || ob == pairSyms[1] {
-						stillOpen = true
-						break
-					}
-				} else if ob == groupKey {
+				if ob == groupKey {
 					stillOpen = true
 					break
 				}
@@ -1676,48 +1590,8 @@ func runCrossVenuePairArbLocked(cfg PairArbCfg, commonQtyDec int, minBase float6
 }
 
 func evalStrategiesLocked(nowMs int64) {
-	// Liquid BN USDC-M universe (illiquid tail coins PENGU/KAITO/WLFI removed; >=2,500 daily trades enforced):
 	bnLiquidSyms := []string{"UNI", "HYPE", "ENA", "NEAR", "WLD", "AAVE", "SUI", "ARB", "AVAX", "TRUMP", "TIA", "CRV", "ETHFI", "LINK", "DOGE", "XRP"}
-	rwaSyms := []string{"NVDA", "AAPL", "TSLA", "QQQ", "SPY", "META", "COIN", "MSTR"}
 
-	// ------------------------------------------------------------------------
-	// S1: 0% Aster RWA Maker -> 0% Lighter #770015 IOC Hedge -> 0% Aster Maker Exit (0.00bp 4-leg fee!)
-	// ------------------------------------------------------------------------
-	for _, sym := range rwaSyms {
-		sp := ltSpecs[sym]
-		as := asterSpecs[sym+"USDT"]
-		if sp == nil || as == nil || (sp.DailyTrades > 0 && sp.DailyTrades < 1500) {
-			continue
-		}
-		dec := sp.SizeDecimals
-		if as.QtyDec < dec {
-			dec = as.QtyDec
-		}
-		runCrossVenuePairArbLocked(PairArbCfg{
-			StratID:         "S1_ASTER_RWA_MAKER_FIRST",
-			MakerVenue:      VenueAsterRWA,
-			MakerSym:        sym + "USDT",
-			HedgeVenue:      VenueLtStd,
-			HedgeSym:        sym,
-			SlotUsd:         240.0,
-			MaxOpenPairs:    3,
-			MinRawEdgeBp:    4.5,
-			EntryDislocBp:   4.5,
-			NetTargetBp:     2.5,
-			DecayAfterMs:    480000,
-			MaxHoldMs:       900000,
-			StopLossBp:      75.0,
-			MinPeerDepthMul: 2.5,
-			ExitOnMaker:     true,
-			CancelTolBp:     1.5,
-			MaxAgeMs:        20000,
-			FxAdjMaker:      true,
-		}, dec, sp.MinBase, nowMs)
-	}
-
-	// ------------------------------------------------------------------------
-	// S2: 0% Lighter Std Maker -> 4bp BN USDC-M Hedge -> 0% BN Maker Exit (Fast 6m Decay)
-	// ------------------------------------------------------------------------
 	for _, sym := range bnLiquidSyms {
 		sp := ltSpecs[sym]
 		if sp == nil || sp.BnUsdcSym == "" || (sp.DailyTrades > 0 && sp.DailyTrades < 2500) {
@@ -1727,432 +1601,8 @@ func evalStrategiesLocked(nowMs int64) {
 		if sp.BnQtyDec < dec {
 			dec = sp.BnQtyDec
 		}
-		runCrossVenuePairArbLocked(PairArbCfg{
-			StratID:         "S2_LT_BN_FAST_ROTATE",
-			MakerVenue:      VenueLtStd,
-			MakerSym:        sym,
-			HedgeVenue:      VenueBnUsdc,
-			HedgeSym:        sp.BnUsdcSym,
-			SlotUsd:         240.0,
-			MaxOpenPairs:    3,
-			MinRawEdgeBp:    2.5, // 4.0bp fee + 2.5bp = >= 6.5bp strict positive raw spread!
-			EntryDislocBp:   6.5,
-			NetTargetBp:     2.5,
-			DecayAfterMs:    360000,
-			MaxHoldMs:       900000,
-			StopLossBp:      75.0,
-			MinPeerDepthMul: 2.5,
-			CancelTolBp:     2.5,
-			MaxAgeMs:        30000,
-		}, dec, sp.MinBase, nowMs)
-	}
 
-	// ------------------------------------------------------------------------
-	// S3: 0% Lighter Maker <-> Aster Crypto Depth-Strict (>=8.5bp Raw + >=3.0x Depth + USDT FX)
-	// ------------------------------------------------------------------------
-	s3Crypto := []string{"HYPE", "LIT", "VVV", "XMR", "ENA", "NEAR", "SUI"}
-	for _, sym := range s3Crypto {
-		sp := ltSpecs[sym]
-		as := asterSpecs[sym+"USDT"]
-		if sp == nil || as == nil || (sp.DailyTrades > 0 && sp.DailyTrades < 2500) {
-			continue
-		}
-		dec := sp.SizeDecimals
-		if as.QtyDec < dec {
-			dec = as.QtyDec
-		}
-		runCrossVenuePairArbLocked(PairArbCfg{
-			StratID:         "S3_LT_ASTER_DEPTH_STRICT",
-			MakerVenue:      VenueLtStd,
-			MakerSym:        sym,
-			HedgeVenue:      VenueAsterC,
-			HedgeSym:        sym + "USDT",
-			SlotUsd:         230.0,
-			MaxOpenPairs:    3,
-			MinRawEdgeBp:    4.5, // 4.0bp fee + 4.5bp = >= 8.5bp strict positive raw spread!
-			EntryDislocBp:   8.5,
-			NetTargetBp:     3.5,
-			DecayAfterMs:    420000,
-			MaxHoldMs:       900000,
-			StopLossBp:      75.0,
-			MinPeerDepthMul: 3.0,
-			CancelTolBp:     2.5,
-			MaxAgeMs:        35000,
-			FxAdjHedge:      true,
-		}, dec, sp.MinBase, nowMs)
-	}
-
-	// ------------------------------------------------------------------------
-	// S4: 0% Lighter Maker -> Aster 1.25bp RWA Taker -> 0% Aster Maker Exit (1.25bp Fee!)
-	// ------------------------------------------------------------------------
-	for _, sym := range rwaSyms {
-		sp := ltSpecs[sym]
-		as := asterSpecs[sym+"USDT"]
-		if sp == nil || as == nil || (sp.DailyTrades > 0 && sp.DailyTrades < 1500) {
-			continue
-		}
-		dec := sp.SizeDecimals
-		if as.QtyDec < dec {
-			dec = as.QtyDec
-		}
-		runCrossVenuePairArbLocked(PairArbCfg{
-			StratID:         "S4_LT_ASTER_RWA_MAKER",
-			MakerVenue:      VenueLtStd,
-			MakerSym:        sym,
-			HedgeVenue:      VenueAsterRWA,
-			HedgeSym:        sym + "USDT",
-			SlotUsd:         240.0,
-			MaxOpenPairs:    3,
-			MinRawEdgeBp:    3.75, // 1.25bp fee + 3.75bp = >= 5.0bp strict positive raw spread!
-			EntryDislocBp:   5.0,
-			NetTargetBp:     2.5,
-			DecayAfterMs:    480000,
-			MaxHoldMs:       900000,
-			StopLossBp:      75.0,
-			MinPeerDepthMul: 2.5,
-			CancelTolBp:     2.5,
-			MaxAgeMs:        30000,
-			FxAdjHedge:      true,
-		}, dec, sp.MinBase, nowMs)
-	}
-
-	// ------------------------------------------------------------------------
-	// S5: Hybrid Top-3 Low-Fee Portfolio (S10 BN Maker-First + S1 RWA Maker-First + S6 Carry)
-	// ------------------------------------------------------------------------
-	for _, sym := range bnLiquidSyms {
-		sp := ltSpecs[sym]
-		if sp == nil || sp.BnUsdcSym == "" || (sp.DailyTrades > 0 && sp.DailyTrades < 2500) {
-			continue
-		}
-		dec := sp.SizeDecimals
-		if sp.BnQtyDec < dec {
-			dec = sp.BnQtyDec
-		}
-		runCrossVenuePairArbLocked(PairArbCfg{
-			StratID:         "S5_HYBRID_TOP3_PORTFOLIO",
-			MakerVenue:      VenueBnUsdc,
-			MakerSym:        sp.BnUsdcSym,
-			HedgeVenue:      VenueLtStd,
-			HedgeSym:        sym,
-			SlotUsd:         240.0,
-			MaxOpenPairs:    3,
-			MinRawEdgeBp:    5.2,
-			EntryDislocBp:   5.2,
-			NetTargetBp:     2.5,
-			DecayAfterMs:    480000,
-			MaxHoldMs:       900000,
-			StopLossBp:      75.0,
-			MinPeerDepthMul: 2.5,
-			ExitOnMaker:     true,
-			CancelTolBp:     1.5,
-			MaxAgeMs:        20000,
-		}, dec, sp.MinBase, nowMs)
-	}
-	for _, sym := range []string{"NVDA", "TSLA", "SPY", "QQQ", "MSTR"} {
-		sp := ltSpecs[sym]
-		as := asterSpecs[sym+"USDT"]
-		if sp == nil || as == nil {
-			continue
-		}
-		dec := sp.SizeDecimals
-		if as.QtyDec < dec {
-			dec = as.QtyDec
-		}
-		runCrossVenuePairArbLocked(PairArbCfg{
-			StratID:         "S5_HYBRID_TOP3_PORTFOLIO",
-			MakerVenue:      VenueAsterRWA,
-			MakerSym:        sym + "USDT",
-			HedgeVenue:      VenueLtStd,
-			HedgeSym:        sym,
-			SlotUsd:         240.0,
-			MaxOpenPairs:    3,
-			MinRawEdgeBp:    4.8,
-			EntryDislocBp:   4.8,
-			NetTargetBp:     2.5,
-			DecayAfterMs:    480000,
-			MaxHoldMs:       900000,
-			StopLossBp:      75.0,
-			MinPeerDepthMul: 2.5,
-			ExitOnMaker:     true,
-			CancelTolBp:     1.5,
-			MaxAgeMs:        20000,
-			FxAdjMaker:      true,
-		}, dec, sp.MinBase, nowMs)
-	}
-
-	// ------------------------------------------------------------------------
-	// S6: Positive-Carry Yield + Raw Spread (Short dearer LT + Long cheaper Peer w/ >= +0.20bp/h carry!)
-	// ------------------------------------------------------------------------
-	s6Carry := []string{"VVV", "NVDA", "MSTR", "SPY", "QQQ", "COIN", "XMR", "LIT"}
-	for _, sym := range s6Carry {
-		sp := ltSpecs[sym]
-		hs := sym + "USDT"
-		as := asterSpecs[hs]
-		if sp == nil || as == nil {
-			continue
-		}
-		hv := VenueAsterC
-		if sym == "NVDA" || sym == "MSTR" || sym == "SPY" || sym == "QQQ" || sym == "COIN" {
-			hv = VenueAsterRWA
-		}
-		dec := sp.SizeDecimals
-		if as.QtyDec < dec {
-			dec = as.QtyDec
-		}
-		peerFund := asterFund1hBp[hs]
-		if peerFund == 0 {
-			peerFund = bnFund1hBp[hs]
-		}
-		fundDiff := ltFund1hBp[sym] - peerFund
-		posM := strats["S6_POSITIVE_CARRY_YIELD"].Positions[posKey(VenueLtStd, sym)]
-		posH := strats["S6_POSITIVE_CARRY_YIELD"].Positions[posKey(hv, hs)]
-		if fundDiff < 0.20 && posM == nil && posH == nil {
-			cancelAllMakersForSymLocked("S6_POSITIVE_CARRY_YIELD", VenueLtStd, sym, nowMs)
-			continue
-		}
-		runCrossVenuePairArbLocked(PairArbCfg{
-			StratID:         "S6_POSITIVE_CARRY_YIELD",
-			MakerVenue:      VenueLtStd,
-			MakerSym:        sym,
-			HedgeVenue:      hv,
-			HedgeSym:        hs,
-			SlotUsd:         240.0,
-			MaxOpenPairs:    3,
-			MinRawEdgeBp:    1.5,
-			EntryDislocBp:   4.0,
-			NetTargetBp:     2.2,
-			DecayAfterMs:    900000,
-			MaxHoldMs:       3600000,
-			StopLossBp:      75.0,
-			MinPeerDepthMul: 2.5,
-			CancelTolBp:     2.5,
-			MaxAgeMs:        35000,
-			CarryBias:       -1,
-			FxAdjHedge:      true,
-		}, dec, sp.MinBase, nowMs)
-	}
-
-	// ------------------------------------------------------------------------
-	// S7: High-Conviction >=8.5bp Positive Raw Spread Lighter <-> BN USDC-M
-	// ------------------------------------------------------------------------
-	for _, sym := range bnLiquidSyms {
-		sp := ltSpecs[sym]
-		if sp == nil || sp.BnUsdcSym == "" || (sp.DailyTrades > 0 && sp.DailyTrades < 2500) {
-			continue
-		}
-		dec := sp.SizeDecimals
-		if sp.BnQtyDec < dec {
-			dec = sp.BnQtyDec
-		}
-		runCrossVenuePairArbLocked(PairArbCfg{
-			StratID:         "S7_BN_HIGH_CONV_RAW",
-			MakerVenue:      VenueLtStd,
-			MakerSym:        sym,
-			HedgeVenue:      VenueBnUsdc,
-			HedgeSym:        sp.BnUsdcSym,
-			SlotUsd:         240.0,
-			MaxOpenPairs:    3,
-			MinRawEdgeBp:    4.5, // 4.0bp fee + 4.5bp = >= 8.5bp strict positive raw spread!
-			EntryDislocBp:   8.5,
-			NetTargetBp:     3.5,
-			DecayAfterMs:    480000,
-			MaxHoldMs:       900000,
-			StopLossBp:      75.0,
-			MinPeerDepthMul: 2.5,
-			CancelTolBp:     2.5,
-			MaxAgeMs:        35000,
-		}, dec, sp.MinBase, nowMs)
-	}
-
-	// ------------------------------------------------------------------------
-	// S8: Major Liquid Pairs Stat-Arb (8.00bp 4-leg fee -> >=18bp Entry, >=12.5bp Gross Exit, -25bp SL)
-	// ------------------------------------------------------------------------
-	s8Pairs := [][2]string{
-		{"BTCUSDC", "ETHUSDC"},
-		{"SOLUSDC", "AVAXUSDC"},
-		{"DOGEUSDC", "XRPUSDC"},
-		{"LINKUSDC", "AAVEUSDC"},
-	}
-	s8Acct := strats["S8_MAJOR_PAIRS_STATARB"]
-	openS8Pairs := 0
-	for _, pr := range s8Pairs {
-		if s8Acct.Positions[posKey(VenueBnUsdc, pr[0])] != nil || s8Acct.Positions[posKey(VenueBnUsdc, pr[1])] != nil {
-			openS8Pairs++
-		}
-	}
-	for _, pr := range s8Pairs {
-		sA, sB := pr[0], pr[1]
-		bsA, bsB := bnUsdcSpecs[sA], bnUsdcSpecs[sB]
-		bA, bB := books[bookKey(VenueBnUsdc, sA)], books[bookKey(VenueBnUsdc, sB)]
-		if bsA == nil || bsB == nil || bA == nil || bB == nil || bA.Bid <= 0 || bB.Bid <= 0 {
-			continue
-		}
-		if nowMs-bA.UpdatedMs > 2000 || nowMs-bB.UpdatedMs > 2000 {
-			continue
-		}
-		midA := 0.5 * (bA.Bid + bA.Ask)
-		midB := 0.5 * (bB.Bid + bB.Ask)
-		ratio := midA / midB
-		pk := sA + "/" + sB
-		if twinRatioEMA[pk] <= 0 {
-			twinRatioEMA[pk] = ratio
-			continue
-		}
-		// Slow 60m EMA (alpha=0.0007 every 50ms) so Z-score measures genuine dislocation:
-		twinRatioEMA[pk] = twinRatioEMA[pk]*0.9993 + ratio*0.0007
-		devBp := ((ratio - twinRatioEMA[pk]) / twinRatioEMA[pk]) * 10000.0
-
-		posA := s8Acct.Positions[posKey(VenueBnUsdc, sA)]
-		posB := s8Acct.Positions[posKey(VenueBnUsdc, sB)]
-		pendA := hasPendingTakerLocked("S8_MAJOR_PAIRS_STATARB", VenueBnUsdc, sA)
-		pendB := hasPendingTakerLocked("S8_MAJOR_PAIRS_STATARB", VenueBnUsdc, sB)
-
-		if posA != nil && math.Abs(posA.Qty) > 1e-8 {
-			for _, mo := range makerOrders {
-				if mo.StratID == "S8_MAJOR_PAIRS_STATARB" && mo.Venue == VenueBnUsdc && mo.Symbol == sA && strings.HasPrefix(mo.Tag, "E|") && mo.CancelReqMs == 0 {
-					requestCancelMakerLocked(mo.ID, nowMs)
-				}
-			}
-			if pendA || pendB || posB == nil || math.Abs(posB.Qty) <= 1e-8 {
-				continue
-			}
-			legUsd := math.Abs(posA.Qty) * posA.AvgPx
-			pnlUsd := 0.0
-			if posA.Qty > 0 {
-				pnlUsd += math.Abs(posA.Qty) * (bA.Bid - posA.AvgPx)
-			} else {
-				pnlUsd += math.Abs(posA.Qty) * (posA.AvgPx - bA.Ask)
-			}
-			if posB.Qty > 0 {
-				pnlUsd += math.Abs(posB.Qty) * (bB.Bid - posB.AvgPx)
-			} else {
-				pnlUsd += math.Abs(posB.Qty) * (posB.AvgPx - bB.Ask)
-			}
-			pnlBp := (pnlUsd / math.Max(legUsd, 1.0)) * 10000.0
-			if pnlBp <= -45.0 {
-				cancelAllMakersForSymLocked("S8_MAJOR_PAIRS_STATARB", VenueBnUsdc, sA, nowMs)
-				cSideA, pxA := "SELL", bA.Bid
-				if posA.Qty < 0 {
-					cSideA, pxA = "BUY", bA.Ask
-				}
-				cSideB, pxB := "SELL", bB.Bid
-				if posB.Qty < 0 {
-					cSideB, pxB = "BUY", bB.Ask
-				}
-				placeTakerLocked("S8_MAJOR_PAIRS_STATARB", VenueBnUsdc, sA, cSideA, math.Abs(posA.Qty), pxA, 20.0, true, "S8_SL_A", nowMs)
-				placeTakerLocked("S8_MAJOR_PAIRS_STATARB", VenueBnUsdc, sB, cSideB, math.Abs(posB.Qty), pxB, 20.0, true, "S8_SL_B", nowMs)
-				stratCoolMap["S8:"+pk] = nowMs + 60000
-				continue
-			}
-			// 8.0bp 4-leg fee -> 12.5bp gross locks +4.5bp net; after 8m steps down to 9.0bp gross (+1.0bp net):
-			if pnlBp >= 12.5 || (nowMs-posA.OpenedMs > 480000 && pnlBp >= 9.0) {
-				exitTag := "X|" + VenueBnUsdc + "|" + sB + "|DM"
-				if posA.Qty > 0 {
-					cancelStaleOrRefreshMakerLocked("S8_MAJOR_PAIRS_STATARB", VenueBnUsdc, sA, "SELL", bA.Ask, math.Abs(posA.Qty), 1.5, true, exitTag, 15000, nowMs)
-				} else {
-					cancelStaleOrRefreshMakerLocked("S8_MAJOR_PAIRS_STATARB", VenueBnUsdc, sA, "BUY", bA.Bid, math.Abs(posA.Qty), 1.5, true, exitTag, 15000, nowMs)
-				}
-			} else {
-				cancelAllMakersForSymLocked("S8_MAJOR_PAIRS_STATARB", VenueBnUsdc, sA, nowMs)
-			}
-			continue
-		}
-
-		if posB != nil && math.Abs(posB.Qty) > 1e-8 && !pendA && !pendB && nowMs-posB.OpenedMs > 1200 {
-			side, px := "SELL", bB.Bid
-			if posB.Qty < 0 {
-				side, px = "BUY", bB.Ask
-			}
-			placeTakerLocked("S8_MAJOR_PAIRS_STATARB", VenueBnUsdc, sB, side, math.Abs(posB.Qty), px, 20.0, true, "S8_ORPHAN_CLOSE", nowMs)
-			continue
-		}
-
-		if openS8Pairs >= 3 || nowMs < stratCoolMap["S8:"+pk] {
-			cancelAllMakersForSymLocked("S8_MAJOR_PAIRS_STATARB", VenueBnUsdc, sA, nowMs)
-			continue
-		}
-		qtyA := roundTo(240.0/midA, bsA.QtyDec)
-		if qtyA*midA < 12.0 {
-			continue
-		}
-		entryTag := "E|" + VenueBnUsdc + "|" + sB + "|DM"
-		if devBp >= 18.0 {
-			cancelStaleOrRefreshMakerLocked("S8_MAJOR_PAIRS_STATARB", VenueBnUsdc, sA, "SELL", bA.Ask, qtyA, 1.5, false, entryTag, 20000, nowMs)
-		} else if devBp <= -18.0 {
-			cancelStaleOrRefreshMakerLocked("S8_MAJOR_PAIRS_STATARB", VenueBnUsdc, sA, "BUY", bA.Bid, qtyA, 1.5, false, entryTag, 20000, nowMs)
-		} else {
-			cancelAllMakersForSymLocked("S8_MAJOR_PAIRS_STATARB", VenueBnUsdc, sA, nowMs)
-		}
-	}
-
-	// ------------------------------------------------------------------------
-	// S9: Pure Crossed-Book Taker Grab (Bid_A - Ask_B >= +8.5bp -> >= +4.5bp Net Locked at Entry!)
-	// ------------------------------------------------------------------------
-	for _, sym := range bnLiquidSyms {
-		sp := ltSpecs[sym]
-		if sp == nil || sp.BnUsdcSym == "" || (sp.DailyTrades > 0 && sp.DailyTrades < 2500) {
-			continue
-		}
-		dec := sp.SizeDecimals
-		if sp.BnQtyDec < dec {
-			dec = sp.BnQtyDec
-		}
-		runCrossVenuePairArbLocked(PairArbCfg{
-			StratID:         "S9_PURE_CROSSED_TAKER",
-			MakerVenue:      VenueLtStd,
-			MakerSym:        sym,
-			HedgeVenue:      VenueBnUsdc,
-			HedgeSym:        sp.BnUsdcSym,
-			SlotUsd:         240.0,
-			MaxOpenPairs:    3,
-			TakerGrabMinBp:  8.5,
-			NetTargetBp:     2.5,
-			DecayAfterMs:    420000,
-			MaxHoldMs:       900000,
-			StopLossBp:      75.0,
-			MinPeerDepthMul: 2.5,
-		}, dec, sp.MinBase, nowMs)
-	}
-	for _, sym := range []string{"VVV", "XMR", "LIT", "HYPE"} {
-		sp := ltSpecs[sym]
-		as := asterSpecs[sym+"USDT"]
-		if sp == nil || as == nil {
-			continue
-		}
-		dec := sp.SizeDecimals
-		if as.QtyDec < dec {
-			dec = as.QtyDec
-		}
-		runCrossVenuePairArbLocked(PairArbCfg{
-			StratID:         "S9_PURE_CROSSED_TAKER",
-			MakerVenue:      VenueLtStd,
-			MakerSym:        sym,
-			HedgeVenue:      VenueAsterC,
-			HedgeSym:        sym + "USDT",
-			SlotUsd:         230.0,
-			MaxOpenPairs:    3,
-			TakerGrabMinBp:  9.0,
-			NetTargetBp:     2.8,
-			DecayAfterMs:    420000,
-			MaxHoldMs:       900000,
-			StopLossBp:      75.0,
-			MinPeerDepthMul: 3.0,
-			FxAdjHedge:      true,
-		}, dec, sp.MinBase, nowMs)
-	}
-
-	// ------------------------------------------------------------------------
-	// S10: #1 Leader! 0% BN USDC-M GTX Maker -> 0% Lighter IOC Hedge -> 0% BN Maker Exit (0.00bp Fee!)
-	// ------------------------------------------------------------------------
-	for _, sym := range bnLiquidSyms {
-		sp := ltSpecs[sym]
-		if sp == nil || sp.BnUsdcSym == "" || (sp.DailyTrades > 0 && sp.DailyTrades < 2500) {
-			continue
-		}
-		dec := sp.SizeDecimals
-		if sp.BnQtyDec < dec {
-			dec = sp.BnQtyDec
-		}
+		// 1. S10: 0% BN USDC-M GTX Maker -> 0% Lighter IOC Hedge -> 0% BN Maker Exit (0.00bp 4-leg fee!)
 		runCrossVenuePairArbLocked(PairArbCfg{
 			StratID:         "S10_BN_USDC_MAKER_FIRST",
 			MakerVenue:      VenueBnUsdc,
@@ -2171,6 +1621,63 @@ func evalStrategiesLocked(nowMs int64) {
 			ExitOnMaker:     true,
 			CancelTolBp:     1.5,
 			MaxAgeMs:        20000,
+		}, dec, sp.MinBase, nowMs)
+
+		// 2. S9: Pure Crossed-Book Taker Grab (Bid_A - Ask_B >= +8.5bp -> >= +4.5bp Net Locked at Entry!)
+		runCrossVenuePairArbLocked(PairArbCfg{
+			StratID:         "S9_PURE_CROSSED_TAKER",
+			MakerVenue:      VenueLtStd,
+			MakerSym:        sym,
+			HedgeVenue:      VenueBnUsdc,
+			HedgeSym:        sp.BnUsdcSym,
+			SlotUsd:         240.0,
+			MaxOpenPairs:    3,
+			TakerGrabMinBp:  8.5,
+			NetTargetBp:     2.5,
+			DecayAfterMs:    420000,
+			MaxHoldMs:       900000,
+			StopLossBp:      75.0,
+			MinPeerDepthMul: 2.5,
+		}, dec, sp.MinBase, nowMs)
+
+		// 3. S2: 0% Lighter Std Maker (>=6.5bp raw) -> 4bp BN USDC-M Hedge -> 0% BN Maker Exit (Fast 6m Decay)
+		runCrossVenuePairArbLocked(PairArbCfg{
+			StratID:         "S2_LT_BN_FAST_ROTATE",
+			MakerVenue:      VenueLtStd,
+			MakerSym:        sym,
+			HedgeVenue:      VenueBnUsdc,
+			HedgeSym:        sp.BnUsdcSym,
+			SlotUsd:         240.0,
+			MaxOpenPairs:    3,
+			MinRawEdgeBp:    2.5,
+			EntryDislocBp:   6.5,
+			NetTargetBp:     2.5,
+			DecayAfterMs:    360000,
+			MaxHoldMs:       900000,
+			StopLossBp:      75.0,
+			MinPeerDepthMul: 2.5,
+			CancelTolBp:     2.5,
+			MaxAgeMs:        30000,
+		}, dec, sp.MinBase, nowMs)
+
+		// 4. S7: High-Conviction >=8.5bp Positive Raw Spread Lighter <-> BN USDC-M
+		runCrossVenuePairArbLocked(PairArbCfg{
+			StratID:         "S7_BN_HIGH_CONV_RAW",
+			MakerVenue:      VenueLtStd,
+			MakerSym:        sym,
+			HedgeVenue:      VenueBnUsdc,
+			HedgeSym:        sp.BnUsdcSym,
+			SlotUsd:         240.0,
+			MaxOpenPairs:    3,
+			MinRawEdgeBp:    4.5,
+			EntryDislocBp:   8.5,
+			NetTargetBp:     3.5,
+			DecayAfterMs:    480000,
+			MaxHoldMs:       900000,
+			StopLossBp:      75.0,
+			MinPeerDepthMul: 2.5,
+			CancelTolBp:     2.5,
+			MaxAgeMs:        35000,
 		}, dec, sp.MinBase, nowMs)
 	}
 }
@@ -2191,11 +1698,7 @@ func settleHourlyFundingLocked(nowMs int64) {
 				// Apply 1h pro-rata equivalent or top-of-8h settlement
 				rBp := bnFund1hBp[p.Symbol]
 				s.FundingUsd -= notional * (rBp / 10000.0)
-			} else if p.Venue == VenueAsterC || p.Venue == VenueAsterRWA {
-				rBp := asterFund1hBp[p.Symbol]
-				if rBp == 0 {
-					rBp = bnFund1hBp[p.Symbol]
-				}
+			}
 				s.FundingUsd -= notional * (rBp / 10000.0)
 			}
 		}
@@ -2492,16 +1995,14 @@ func loadCheckpoint() {
 			s.Positions[posKey(p.Venue, p.Symbol)] = &pc
 		}
 	}
-	if len(tel.RecentFills) > 0 {
-		recentFills = make([]FillAudit, len(tel.RecentFills))
-		for i := range tel.RecentFills {
-			recentFills[i] = tel.RecentFills[len(tel.RecentFills)-1-i]
+	for i := len(tel.RecentFills) - 1; i >= 0; i-- {
+		if strats[tel.RecentFills[i].StratID] != nil {
+			recentFills = append(recentFills, tel.RecentFills[i])
 		}
 	}
-	if len(tel.ClosedTrips) > 0 {
-		closedTrips = make([]ClosedTripRecord, len(tel.ClosedTrips))
-		for i := range tel.ClosedTrips {
-			closedTrips[i] = tel.ClosedTrips[len(tel.ClosedTrips)-1-i]
+	for i := len(tel.ClosedTrips) - 1; i >= 0; i-- {
+		if strats[tel.ClosedTrips[i].StratID] != nil {
+			closedTrips = append(closedTrips, tel.ClosedTrips[i])
 		}
 	}
 	fmt.Printf("[%s] Restored live checkpoint from %s (uptime %.1fm)\n", ArenaVer, ArenaStatePath, float64(time.Now().UnixMilli()-bootMs)/60000.0)
@@ -2749,23 +2250,6 @@ func runFundingPoller() {
 					} else if r.Exchange == "binance" {
 						bnFund1hBp[r.Symbol+"USDT"] = (r.Rate / 8.0) * 10000.0
 						bnFund1hBp[r.Symbol+"USDC"] = (r.Rate / 8.0) * 10000.0
-					}
-				}
-				mu.Unlock()
-			}
-		}
-		if aResp, aErr := httpCli.Get("https://fapi.asterdex.com/fapi/v1/premiumIndex"); aErr == nil {
-			aBody, _ := io.ReadAll(aResp.Body)
-			_ = aResp.Body.Close()
-			var rows []struct {
-				Symbol          string `json:"symbol"`
-				LastFundingRate string `json:"lastFundingRate"`
-			}
-			if json.Unmarshal(aBody, &rows) == nil {
-				mu.Lock()
-				for _, row := range rows {
-					if r8, e := strconv.ParseFloat(row.LastFundingRate, 64); e == nil && row.Symbol != "" {
-						asterFund1hBp[row.Symbol] = (r8 / 8.0) * 10000.0
 					}
 				}
 				mu.Unlock()
@@ -3148,284 +2632,6 @@ func runBinanceAggTradeWS() {
 	}
 }
 
-func runHyperliquidWS() {
-	for {
-		conn, _, err := websocket.DefaultDialer.Dial("wss://api.hyperliquid.xyz/ws", nil)
-		if err != nil {
-			time.Sleep(2 * time.Second)
-			continue
-		}
-		_ = conn.WriteJSON(map[string]any{
-			"method":       "subscribe",
-			"subscription": map[string]string{"type": "allMids"},
-		})
-		for {
-			_ = conn.SetReadDeadline(time.Now().Add(25 * time.Second))
-			_, raw, err := conn.ReadMessage()
-			if err != nil {
-				break
-			}
-			var msg struct {
-				Channel string `json:"channel"`
-				Data    struct {
-					Mids map[string]string `json:"mids"`
-				} `json:"data"`
-			}
-			if json.Unmarshal(raw, &msg) == nil && msg.Channel == "allMids" {
-				incFeed("hlMids")
-				nowMs := time.Now().UnixMilli()
-				mu.Lock()
-				hlUpdatedMs = nowMs
-				for k, v := range msg.Data.Mids {
-					px, _ := strconv.ParseFloat(v, 64)
-					if px > 0 {
-						hlMids[k] = px
-						recordMidLocked("HL:"+k, px, nowMs)
-					}
-				}
-				mu.Unlock()
-			}
-		}
-		_ = conn.Close()
-		time.Sleep(2 * time.Second)
-	}
-}
-
-func runPolymarketPoller() {
-	// Discover active high-volume CLOB binary markets and poll live orderbooks + trades
-	lastDisc := int64(0)
-	lastTradePrice := map[string]float64{}
-	for {
-		nowMs := time.Now().UnixMilli()
-		if nowMs-lastDisc > 300000 {
-			if resp, err := httpCli.Get("https://gamma-api.polymarket.com/markets?active=true&closed=false&limit=12&order=volume24hr&ascending=false"); err == nil {
-				body, _ := io.ReadAll(resp.Body)
-				_ = resp.Body.Close()
-				var arr []struct {
-					Slug          string `json:"slug"`
-					Question      string `json:"question"`
-					ClobTokenIds  string `json:"clobTokenIds"`
-					EnableBook    bool   `json:"enableOrderBook"`
-				}
-				if json.Unmarshal(body, &arr) == nil {
-					mu.Lock()
-					kept := 0
-					for _, m := range arr {
-						if !m.EnableBook || m.Slug == "" || kept >= 5 {
-							continue
-						}
-						var toks []string
-						if json.Unmarshal([]byte(m.ClobTokenIds), &toks) == nil && len(toks) >= 2 {
-							polyMarkets[m.Slug] = &PolyMarket{
-								Slug:       m.Slug,
-								Question:   m.Question,
-								YesTokenID: toks[0],
-								NoTokenID:  toks[1],
-							}
-							kept++
-						}
-					}
-					mu.Unlock()
-					lastDisc = nowMs
-				}
-			}
-		}
-
-		mu.Lock()
-		slugs := make([]*PolyMarket, 0, len(polyMarkets))
-		for _, pm := range polyMarkets {
-			slugs = append(slugs, pm)
-		}
-		mu.Unlock()
-
-		for _, pm := range slugs {
-			resp, err := httpCli.Get("https://clob.polymarket.com/book?token_id=" + pm.YesTokenID)
-			if err != nil {
-				continue
-			}
-			body, _ := io.ReadAll(resp.Body)
-			_ = resp.Body.Close()
-			var ob struct {
-				Bids []struct {
-					Price string `json:"price"`
-					Size  string `json:"size"`
-				} `json:"bids"`
-				Asks []struct {
-					Price string `json:"price"`
-					Size  string `json:"size"`
-				} `json:"asks"`
-				LastTradePrice string `json:"last_trade_price"`
-			}
-			if json.Unmarshal(body, &ob) != nil || len(ob.Bids) == 0 || len(ob.Asks) == 0 {
-				continue
-			}
-			// Polymarket bids are sorted ascending or descending depending on endpoint; find true max bid and min ask!
-			bestBid, bestBidSz := 0.0, 0.0
-			bids := make([]BookLevel, 0, len(ob.Bids))
-			for _, b := range ob.Bids {
-				p, _ := strconv.ParseFloat(b.Price, 64)
-				s, _ := strconv.ParseFloat(b.Size, 64)
-				if p > 0 && s > 0 {
-					bids = append(bids, BookLevel{Price: p, Size: s})
-					if p > bestBid {
-						bestBid, bestBidSz = p, s
-					}
-				}
-			}
-			bestAsk, bestAskSz := 999.0, 0.0
-			asks := make([]BookLevel, 0, len(ob.Asks))
-			for _, a := range ob.Asks {
-				p, _ := strconv.ParseFloat(a.Price, 64)
-				s, _ := strconv.ParseFloat(a.Size, 64)
-				if p > 0 && s > 0 {
-					asks = append(asks, BookLevel{Price: p, Size: s})
-					if p < bestAsk {
-						bestAsk, bestAskSz = p, s
-					}
-				}
-			}
-			if bestBid <= 0 || bestAsk >= 1.0 || bestAsk <= bestBid {
-				continue
-			}
-			sort.Slice(bids, func(i, j int) bool { return bids[i].Price > bids[j].Price })
-			sort.Slice(asks, func(i, j int) bool { return asks[i].Price < asks[j].Price })
-
-			ltp, _ := strconv.ParseFloat(ob.LastTradePrice, 64)
-			incFeed("polyBook")
-			tNow := time.Now().UnixMilli()
-
-			mu.Lock()
-			pm.YesBid, pm.YesBidSz, pm.YesAsk, pm.YesAskSz, pm.UpdatedMs = bestBid, bestBidSz, bestAsk, bestAskSz, tNow
-			bk := getBookLocked(VenuePoly, pm.Slug)
-			bk.Bid, bk.BidSz, bk.Ask, bk.AskSz, bk.Bids, bk.Asks, bk.UpdatedMs = bestBid, bestBidSz, bestAsk, bestAskSz, bids, asks, tNow
-			prevLtp := lastTradePrice[pm.Slug]
-			if ltp > 0 && prevLtp > 0 && math.Abs(ltp-prevLtp) > 1e-6 {
-				// Live trade print detected on Polymarket CLOB!
-				sellerAgg := ltp <= bestBid+0.0005
-				processLiveTradeLocked(VenuePoly, pm.Slug, ltp, 60.0, sellerAgg, tNow)
-			}
-			if ltp > 0 {
-				lastTradePrice[pm.Slug] = ltp
-			}
-			mu.Unlock()
-			time.Sleep(250 * time.Millisecond)
-		}
-		time.Sleep(2500 * time.Millisecond)
-	}
-}
-
-func runAsterBookWS() {
-	url := "wss://fstream.asterdex.com/stream?streams=!bookTicker"
-	for {
-		conn, _, err := websocket.DefaultDialer.Dial(url, nil)
-		if err != nil {
-			time.Sleep(time.Second)
-			continue
-		}
-		for {
-			_ = conn.SetReadDeadline(time.Now().Add(20 * time.Second))
-			_, raw, err := conn.ReadMessage()
-			if err != nil {
-				break
-			}
-			var env struct {
-				Data struct {
-					Sym   string `json:"s"`
-					Bid   string `json:"b"`
-					BidSz string `json:"B"`
-					Ask   string `json:"a"`
-					AskSz string `json:"A"`
-				} `json:"data"`
-			}
-			if json.Unmarshal(raw, &env) != nil || env.Data.Sym == "" {
-				continue
-			}
-			bid, _ := strconv.ParseFloat(env.Data.Bid, 64)
-			bsz, _ := strconv.ParseFloat(env.Data.BidSz, 64)
-			ask, _ := strconv.ParseFloat(env.Data.Ask, 64)
-			asz, _ := strconv.ParseFloat(env.Data.AskSz, 64)
-			if bid > 0 && ask > bid {
-				incFeed("asterBook")
-				nowMs := time.Now().UnixMilli()
-				mu.Lock()
-				b := getBookLocked("ASTER", env.Data.Sym)
-				b.Bid, b.BidSz, b.Ask, b.AskSz, b.UpdatedMs = bid, bsz, ask, asz, nowMs
-				recordMidLocked("ASTER:"+env.Data.Sym, 0.5*(bid+ask), nowMs)
-				mu.Unlock()
-			}
-		}
-		_ = conn.Close()
-		time.Sleep(time.Second)
-	}
-}
-
-func runAsterAggTradeShard(streams []string) {
-	url := "wss://fstream.asterdex.com/stream?streams=" + strings.Join(streams, "/")
-	for {
-		conn, _, err := websocket.DefaultDialer.Dial(url, nil)
-		if err != nil {
-			time.Sleep(time.Second)
-			continue
-		}
-		for {
-			_ = conn.SetReadDeadline(time.Now().Add(30 * time.Second))
-			_, raw, err := conn.ReadMessage()
-			if err != nil {
-				break
-			}
-			var env struct {
-				Data struct {
-					Sym        string `json:"s"`
-					Px         string `json:"p"`
-					Qty        string `json:"q"`
-					BuyerMaker bool   `json:"m"`
-				} `json:"data"`
-			}
-			if json.Unmarshal(raw, &env) != nil || env.Data.Sym == "" {
-				continue
-			}
-			px, _ := strconv.ParseFloat(env.Data.Px, 64)
-			qty, _ := strconv.ParseFloat(env.Data.Qty, 64)
-			incFeed("asterTrade")
-			nowMs := time.Now().UnixMilli()
-			mu.Lock()
-			processLiveTradeLocked("ASTER", env.Data.Sym, px, qty, env.Data.BuyerMaker, nowMs)
-			mu.Unlock()
-		}
-		_ = conn.Close()
-		time.Sleep(time.Second)
-	}
-}
-
-func runAsterAggTradeWS() {
-	asterSyms := []string{
-		"LITUSDT", "VVVUSDT", "XMRUSDT", "HYPEUSDT", "ENAUSDT", "NEARUSDT", "UNIUSDT", "AAVEUSDT",
-		"AVAXUSDT", "SUIUSDT", "ARBUSDT", "WLDUSDT",
-		"NVDAUSDT", "AAPLUSDT", "TSLAUSDT", "QQQUSDT", "SPYUSDT", "AMZNUSDT", "METAUSDT",
-		"COINUSDT", "MSTRUSDT", "GOOGLUSDT", "AMDUSDT", "INTCUSDT", "XAUUSDT", "XAGUSDT",
-		"XAUUSD1", "METAUSD1", "QQQUSD1", "NVDAUSD1", "XAGUSD1",
-	}
-	streams := []string{}
-	mu.Lock()
-	for _, s := range asterSyms {
-		if asterSpecs[s] != nil {
-			streams = append(streams, strings.ToLower(s)+"@aggTrade")
-		}
-	}
-	mu.Unlock()
-	if len(streams) == 0 {
-		return
-	}
-	for i := 0; i < len(streams); i += 16 {
-		end := i + 16
-		if end > len(streams) {
-			end = len(streams)
-		}
-		go runAsterAggTradeShard(append([]string(nil), streams[i:end]...))
-		time.Sleep(120 * time.Millisecond)
-	}
-}
-
 func applyDepthLevelsLocked(venueKey, sym string, rawBids, rawAsks [][]string, nowMs int64) {
 	bids := make([]BookLevel, 0, len(rawBids))
 	for _, row := range rawBids {
@@ -3565,31 +2771,6 @@ func runBinanceDepth20WS() {
 	}
 }
 
-func runAsterDepth20WS() {
-	asterSyms := []string{
-		"LITUSDT", "VVVUSDT", "XMRUSDT", "HYPEUSDT", "ENAUSDT", "NEARUSDT", "UNIUSDT", "AAVEUSDT",
-		"AVAXUSDT", "SUIUSDT", "ARBUSDT", "WLDUSDT",
-		"NVDAUSDT", "AAPLUSDT", "TSLAUSDT", "QQQUSDT", "SPYUSDT", "AMZNUSDT", "METAUSDT",
-		"COINUSDT", "MSTRUSDT", "GOOGLUSDT", "AMDUSDT", "INTCUSDT", "XAUUSDT", "XAGUSDT",
-	}
-	streams := []string{}
-	mu.Lock()
-	for _, s := range asterSyms {
-		if asterSpecs[s] != nil {
-			streams = append(streams, strings.ToLower(s)+"@depth20@100ms")
-		}
-	}
-	mu.Unlock()
-	for i := 0; i < len(streams); i += 16 {
-		end := i + 16
-		if end > len(streams) {
-			end = len(streams)
-		}
-		go runDepth20Shard("wss://fstream.asterdex.com/stream?streams=", true, append([]string(nil), streams[i:end]...))
-		time.Sleep(150 * time.Millisecond)
-	}
-}
-
 func runLiveVenueRttProber() {
 	measure := func(url string, dst *atomic.Int64) {
 		t0 := time.Now()
@@ -3667,10 +2848,6 @@ func main() {
 	go runBinanceBookAndLiqWS()
 	go runBinanceDepth20WS()
 	go runBinanceAggTradeWS()
-	go runHyperliquidWS()
-	go runAsterBookWS()
-	go runAsterDepth20WS()
-	go runAsterAggTradeWS()
 
 	fmt.Printf("[%s] Live realistic-fill simulation loop started (100%% read-only public feeds, $%.2f virtual budget/strat)\n", ArenaVer, StartBudgetUSD)
 

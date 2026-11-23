@@ -459,43 +459,6 @@ func sendSignedTx(id, dbg string, build func(*types.TransactOpts) (uint8, string
 	if err != nil {
 		return err
 	}
-	if useWsSend {
-		txWsMu.Lock()
-		tc := txConn
-		var wsErr error
-		if tc != nil {
-			wsErr = tc.WriteJSON(map[string]any{
-				"type": "jsonapi/sendtx",
-				"data": map[string]any{
-					"id":      id,
-					"tx_type": txType,
-					"tx_info": json.RawMessage(txInfo),
-				},
-			})
-		}
-		txWsMu.Unlock()
-		if tc != nil && wsErr == nil {
-			fmt.Printf("[WS_TX %s %s] %dus\n", id, dbg, time.Since(t0).Microseconds())
-			return nil
-		}
-		wsMu.Lock()
-		c := ltConn
-		if c != nil {
-			wsErr = c.WriteJSON(map[string]any{
-				"type": "jsonapi/sendtx",
-				"data": map[string]any{
-					"id":      id,
-					"tx_type": txType,
-					"tx_info": json.RawMessage(txInfo),
-				},
-			})
-		}
-		wsMu.Unlock()
-		if c != nil && wsErr == nil {
-			fmt.Printf("[WS_TX %s %s] %dus\n", id, dbg, time.Since(t0).Microseconds())
-			return nil
-		}
-	}
 	for attempt := 0; attempt < 2; attempt++ {
 		if attempt > 0 {
 			txType, txInfo, err = build(nextOpts())
@@ -547,18 +510,18 @@ func cancelAll() {
 	})
 }
 
-func placeLtHedgeIOC(sym, side string, px, qty float64, isClose bool) {
+func placeLtHedgeIOC(sym, side string, px, qty float64, isClose bool) (int64, bool) {
 	m, ok := markets[sym]
 	st := mktStates[sym]
 	if !ok || st == nil || px <= 0 || qty <= 0 {
-		return
+		return 0, false
 	}
 	if !isClose {
 		qty = math.Max(m.MinB, qty)
 	}
 	baseInt := int64(math.Round(qty * math.Pow10(m.SzDec)))
 	if baseInt <= 0 {
-		return
+		return 0, false
 	}
 	pxF := roundTo(px, m.PxDec)
 	pxInt := uint32(math.Round(pxF * math.Pow10(m.PxDec)))
@@ -574,27 +537,29 @@ func placeLtHedgeIOC(sym, side string, px, qty float64, isClose bool) {
 	st.lastOrdTS[side] = time.Now()
 	st.mu.Unlock()
 
-	enqueueTx(func() {
-		dbg := fmt.Sprintf("LT_%s_%s px=%.4f sz=%.5f ro=%d", sym, side, pxF, qty, redOnly)
-		_ = sendSignedTx(fmt.Sprintf("lt_%d", coi), dbg, func(opts *types.TransactOpts) (uint8, string, error) {
-			ti, e := txCli.GetCreateOrderTransaction(&types.CreateOrderTxReq{
-				MarketIndex:      m.ID,
-				ClientOrderIndex: coi,
-				BaseAmount:       baseInt,
-				Price:            pxInt,
-				IsAsk:            isAsk,
-				Type:             1, // MARKET
-				TimeInForce:      0, // IOC
-				ReduceOnly:       redOnly,
-				OrderExpiry:      0,
-			}, opts)
-			if e != nil {
-				return 0, "", e
-			}
-			s, e := ti.GetTxInfo()
-			return ti.GetTxType(), s, e
-		})
+	dbg := fmt.Sprintf("LT_%s_%s px=%.4f sz=%.5f ro=%d", sym, side, pxF, qty, redOnly)
+	err := sendSignedTx(fmt.Sprintf("lt_%d", coi), dbg, func(opts *types.TransactOpts) (uint8, string, error) {
+		ti, e := txCli.GetCreateOrderTransaction(&types.CreateOrderTxReq{
+			MarketIndex:      m.ID,
+			ClientOrderIndex: coi,
+			BaseAmount:       baseInt,
+			Price:            pxInt,
+			IsAsk:            isAsk,
+			Type:             1, // MARKET
+			TimeInForce:      0, // IOC
+			ReduceOnly:       redOnly,
+			OrderExpiry:      0,
+		}, opts)
+		if e != nil {
+			return 0, "", e
+		}
+		s, e := ti.GetTxInfo()
+		return ti.GetTxType(), s, e
 	})
+	if err != nil {
+		return 0, false
+	}
+	return coi, true
 }
 
 // ---------- Dynamic Market Discovery & Feeds ----------
@@ -796,66 +761,6 @@ func recomputeBBO(st *MarketState) {
 	}
 	st.ltBid, st.ltBidSz, st.ltBidBandUsd = bestB, bestBSz, bidBand
 	st.ltAsk, st.ltAskSz, st.ltAskBandUsd = bestA, bestASz, askBand
-}
-
-func runTxWS() {
-	for {
-		conn, _, err := websocket.DefaultDialer.Dial(WsURL, nil)
-		if err != nil {
-			time.Sleep(1 * time.Second)
-			continue
-		}
-		setConnNoDelay(conn)
-		txWsMu.Lock()
-		txConn = conn
-		txWsMu.Unlock()
-		done := make(chan struct{})
-		go func(c *websocket.Conn) {
-			t := time.NewTicker(15 * time.Second)
-			defer t.Stop()
-			for {
-				select {
-				case <-done:
-					return
-				case <-t.C:
-					txWsMu.Lock()
-					_ = c.WriteControl(websocket.PingMessage, nil, time.Now().Add(2*time.Second))
-					txWsMu.Unlock()
-				}
-			}
-		}(conn)
-		for {
-			_, msg, err := conn.ReadMessage()
-			if err != nil {
-				break
-			}
-			sMsg := string(msg)
-			if strings.Contains(sMsg, `"error"`) || (strings.Contains(sMsg, `"code":`) && !strings.Contains(sMsg, `"code":200`)) {
-				fmt.Printf("[WS_RESP] %s\n", sMsg)
-				if strings.Contains(sMsg, "429") || strings.Contains(strings.ToLower(sMsg), "quota") || strings.Contains(strings.ToLower(sMsg), "rate") {
-					quotaCoolUntil.Store(time.Now().Add(8 * time.Second).UnixMilli())
-				}
-				if strings.Contains(sMsg, "21501") || strings.Contains(sMsg, "invalid tx") {
-					useWsSend = false
-				}
-				if strings.Contains(sMsg, "invalid nonce") || strings.Contains(sMsg, `"error"`) {
-					go func() {
-						if n, e2 := txCli.HTTP().GetNextNonce(AcctIdx, KeyIdx); e2 == nil {
-							nonceSeq.Store(n)
-						}
-					}()
-				}
-			}
-		}
-		close(done)
-		txWsMu.Lock()
-		if txConn == conn {
-			txConn = nil
-		}
-		txWsMu.Unlock()
-		_ = conn.Close()
-		time.Sleep(500 * time.Millisecond)
-	}
 }
 
 func runLtWS() {
@@ -2036,106 +1941,6 @@ func emitBnAuditLine() {
 		realPnl, comm, fund, upnl, netBn, cnt, walletUsd)
 }
 
-// ---------- Core KISS Strategy Engine ----------
-
-func checkAdverseHourlyFunding(sp DnSpec, bnSide string) bool {
-	nowU := time.Now().UTC()
-	curHr := nowU.Unix() / 3600
-
-	fundMu.Lock()
-	if lastFundCheckHr == curHr && lastFundCheckSym == sp.BnSym {
-		res := lastFundAdverse
-		fundMu.Unlock()
-		return res
-	}
-	fundMu.Unlock()
-
-	hc := &http.Client{Timeout: 3 * time.Second}
-	prResp, e1 := hc.Get("https://fapi.binance.com/fapi/v1/premiumIndex?symbol=" + sp.BnSym)
-	frResp, e2 := hc.Get(BaseURL + "/api/v1/funding-rates")
-	if e1 != nil || e2 != nil {
-		return false
-	}
-	prB, _ := io.ReadAll(prResp.Body)
-	prResp.Body.Close()
-	frB, _ := io.ReadAll(frResp.Body)
-	frResp.Body.Close()
-
-	fundMu.Lock()
-	needIv := len(bnFundIvCache) == 0
-	fundMu.Unlock()
-	if needIv {
-		if fiResp, e3 := hc.Get("https://fapi.binance.com/fapi/v1/fundingInfo"); e3 == nil {
-			fiB, _ := io.ReadAll(fiResp.Body)
-			fiResp.Body.Close()
-			var fis []struct {
-				Symbol string `json:"symbol"`
-				Hours  int    `json:"fundingIntervalHours"`
-			}
-			if json.Unmarshal(fiB, &fis) == nil {
-				fundMu.Lock()
-				for _, f := range fis {
-					if f.Hours > 0 {
-						bnFundIvCache[f.Symbol] = f.Hours
-					}
-				}
-				fundMu.Unlock()
-			}
-		}
-	}
-
-	var pr struct {
-		Rate string `json:"lastFundingRate"`
-	}
-	var fr struct {
-		Rates []struct {
-			Sym  string  `json:"symbol"`
-			Exch string  `json:"exchange"`
-			Rate float64 `json:"rate"`
-		} `json:"funding_rates"`
-	}
-	if json.Unmarshal(prB, &pr) != nil || json.Unmarshal(frB, &fr) != nil {
-		return false
-	}
-
-	rawBnRate, _ := strconv.ParseFloat(pr.Rate, 64)
-	bnRateBps := 0.0
-	fundMu.Lock()
-	iv := bnFundIvCache[sp.BnSym]
-	fundMu.Unlock()
-	if iv <= 0 {
-		iv = 8
-	}
-	nextHr := (nowU.Hour() + 1) % 24
-	if nextHr%iv == 0 {
-		bnRateBps = rawBnRate * 10000.0
-	}
-
-	ltRateBps := 0.0
-	for _, r := range fr.Rates {
-		if r.Exch == "lighter" && r.Sym == sp.Sym {
-			ltRateBps = (r.Rate / 8.0) * 10000.0
-			break
-		}
-	}
-
-	// Net funding collected across :00: SELL Binance (short) + Long Lighter collects bnRateBps - ltRateBps
-	netFundBps := bnRateBps - ltRateBps
-	if bnSide == "BUY" {
-		netFundBps = -bnRateBps + ltRateBps
-	}
-	adverse := netFundBps < -1.50
-	fundMu.Lock()
-	lastFundCheckHr = curHr
-	lastFundCheckSym = sp.BnSym
-	lastFundAdverse = adverse
-	fundMu.Unlock()
-
-	fmt.Printf("[FUND_CHK sym=%s side=%s bn=%.2fbp lt=%.2fbp net=%+.2fbp adverse=%v]\n",
-		sp.BnSym, bnSide, bnRateBps, ltRateBps, netFundBps, adverse)
-	return adverse
-}
-
 func queryBnOrder(symbol string, oid int64, lastPoll time.Time, forceREST bool) (status string, execQty, avgPx float64, polledREST, ok bool) {
 	bnOrdMu.Lock()
 	ws, hasWS := bnOrdMap[oid]
@@ -2175,11 +1980,76 @@ func queryBnOrder(symbol string, oid int64, lastPoll time.Time, forceREST bool) 
 	return o.Status, exQ, avgP, true, true
 }
 
-func waitLtPositionFill(sym string, minNeed float64, waitDur time.Duration) (float64, float64) {
+func fetchLtTradeFillByCOI(sym string, coi int64) (signedQty, vwapPx float64, found bool) {
+	if coi <= 0 {
+		return 0, 0, false
+	}
+	resp, err := ltGet(txHTTP, fmt.Sprintf("%s/api/v1/trades?account_index=%d&limit=20&sort_by=timestamp", BaseURL, AcctIdx))
+	if err != nil {
+		return 0, 0, false
+	}
+	b, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	var tr struct {
+		Trades []struct {
+			Sym         string `json:"market_symbol"`
+			MarketID    int64  `json:"market_id"`
+			Price       string `json:"price"`
+			Size        string `json:"size"`
+			BidAcct     int64  `json:"bid_account_id"`
+			AskAcct     int64  `json:"ask_account_id"`
+			BidClientID int64  `json:"bid_client_id"`
+			AskClientID int64  `json:"ask_client_id"`
+		} `json:"trades"`
+	}
+	if json.Unmarshal(b, &tr) != nil {
+		return 0, 0, false
+	}
+	m := markets[sym]
+	var cost, totAbs float64
+	sign := 1.0
+	for _, t := range tr.Trades {
+		if t.Sym != sym && t.MarketID != m.ID {
+			continue
+		}
+		matched := false
+		if t.BidAcct == AcctIdx && t.BidClientID == coi {
+			matched = true
+			sign = 1.0
+		} else if t.AskAcct == AcctIdx && t.AskClientID == coi {
+			matched = true
+			sign = -1.0
+		}
+		if !matched {
+			continue
+		}
+		px, _ := strconv.ParseFloat(t.Price, 64)
+		sz, _ := strconv.ParseFloat(t.Size, 64)
+		if px > 0 && sz > 0 {
+			cost += px * sz
+			totAbs += sz
+			found = true
+		}
+	}
+	if found && totAbs > 0 {
+		vwapPx = cost / totAbs
+		signedQty = sign * totAbs
+		if st := mktStates[sym]; st != nil {
+			st.mu.Lock()
+			st.pos = signedQty
+			st.avgEntry = vwapPx
+			st.lastFillTS = time.Now()
+			st.mu.Unlock()
+		}
+	}
+	return signedQty, vwapPx, found
+}
+
+func waitLtPositionFill(sym string, coi int64, minNeed float64, waitDur time.Duration) (float64, float64) {
 	t0 := time.Now()
 	deadline := t0.Add(waitDur)
 	st := mktStates[sym]
-	rest450Done, rest850Done := false, false
+	chk1, chk2, chk3 := false, false, false
 	for time.Now().Before(deadline) {
 		if st != nil {
 			st.mu.Lock()
@@ -2190,14 +2060,17 @@ func waitLtPositionFill(sym string, minNeed float64, waitDur time.Duration) (flo
 			}
 		}
 		el := time.Since(t0)
-		if !rest450Done && el >= 450*time.Millisecond {
-			rest450Done = true
-			if p, ae := fetchLtPosREST(sym); math.Abs(p) >= minNeed {
-				return p, ae
+		if (!chk1 && el >= 450*time.Millisecond) || (!chk2 && el >= 1250*time.Millisecond) || (!chk3 && el >= 2250*time.Millisecond) {
+			if el >= 2250*time.Millisecond {
+				chk3 = true
+			} else if el >= 1250*time.Millisecond {
+				chk2 = true
+			} else {
+				chk1 = true
 			}
-		}
-		if !rest850Done && el >= 850*time.Millisecond {
-			rest850Done = true
+			if sq, vp, okT := fetchLtTradeFillByCOI(sym, coi); okT && math.Abs(sq) >= minNeed {
+				return sq, vp
+			}
 			if p, ae := fetchLtPosREST(sym); math.Abs(p) >= minNeed {
 				return p, ae
 			}
@@ -2207,741 +2080,10 @@ func waitLtPositionFill(sym string, minNeed float64, waitDur time.Duration) (flo
 		case <-time.After(45 * time.Millisecond):
 		}
 	}
+	if sq, vp, okT := fetchLtTradeFillByCOI(sym, coi); okT && math.Abs(sq) >= minNeed {
+		return sq, vp
+	}
 	return fetchLtPosREST(sym)
-}
-
-func verifyAndHedgeLt(sp DnSpec, sl DnSlot, exQ, bnAvgP, fx float64) (hedged bool, ltEntryPx, filledQty float64) {
-	m := markets[sp.Sym]
-	st := mktStates[sp.Sym]
-	if st == nil {
-		return false, 0, 0
-	}
-	st.mu.Lock()
-	lb, la := st.ltBid, st.ltAsk
-	st.mu.Unlock()
-	if lb <= 0 || la <= 0 {
-		lb, la = fetchLtBookREST(m.ID)
-	}
-
-	// Attempt 1: 12bp buffer IOC + 1200ms confirmation
-	px1, ref1 := roundTo(lb*0.9988, m.PxDec), lb
-	if sl.LtSide == "BID" {
-		px1, ref1 = roundTo(la*1.0012, m.PxDec), la
-	}
-	placeLtHedgeIOC(sp.Sym, sl.LtSide, px1, exQ, false)
-	pos, ae := waitLtPositionFill(sp.Sym, m.MinB, 1200*time.Millisecond)
-	if math.Abs(pos) >= m.MinB {
-		if ae <= 0 {
-			ae = ref1
-		}
-		return true, ae, math.Abs(pos)
-	}
-
-	// Attempt 2: wider 20bp buffer IOC retry + 1200ms confirmation
-	st.mu.Lock()
-	lb2, la2 := st.ltBid, st.ltAsk
-	st.mu.Unlock()
-	if lb2 <= 0 || la2 <= 0 {
-		lb2, la2 = fetchLtBookREST(m.ID)
-	}
-	if lb2 <= 0 || la2 <= 0 {
-		lb2, la2 = lb, la
-	}
-	px2, ref2 := roundTo(lb2*0.9980, m.PxDec), lb2
-	if sl.LtSide == "BID" {
-		px2, ref2 = roundTo(la2*1.0020, m.PxDec), la2
-	}
-	placeLtHedgeIOC(sp.Sym, sl.LtSide, px2, exQ, false)
-	pos, ae = waitLtPositionFill(sp.Sym, m.MinB, 1200*time.Millisecond)
-	if math.Abs(pos) >= m.MinB {
-		if ae <= 0 {
-			ae = ref2
-		}
-		return true, ae, math.Abs(pos)
-	}
-
-	// Both Lighter IOC attempts failed: immediately flatten the Binance leg (Zero Unhedged Tolerance!)
-	unwindSide := "SELL"
-	if sl.BnSide == "SELL" {
-		unwindSide = "BUY"
-	}
-	mp := url.Values{}
-	mp.Set("symbol", sp.BnSym)
-	mp.Set("side", unwindSide)
-	mp.Set("type", "MARKET")
-	mp.Set("reduceOnly", "true")
-	mp.Set("quantity", strconv.FormatFloat(exQ, 'f', sp.QDec, 64))
-	_, mb, _ := bnSignReq("POST", "fapi.binance.com", "/fapi/v1/order", mp)
-	var mo struct {
-		AvgPx string `json:"avgPrice"`
-	}
-	_ = json.Unmarshal(mb, &mo)
-	unPx, _ := strconv.ParseFloat(mo.AvgPx, 64)
-	if unPx <= 0 {
-		unPx = bnAvgP
-	}
-	time.Sleep(900 * time.Millisecond)
-	if latePos, _ := fetchLtPosREST(sp.Sym); math.Abs(latePos) >= m.MinB {
-		closeSide := "BID"
-		if latePos > 0 {
-			closeSide = "ASK"
-		}
-		lb3, la3 := fetchLtBookREST(m.ID)
-		if lb3 <= 0 || la3 <= 0 {
-			lb3, la3 = lb2, la2
-		}
-		closePx := roundTo(la3*1.01, m.PxDec)
-		if closeSide == "ASK" {
-			closePx = roundTo(lb3*0.99, m.PxDec)
-		}
-		placeLtHedgeIOC(sp.Sym, closeSide, closePx, math.Abs(latePos), true)
-		fmt.Printf("[POST_ABORT_LT_SWEEP sym=%s side=%s qty=%.5f px=%.4f]\n",
-			sp.Sym, closeSide, math.Abs(latePos), closePx)
-	}
-	bnLeg, _, feeUsd, netUsd, netBps := computeDnLegPnls(
-		sl.BnSide, bnAvgP, unPx, bnAvgP*fx, bnAvgP*fx, fx, exQ, sl.EntryFeeBp, sp.TakerFeeBp)
-	fmt.Printf("[UNHEDGED_ABORT id=%d sym=%s] Lighter failed 2x IOC; unwound Binance %s exQ=%.4f net=$%+.4f\n",
-		sl.TradeID, sp.BnSym, unwindSide, exQ, netUsd)
-	recordStratClose(sl.TradeID, "ZERO_FEE_DN",
-		fmt.Sprintf("BN_%s_%s+LT_%s", sp.BnSym, sl.BnSide, sl.LtSide),
-		sp.Sym, exQ*(bnAvgP*fx), time.Since(sl.OpenedAt).Seconds(),
-		netBps, netUsd, bnLeg, 0.0, feeUsd, "UNHEDGED_ABORT")
-	emitBnAuditLine()
-	return false, 0, 0
-}
-
-func computeDnLegPnls(bnSide string, entryBn, exitBn, entryLt, exitLt, fx, qty, entryFeeBp, exitFeeBp float64) (bnLegUsd, ltLegUsd, feeUsd, netUsd, netBps float64) {
-	eUsd := entryBn * fx
-	notional := qty * eUsd
-	if notional <= 0 {
-		return 0, 0, 0, 0, 0
-	}
-	feeUsd = notional * ((entryFeeBp + exitFeeBp) / 10000.0)
-	if bnSide == "BUY" {
-		bnLegUsd = (exitBn-entryBn)*fx*qty - feeUsd
-		ltLegUsd = (entryLt - exitLt) * qty
-	} else {
-		bnLegUsd = (entryBn-exitBn)*fx*qty - feeUsd
-		ltLegUsd = (exitLt - entryLt) * qty
-	}
-	netUsd = bnLegUsd + ltLegUsd
-	netBps = netUsd / notional * 10000.0
-	return bnLegUsd, ltLegUsd, feeUsd, netUsd, netBps
-}
-
-func closeActiveSlot(sl DnSlot, bnExPx, ltPos, lb, la, fx, exitFeeBp float64, reason string, now time.Time) {
-	actSp := sl.Spec
-	m := markets[actSp.Sym]
-	closeLtSide, ltClosePx, ltExitEst := "BID", roundTo(la*1.004, m.PxDec), la
-	if sl.BnSide == "SELL" {
-		closeLtSide, ltClosePx, ltExitEst = "ASK", roundTo(lb*0.996, m.PxDec), lb
-	}
-	closeQty := math.Abs(ltPos)
-	if closeQty < m.MinB {
-		closeQty = sl.Qty
-	}
-	if closeQty >= m.MinB {
-		placeLtHedgeIOC(actSp.Sym, closeLtSide, ltClosePx, closeQty, true)
-		stClose := mktStates[actSp.Sym]
-		c0 := time.Now()
-		cDeadline := c0.Add(1000 * time.Millisecond)
-		rest550Done := false
-		for time.Now().Before(cDeadline) {
-			if stClose != nil {
-				stClose.mu.Lock()
-				curPos := stClose.pos
-				stClose.mu.Unlock()
-				if math.Abs(curPos) < m.MinB {
-					break
-				}
-			}
-			if !rest550Done && time.Since(c0) >= 550*time.Millisecond {
-				rest550Done = true
-				if rp, _ := fetchLtPosREST(actSp.Sym); math.Abs(rp) < m.MinB {
-					break
-				}
-			}
-			select {
-			case <-ltFillCh:
-			case <-time.After(50 * time.Millisecond):
-			}
-		}
-		if curPos, _ := fetchLtPosREST(actSp.Sym); math.Abs(curPos) >= m.MinB {
-			retrySide := "BID"
-			if curPos > 0 {
-				retrySide = "ASK"
-			}
-			lbR, laR := fetchLtBookREST(m.ID)
-			if lbR <= 0 || laR <= 0 {
-				lbR, laR = lb, la
-			}
-			retryPx := roundTo(laR*1.01, m.PxDec)
-			if retrySide == "ASK" {
-				retryPx = roundTo(lbR*0.99, m.PxDec)
-			}
-			placeLtHedgeIOC(actSp.Sym, retrySide, retryPx, math.Abs(curPos), true)
-			time.Sleep(600 * time.Millisecond)
-		}
-	}
-	eLt := sl.EntryLtPx
-	if eLt <= 0 {
-		eLt = ltExitEst
-	}
-	bnLeg, ltLeg, feeUsd, realUSD, realBps := computeDnLegPnls(
-		sl.BnSide, sl.EntryBnPx, bnExPx, eLt, ltExitEst, fx, sl.Qty, sl.EntryFeeBp, exitFeeBp)
-	eUsd := sl.EntryBnPx * fx
-	recordStratClose(sl.TradeID, "ZERO_FEE_DN",
-		fmt.Sprintf("BN_%s_%s+LT_%s", actSp.BnSym, sl.BnSide, sl.LtSide),
-		actSp.Sym, sl.Qty*eUsd, now.Sub(sl.OpenedAt).Seconds(),
-		realBps, realUSD, bnLeg, ltLeg, feeUsd, reason)
-	emitBnAuditLine()
-	dnMu.Lock()
-	activeSlot = DnSlot{State: "IDLE"}
-	dnMu.Unlock()
-}
-
-func processActiveSlot(now time.Time) {
-	dnMu.Lock()
-	sl := activeSlot
-	dnMu.Unlock()
-	if sl.State == "" || sl.State == "IDLE" {
-		return
-	}
-	actSp := sl.Spec
-	m := markets[actSp.Sym]
-	st := mktStates[actSp.Sym]
-	if st == nil {
-		return
-	}
-	st.mu.Lock()
-	lb, la, lbBand, laBand, ltPos, ltAvg := st.ltBid, st.ltAsk, st.ltBidBandUsd, st.ltAskBandUsd, st.pos, st.avgEntry
-	st.mu.Unlock()
-
-	eFx := sl.EntryFx
-	if eFx <= 0 {
-		eFx = 1.0
-	}
-	dnMu.Lock()
-	fx, okFx := dnQuoteFxToUsdtLocked(actSp.Quote, now)
-	dnMu.Unlock()
-	if !okFx || fx <= 0 {
-		fx = eFx
-	}
-	rtMakerFeeBp := sl.EntryFeeBp + actSp.MakerFeeBp
-	rtMixedFeeBp := sl.EntryFeeBp + actSp.TakerFeeBp
-
-	if sl.State == "BN_ENTRY_OPEN" {
-		eUsd := sl.EntryBnPx * fx
-		emaBps := sl.EntryEmaBps
-		dnMu.Lock()
-		if db := dnBooks[actSp.BnSym]; db != nil && db.WarmTicks >= 15 {
-			emaBps = db.EmaBps
-		}
-		dnMu.Unlock()
-		curNetEdge := (lb-eUsd)/eUsd*10000.0 - rtMakerFeeBp
-		curDisloc := curNetEdge - emaBps
-		ltMoved := lb < sl.RefLtPx*(1.0-2.5/10000.0)
-		ltHedgeDepth := lbBand
-		if sl.BnSide == "SELL" {
-			curNetEdge = (eUsd-la)/eUsd*10000.0 - rtMakerFeeBp
-			curDisloc = curNetEdge + emaBps
-			ltMoved = la > sl.RefLtPx*(1.0+2.5/10000.0)
-			ltHedgeDepth = laBand
-		}
-		curUsdtMid, curBtcMid, _, _ := leadMidAndJumps(actSp.Sym, now)
-		leadAdverse := hasAdverseLeadMove(sl.BnSide, sl.RefUsdtMid, sl.RefBtcMid, curUsdtMid, curBtcMid)
-		needCancel := leadAdverse || ltMoved || ltHedgeDepth < 60.0 || curNetEdge < 2.00 || curDisloc < 5.00 || now.Sub(sl.OpenedAt) >= 8*time.Second
-		status, exQ, avgP, polled, ok := queryBnOrder(actSp.BnSym, sl.EntryOid, sl.LastPoll, needCancel)
-		if polled {
-			dnMu.Lock()
-			activeSlot.LastPoll = now
-			dnMu.Unlock()
-		}
-		if !ok {
-			return
-		}
-		if avgP <= 0 {
-			avgP = sl.EntryBnPx
-		}
-		if status == "FILLED" || (needCancel && exQ*(avgP*fx) >= actSp.MinNot && exQ >= m.MinB) {
-			if status != "FILLED" {
-				qp := url.Values{}
-				qp.Set("symbol", actSp.BnSym)
-				qp.Set("orderId", strconv.FormatInt(sl.EntryOid, 10))
-				_, cb, _ := bnSignReq("DELETE", "fapi.binance.com", "/fapi/v1/order", qp)
-				var co struct {
-					ExecQty string `json:"executedQty"`
-					AvgPx   string `json:"avgPrice"`
-				}
-				if json.Unmarshal(cb, &co) == nil {
-					if q2, e2 := strconv.ParseFloat(co.ExecQty, 64); e2 == nil && q2 > exQ {
-						exQ = q2
-					}
-					if p2, e3 := strconv.ParseFloat(co.AvgPx, 64); e3 == nil && p2 > 0 {
-						avgP = p2
-					}
-				}
-			}
-			hedged, ltRefFill, filledQ := verifyAndHedgeLt(actSp, sl, exQ, avgP, fx)
-			if !hedged {
-				dnMu.Lock()
-				activeSlot = DnSlot{State: "IDLE"}
-				dnMu.Unlock()
-				stratCoolUntilMS.Store(time.Now().Add(8 * time.Second).UnixMilli())
-				return
-			}
-			useQty := math.Min(exQ, filledQ)
-			if useQty < m.MinB {
-				useQty = exQ
-			}
-			avgUsd := avgP * fx
-			lockedBps := (ltRefFill-avgUsd)/avgUsd*10000.0 - rtMakerFeeBp
-			if sl.BnSide == "SELL" {
-				lockedBps = (avgUsd-ltRefFill)/avgUsd*10000.0 - rtMakerFeeBp
-			}
-			dnMu.Lock()
-			activeSlot.State = "HEDGED"
-			activeSlot.Qty = useQty
-			activeSlot.EntryBnPx = avgP
-			activeSlot.EntryLtPx = ltRefFill
-			activeSlot.EntryFx = fx
-			activeSlot.OpenedAt = time.Now()
-			activeSlot.LastPoll = time.Time{}
-			dnMu.Unlock()
-			recordStratOpen(sl.TradeID, "ZERO_FEE_DN",
-				fmt.Sprintf("BN_%s_%s+LT_%s", actSp.BnSym, sl.BnSide, sl.LtSide),
-				actSp.Sym, useQty*avgUsd, lockedBps,
-				fmt.Sprintf("KISS 0pctFee Fx%.5f BnMaker@%.5f+Lt0pct@%.5f", fx, avgP, ltRefFill))
-		} else if needCancel || status == "CANCELED" || status == "EXPIRED" {
-			if status == "NEW" || status == "PARTIALLY_FILLED" {
-				qp := url.Values{}
-				qp.Set("symbol", actSp.BnSym)
-				qp.Set("orderId", strconv.FormatInt(sl.EntryOid, 10))
-				_, cb, _ := bnSignReq("DELETE", "fapi.binance.com", "/fapi/v1/order", qp)
-				var co struct {
-					ExecQty string `json:"executedQty"`
-					AvgPx   string `json:"avgPrice"`
-				}
-				if json.Unmarshal(cb, &co) == nil {
-					if q2, e2 := strconv.ParseFloat(co.ExecQty, 64); e2 == nil {
-						exQ = q2
-					}
-					if p2, e3 := strconv.ParseFloat(co.AvgPx, 64); e3 == nil && p2 > 0 {
-						avgP = p2
-					}
-				}
-			}
-			if exQ >= m.MinB {
-				hedged, ltRefFill, filledQ := verifyAndHedgeLt(actSp, sl, exQ, avgP, fx)
-				if !hedged {
-					dnMu.Lock()
-					activeSlot = DnSlot{State: "IDLE"}
-					dnMu.Unlock()
-					stratCoolUntilMS.Store(time.Now().Add(8 * time.Second).UnixMilli())
-					return
-				}
-				useQty := math.Min(exQ, filledQ)
-				if useQty < m.MinB {
-					useQty = exQ
-				}
-				avgUsd := avgP * fx
-				dnMu.Lock()
-				activeSlot.State = "HEDGED"
-				activeSlot.Qty = useQty
-				activeSlot.EntryBnPx = avgP
-				activeSlot.EntryLtPx = ltRefFill
-				activeSlot.EntryFx = fx
-				activeSlot.OpenedAt = time.Now()
-				activeSlot.LastPoll = time.Time{}
-				dnMu.Unlock()
-				recordStratOpen(sl.TradeID, "ZERO_FEE_DN",
-					fmt.Sprintf("BN_%s_%s+LT_%s", actSp.BnSym, sl.BnSide, sl.LtSide),
-					actSp.Sym, useQty*avgUsd, curNetEdge, "KISS Partial_Hedged")
-			} else {
-				dnMu.Lock()
-				activeSlot = DnSlot{State: "IDLE"}
-				dnMu.Unlock()
-			}
-		}
-		return
-	}
-
-	eLt := sl.EntryLtPx
-	if ltAvg > 0 {
-		eLt = ltAvg
-		sl.EntryLtPx = ltAvg
-	}
-	eUsd := sl.EntryBnPx * eFx
-
-	if sl.State == "HEDGED" {
-		dnMu.Lock()
-		db := dnBooks[actSp.BnSym]
-		var bb, ba float64
-		if db != nil {
-			bb, ba = db.Bid, db.Ask
-		}
-		dnMu.Unlock()
-		if bb <= 0 || ba <= bb || lb <= 0 || la <= lb {
-			return
-		}
-		var closeBnSide string
-		var makerExitBnPx, takerExitLtPx, combNetMakerBps, combTakerNetBps, ltExitDepthUsd float64
-		if sl.BnSide == "BUY" {
-			closeBnSide = "SELL"
-			minSell := math.Ceil((bb*(1.0+0.00015))/actSp.Tick-1e-9) * actSp.Tick
-			makerExitBnPx = roundTo(math.Max(ba, minSell), actSp.PxDec)
-			takerExitLtPx = la
-			ltExitDepthUsd = laBand
-			combNetMakerBps = (((makerExitBnPx-sl.EntryBnPx)*fx)+(eLt-takerExitLtPx))/eUsd*10000.0 - rtMakerFeeBp
-			combTakerNetBps = (((bb-sl.EntryBnPx)*fx)+(eLt-la))/eUsd*10000.0 - rtMixedFeeBp
-		} else {
-			closeBnSide = "BUY"
-			maxBuy := math.Floor((ba*(1.0-0.00015))/actSp.Tick+1e-9) * actSp.Tick
-			makerExitBnPx = roundTo(math.Min(bb, maxBuy), actSp.PxDec)
-			takerExitLtPx = lb
-			ltExitDepthUsd = lbBand
-			combNetMakerBps = (((sl.EntryBnPx-makerExitBnPx)*fx)+(takerExitLtPx-eLt))/eUsd*10000.0 - rtMakerFeeBp
-			combTakerNetBps = (((sl.EntryBnPx-ba)*fx)+(lb-eLt))/eUsd*10000.0 - rtMixedFeeBp
-		}
-		holdS := now.Sub(sl.OpenedAt).Seconds()
-		utcNow := now.UTC()
-		adverseFundFlush := utcNow.Minute() == 58 && utcNow.Second() >= 30 && checkAdverseHourlyFunding(actSp, sl.BnSide)
-		catastrophicSL := holdS >= 30.0 && combTakerNetBps <= -35.0
-		curUsdtMid, curBtcMid, usdtJump, btcJump := leadMidAndJumps(actSp.Sym, now)
-		// Patient 0%-fee Maker convergence with recessed exit quotes & lead-market calmness:
-		wantExit := ltExitDepthUsd >= 100.0 && math.Abs(usdtJump) <= 1.5 && math.Abs(btcJump) <= 1.2 &&
-			((holdS < 120.0 && combNetMakerBps >= 3.50) ||
-				(holdS >= 120.0 && holdS < 300.0 && combNetMakerBps >= 2.50) ||
-				(holdS >= 300.0 && combNetMakerBps >= 1.50))
-
-		if adverseFundFlush || catastrophicSL {
-			mp := url.Values{}
-			mp.Set("symbol", actSp.BnSym)
-			mp.Set("side", closeBnSide)
-			mp.Set("type", "MARKET")
-			mp.Set("reduceOnly", "true")
-			mp.Set("quantity", strconv.FormatFloat(sl.Qty, 'f', actSp.QDec, 64))
-			_, mb, _ := bnSignReq("POST", "fapi.binance.com", "/fapi/v1/order", mp)
-			var mo struct {
-				AvgPx string `json:"avgPrice"`
-			}
-			_ = json.Unmarshal(mb, &mo)
-			bnExPx, _ := strconv.ParseFloat(mo.AvgPx, 64)
-			if bnExPx <= 0 {
-				bnExPx = 0.5 * (bb + ba)
-			}
-			exReason := "DN_CATASTROPHIC_SL"
-			if adverseFundFlush {
-				exReason = "PRE_HOUR_FUND_GUARD"
-			}
-			closeActiveSlot(sl, bnExPx, ltPos, lb, la, fx, actSp.TakerFeeBp, exReason, now)
-			stratCoolUntilMS.Store(now.Add(8 * time.Second).UnixMilli())
-		} else if wantExit {
-			p := url.Values{}
-			p.Set("symbol", actSp.BnSym)
-			p.Set("side", closeBnSide)
-			p.Set("type", "LIMIT")
-			p.Set("timeInForce", "GTX")
-			p.Set("reduceOnly", "true")
-			p.Set("quantity", strconv.FormatFloat(sl.Qty, 'f', actSp.QDec, 64))
-			p.Set("price", strconv.FormatFloat(makerExitBnPx, 'f', actSp.PxDec, 64))
-			sc, body, err := bnSignReq("POST", "fapi.binance.com", "/fapi/v1/order", p)
-			if err == nil && sc == 200 {
-				var or struct {
-					OrderID int64  `json:"orderId"`
-					Status  string `json:"status"`
-				}
-				if json.Unmarshal(body, &or) == nil && or.OrderID > 0 && or.Status != "EXPIRED" && or.Status != "CANCELED" {
-					dnMu.Lock()
-					activeSlot.State = "BN_EXIT_OPEN"
-					activeSlot.ExitOid = or.OrderID
-					activeSlot.RefLtPx = takerExitLtPx
-					activeSlot.RefUsdtMid = curUsdtMid
-					activeSlot.RefBtcMid = curBtcMid
-					activeSlot.LastPoll = time.Time{}
-					dnMu.Unlock()
-					fmt.Printf("[DN_EXIT_RESTED id=%d sym=%s side=%s @ %.5f estNet=%+.2fbp fee=$0.00]\n",
-						sl.TradeID, actSp.BnSym, closeBnSide, makerExitBnPx, combNetMakerBps)
-				}
-			}
-		}
-		return
-	}
-
-	if sl.State == "BN_EXIT_OPEN" {
-		status, _, exP, polled, ok := queryBnOrder(actSp.BnSym, sl.ExitOid, sl.LastPoll, false)
-		if polled {
-			dnMu.Lock()
-			activeSlot.LastPoll = now
-			dnMu.Unlock()
-		}
-		if !ok {
-			return
-		}
-		if exP <= 0 {
-			dnMu.Lock()
-			if db := dnBooks[actSp.BnSym]; db != nil {
-				exP = 0.5 * (db.Bid + db.Ask)
-			}
-			dnMu.Unlock()
-		}
-		if status == "FILLED" {
-			closeActiveSlot(sl, exP, ltPos, lb, la, fx, actSp.MakerFeeBp, "ZERO_FEE_4LEG_TP", now)
-			stratCoolUntilMS.Store(now.Add(2 * time.Second).UnixMilli())
-		} else if status == "CANCELED" || status == "EXPIRED" {
-			dnMu.Lock()
-			activeSlot.State = "HEDGED"
-			dnMu.Unlock()
-		} else {
-			curComb := (((exP-sl.EntryBnPx)*fx)+(eLt-la))/eUsd*10000.0 - rtMakerFeeBp
-			closeBnSide := "SELL"
-			ltExitDepthUsd := laBand
-			if sl.BnSide == "SELL" {
-				curComb = (((sl.EntryBnPx-exP)*fx)+(lb-eLt))/eUsd*10000.0 - rtMakerFeeBp
-				closeBnSide = "BUY"
-				ltExitDepthUsd = lbBand
-			}
-			holdS := now.Sub(sl.OpenedAt).Seconds()
-			minKeepBps := 2.00
-			if holdS >= 120.0 && holdS < 300.0 {
-				minKeepBps = 1.20
-			} else if holdS >= 300.0 {
-				minKeepBps = 0.50
-			}
-			curUsdtMid, curBtcMid, _, _ := leadMidAndJumps(actSp.Sym, now)
-			leadAdverse := hasAdverseLeadMove(closeBnSide, sl.RefUsdtMid, sl.RefBtcMid, curUsdtMid, curBtcMid)
-			utcNow := now.UTC()
-			adverseCancel := utcNow.Minute() == 58 && utcNow.Second() >= 30 && checkAdverseHourlyFunding(actSp, sl.BnSide)
-			if adverseCancel || leadAdverse || ltExitDepthUsd < 60.0 || curComb < minKeepBps {
-				qp := url.Values{}
-				qp.Set("symbol", actSp.BnSym)
-				qp.Set("orderId", strconv.FormatInt(sl.ExitOid, 10))
-				sc, cb, _ := bnSignReq("DELETE", "fapi.binance.com", "/fapi/v1/order", qp)
-				var co struct {
-					Status  string `json:"status"`
-					ExecQty string `json:"executedQty"`
-					AvgPx   string `json:"avgPrice"`
-				}
-				_ = json.Unmarshal(cb, &co)
-				if sc != 200 {
-					if st2, eq2, ap2, _, ok2 := queryBnOrder(actSp.BnSym, sl.ExitOid, time.Time{}, true); ok2 {
-						co.Status = st2
-						co.ExecQty = strconv.FormatFloat(eq2, 'f', 8, 64)
-						if ap2 > 0 {
-							co.AvgPx = strconv.FormatFloat(ap2, 'f', 8, 64)
-						}
-					}
-				}
-				if co.Status == "FILLED" {
-					if cp, e2 := strconv.ParseFloat(co.AvgPx, 64); e2 == nil && cp > 0 {
-						exP = cp
-					}
-					closeActiveSlot(sl, exP, ltPos, lb, la, fx, actSp.MakerFeeBp, "ZERO_FEE_4LEG_TP", now)
-					stratCoolUntilMS.Store(now.Add(2 * time.Second).UnixMilli())
-				} else {
-					exQ, _ := strconv.ParseFloat(co.ExecQty, 64)
-					if exQ >= m.MinB && exQ < sl.Qty-m.MinB*0.5 {
-						closeLtSide, ltClosePx := "BID", roundTo(la*1.004, m.PxDec)
-						if sl.BnSide == "SELL" {
-							closeLtSide, ltClosePx = "ASK", roundTo(lb*0.996, m.PxDec)
-						}
-						placeLtHedgeIOC(actSp.Sym, closeLtSide, ltClosePx, exQ, true)
-						remQ := roundTo(sl.Qty-exQ, actSp.QDec)
-						if remQ >= m.MinB {
-							dnMu.Lock()
-							activeSlot.Qty = remQ
-							activeSlot.State = "HEDGED"
-							dnMu.Unlock()
-							return
-						}
-					} else if exQ >= sl.Qty-m.MinB*0.5 {
-						if cp, e2 := strconv.ParseFloat(co.AvgPx, 64); e2 == nil && cp > 0 {
-							exP = cp
-						}
-						closeActiveSlot(sl, exP, ltPos, lb, la, fx, actSp.MakerFeeBp, "ZERO_FEE_4LEG_TP", now)
-						stratCoolUntilMS.Store(now.Add(2 * time.Second).UnixMilli())
-						return
-					}
-					dnMu.Lock()
-					activeSlot.State = "HEDGED"
-					dnMu.Unlock()
-				}
-			}
-		}
-	}
-}
-
-func scanAndOpenSlot(now time.Time, sharedAvail float64, specsSnap []DnSpec, lastScanLog *time.Time) {
-	if sharedAvail < 15.0 {
-		return
-	}
-	var bestSp DnSpec
-	bestBnSide, bestLtSide := "", ""
-	bestRawEdge, bestDisloc, bestBnPx, bestLtPx, bestFx, bestUsdtMid, bestBtcMid, bestEmaBps := -999.0, -999.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0
-
-	for _, sp := range specsSnap {
-		if sp.Quote != "USDC" {
-			continue
-		}
-		switch sp.Sym {
-		case "BTC", "ETH", "SOL", "XRP", "BNB", "ZEC":
-			continue
-		}
-		dnMu.Lock()
-		fx, okFx := dnQuoteFxToUsdtLocked(sp.Quote, now)
-		blocked := dnBlockedSym[sp.BnSym]
-		db := dnBooks[sp.BnSym]
-		var bb, ba, emaBps, jumpBps float64
-		var wTicks int
-		var bTS time.Time
-		if db != nil {
-			bb, ba = db.Bid, db.Ask
-			emaBps, wTicks, bTS, jumpBps = db.EmaBps, db.WarmTicks, db.TS, db.LastJumpBps
-		}
-		dnMu.Unlock()
-		if !okFx || blocked || bb <= 0 || ba <= bb || wTicks < 15 || now.Sub(bTS) > 15*time.Second || math.Abs(emaBps) > 25.0 || math.Abs(jumpBps) > 1.8 {
-			continue
-		}
-		uMid, bMid, uJump, bJump := leadMidAndJumps(sp.Sym, now)
-		if math.Abs(uJump) > 1.5 || math.Abs(bJump) > 1.2 {
-			continue
-		}
-		m, okM := markets[sp.Sym]
-		st := mktStates[sp.Sym]
-		if !okM || st == nil {
-			continue
-		}
-		st.mu.Lock()
-		lb, la, lbBand, laBand, ltPos, lTS := st.ltBid, st.ltAsk, st.ltBidBandUsd, st.ltAskBandUsd, st.pos, st.lastBookTS
-		st.mu.Unlock()
-		if math.Abs(ltPos) >= m.MinB || lb <= 0 || la <= lb || now.Sub(lTS) > 15*time.Second {
-			continue
-		}
-		ltSp := (la - lb) / lb * 10000.0
-		bnSp := (ba - bb) / bb * 10000.0
-		if ltSp > 7.0 || bnSp > 5.5 {
-			continue
-		}
-
-		// Side A: BUY Maker Binance + SELL IOC Lighter (recessed >=1.5bp from BnAsk, 1.5bp LT band depth >= $100)
-		maxBuy := math.Floor((ba*(1.0-0.00015))/sp.Tick+1e-9) * sp.Tick
-		bnBuyPx := roundTo(math.Min(bb, maxBuy), sp.PxDec)
-		bnBuyUsd := bnBuyPx * fx
-		bboBuyUsd := bb * fx
-		rawEdgeA := (lb - bnBuyUsd) / bnBuyUsd * 10000.0
-		dislocA := rawEdgeA - emaBps
-		bboDislocA := ((lb - bboBuyUsd) / bboBuyUsd * 10000.0) - emaBps
-		if lbBand >= 100.0 && bboDislocA >= 5.50 && rawEdgeA >= 3.00 && dislocA >= 6.50 && dislocA > bestDisloc {
-			bestDisloc, bestRawEdge, bestSp, bestBnSide, bestLtSide, bestBnPx, bestLtPx, bestFx, bestUsdtMid, bestBtcMid, bestEmaBps =
-				dislocA, rawEdgeA, sp, "BUY", "ASK", bnBuyPx, lb, fx, uMid, bMid, emaBps
-		}
-
-		// Side B: SELL Maker Binance + BUY IOC Lighter (recessed >=1.5bp from BnBid, 1.5bp LT band depth >= $100)
-		minSell := math.Ceil((bb*(1.0+0.00015))/sp.Tick-1e-9) * sp.Tick
-		bnSellPx := roundTo(math.Max(ba, minSell), sp.PxDec)
-		bnSellUsd := bnSellPx * fx
-		bboSellUsd := ba * fx
-		rawEdgeB := (bnSellUsd - la) / bnSellUsd * 10000.0
-		dislocB := rawEdgeB + emaBps
-		bboDislocB := ((bboSellUsd - la) / bboSellUsd * 10000.0) + emaBps
-		if laBand >= 100.0 && bboDislocB >= 5.50 && rawEdgeB >= 3.00 && dislocB >= 6.50 && dislocB > bestDisloc {
-			bestDisloc, bestRawEdge, bestSp, bestBnSide, bestLtSide, bestBnPx, bestLtPx, bestFx, bestUsdtMid, bestBtcMid, bestEmaBps =
-				dislocB, rawEdgeB, sp, "SELL", "BID", bnSellPx, la, fx, uMid, bMid, emaBps
-		}
-	}
-
-	if now.Sub(*lastScanLog) >= 12*time.Second && bestSp.BnSym != "" {
-		*lastScanLog = now
-		fmt.Printf("[DN_SCAN] best=%s bnMaker=%s->ltZeroFee=%s netAfterFee=%+.2fbp (disloc=%+.2fbp fee=0.0bp clip=$%.0f) bnPx=%.5f ltPx=%.5f\n",
-			bestSp.BnSym, bestBnSide, bestLtSide, bestRawEdge, bestDisloc, ClipUSD, bestBnPx, bestLtPx)
-	}
-	if bestSp.BnSym == "" || bestRawEdge < 3.00 || bestDisloc < 6.50 {
-		return
-	}
-	m := markets[bestSp.Sym]
-	ensureLtSubscribed(m.ID)
-	ensureBnLeverage(bestSp.BnSym)
-	commonStep := math.Max(bestSp.Step, math.Pow10(-m.SzDec))
-	rawQty := math.Floor((ClipUSD/(bestBnPx*bestFx))/commonStep+1e-9) * commonStep
-	qtyDec := bestSp.QDec
-	if m.SzDec < qtyDec {
-		qtyDec = m.SzDec
-	}
-	qty := roundTo(rawQty, qtyDec)
-	if qty*(bestBnPx*bestFx) < math.Max(12.0, bestSp.MinNot) || qty < m.MinB {
-		return
-	}
-	p := url.Values{}
-	p.Set("symbol", bestSp.BnSym)
-	p.Set("side", bestBnSide)
-	p.Set("type", "LIMIT")
-	p.Set("timeInForce", "GTX")
-	p.Set("quantity", strconv.FormatFloat(qty, 'f', bestSp.QDec, 64))
-	p.Set("price", strconv.FormatFloat(bestBnPx, 'f', bestSp.PxDec, 64))
-	sc, body, err := bnSignReq("POST", "fapi.binance.com", "/fapi/v1/order", p)
-	if err == nil && sc == 200 {
-		var or struct {
-			OrderID int64  `json:"orderId"`
-			Status  string `json:"status"`
-		}
-		if json.Unmarshal(body, &or) == nil && or.OrderID > 0 && or.Status != "EXPIRED" && or.Status != "CANCELED" {
-			tid := now.UnixMilli()
-			dnMu.Lock()
-			activeSlot = DnSlot{
-				State: "BN_ENTRY_OPEN", Spec: bestSp, BnSide: bestBnSide, LtSide: bestLtSide,
-				EntryOid: or.OrderID, Qty: qty, EntryBnPx: bestBnPx, EntryFx: bestFx,
-				EntryFeeBp: bestSp.MakerFeeBp, TradeID: tid, OpenedAt: now, RefLtPx: bestLtPx,
-				RefUsdtMid: bestUsdtMid, RefBtcMid: bestBtcMid, EntryEmaBps: bestEmaBps,
-			}
-			dnMu.Unlock()
-			fmt.Printf("[DN_ZERO_FEE_MAKER id=%d sym=%s bn=%s qty=%.4f @ %.5f raw=%+.2fbp disloc=%+.2fbp fee=0.0bp]\n",
-				tid, bestSp.BnSym, bestBnSide, qty, bestBnPx, bestRawEdge, bestDisloc)
-		}
-	} else if strings.Contains(string(body), "-4411") {
-		dnMu.Lock()
-		dnBlockedSym[bestSp.BnSym] = true
-		dnMu.Unlock()
-	}
-}
-
-func runZeroFeeKISS() {
-	time.Sleep(5 * time.Second)
-	if remotePaused.Load() || !setupBnUsdcMargin() {
-		return
-	}
-	emitBnAuditLine()
-	dnMu.Lock()
-	activeSlot = DnSlot{State: "IDLE"}
-	dnMu.Unlock()
-
-	tick := time.NewTicker(250 * time.Millisecond)
-	defer tick.Stop()
-	lastScanLog := time.Now()
-	lastMarginPoll := time.Now()
-
-	for {
-		select {
-		case <-engineWakeCh:
-		case <-tick.C:
-		}
-		if remotePaused.Load() || breakerTripped.Load() {
-			return
-		}
-		now := time.Now()
-		if now.Sub(lastMarginPoll) >= 5*time.Second {
-			lastMarginPoll = now
-			go func() { _, _, _, _ = fetchBnAccountMargin() }()
-		}
-		processActiveSlot(now)
-		dnMu.Lock()
-		isIdle := activeSlot.State == "" || activeSlot.State == "IDLE"
-		specsSnap := dnSpecs
-		sharedAvail := dnSharedAvail
-		dnMu.Unlock()
-		if isIdle && now.UnixMilli() >= stratCoolUntilMS.Load() {
-			scanAndOpenSlot(now, sharedAvail, specsSnap, &lastScanLog)
-		}
-	}
 }
 
 func main() {
@@ -2976,7 +2118,6 @@ func main() {
 	discoverAsterMarkets()
 
 	go runTxWorker()
-	go runTxWS()
 
 	// CRITICAL SAFETY: Even when booting in PAUSED mode (/tmp/lighter_pause.flag), ALWAYS verify & sweep Lighter + Binance + Aster 100% flat first!
 	if _, err := os.Stat(PauseFlagPath); err == nil {
@@ -3008,7 +2149,8 @@ func main() {
 		flattenBnDnAndSweep()
 		flattenAsterAllSync()
 	} else {
-		fmt.Println("[HOT_RELOAD] Adopted active 1:1 hedged positions seamlessly without flattening or pausing!")
+		flattenAsterAllSync()
+		fmt.Println("[HOT_RELOAD] Adopted active 1:1 BN_USDC hedged positions seamlessly; swept legacy Aster flat!")
 	}
 	emitBnAuditLine()
 

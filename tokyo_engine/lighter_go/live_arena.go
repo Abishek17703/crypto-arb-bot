@@ -411,19 +411,18 @@ func initLiveMicroArena() {
 			syms:         []string{"UNI", "HYPE", "ENA", "NEAR", "WLD", "AAVE", "SUI", "ARB", "AVAX", "TRUMP", "TIA", "CRV", "ETHFI", "LINK", "DOGE", "XRP"},
 		},
 		{
-			id:             "LIVE_S1_ASTER_RWA_MAKER",
-			forwardID:      "S1_ASTER_RWA_MAKER_FIRST",
-			name:           "S1: 0% Aster RWA Equities Maker -> 0% Lighter IOC",
-			venueDesc:      "Aster RWA 0% GTX <-> LT #770015 0% IOC (0.00bp 4-Leg Fee!)",
-			desc:           "US Equity Slot #4: 0% GTX Maker on Aster RWA Equities (>=4.5bp positive raw spread) -> 0% Lighter IOC hedge -> 0% Aster Maker exit.",
-			peerVenue:      "ASTER_RWA",
-			peerMakerFirst: true,
-			tier3Clip:      35.0,
-			startCash:      50.0,
-			minRawEdgeBp:   4.5,
-			entryBp:        4.5,
-			exitBp:         2.5,
-			syms:           []string{"NVDA", "AAPL", "TSLA", "QQQ", "SPY", "META", "COIN", "MSTR"},
+			id:           "LIVE_S2_LT_BN_FAST_ROTATE",
+			forwardID:    "S2_LT_BN_FAST_ROTATE",
+			name:         "S2: 0% Lighter Maker -> BN USDC-M Fast Rotate (4.00bp Fee)",
+			venueDesc:    "LT #770015 0% M -> BN USDC-M (Fast 6m Step-Down)",
+			desc:         "Slot #4: 0% Lighter Maker (>=6.5bp positive raw spread) -> <8ms BN USDC-M hedge -> 0% BN Maker exit.",
+			peerVenue:    "BN_USDC",
+			tier3Clip:    55.0,
+			startCash:    50.0,
+			minRawEdgeBp: 2.5,
+			entryBp:      6.5,
+			exitBp:       2.5,
+			syms:         []string{"UNI", "HYPE", "ENA", "NEAR", "WLD", "AAVE", "SUI", "ARB", "AVAX", "TRUMP", "TIA", "CRV", "ETHFI", "LINK", "DOGE", "XRP"},
 		},
 	}
 
@@ -597,10 +596,9 @@ func loadLiveArenaState() {
 		rt.ExitPlaced = time.Now()
 		rt.RotatedNote = sn.RotatedNote
 	}
-	if len(saved.RecentFills) > 0 {
-		liveFills = make([]LiveFillAudit, len(saved.RecentFills))
-		for i := range saved.RecentFills {
-			liveFills[i] = saved.RecentFills[len(saved.RecentFills)-1-i]
+	for i := len(saved.RecentFills) - 1; i >= 0; i-- {
+		if liveStrats[saved.RecentFills[i].StratID] != nil {
+			liveFills = append(liveFills, saved.RecentFills[i])
 		}
 	}
 	fmt.Printf("[%s] Hot-reloaded tiered live arena state seamlessly (uptime %.1fm)\n", LiveArenaVer, float64(time.Now().UnixMilli()-liveBootMs)/60000.0)
@@ -964,7 +962,8 @@ func closeLtLegGuaranteedSync(sym string, expectedPos float64, lb, la float64) (
 	recordLtTxLocked(time.Now().UnixMilli())
 	liveMu.Unlock()
 
-	placeLtHedgeIOC(sym, closeSide, closePx, qty, true)
+	closeCOI, _ := placeLtHedgeIOC(sym, closeSide, closePx, qty, true)
+	_ = closeCOI
 
 	cDeadline := time.Now().Add(950 * time.Millisecond)
 	restChecked := false
@@ -1004,7 +1003,7 @@ func closeLtLegGuaranteedSync(sym string, expectedPos float64, lb, la float64) (
 		liveMu.Lock()
 		recordLtTxLocked(time.Now().UnixMilli())
 		liveMu.Unlock()
-		placeLtHedgeIOC(sym, rSide, rPx, math.Abs(remPos), true)
+		_, _ = placeLtHedgeIOC(sym, rSide, rPx, math.Abs(remPos), true)
 		time.Sleep(550 * time.Millisecond)
 		_, _ = fetchLtPosREST(sym)
 	}
@@ -1322,8 +1321,11 @@ func stepLiveSlot(rt *LiveSlotRuntime, now time.Time) {
 				iocPx = roundTo(ra*1.0025, m.PxDec)
 			}
 			tIoc0 := time.Now()
-			placeLtHedgeIOC(rt.Sym, rt.LtSide, iocPx, execQ, false)
-			ltPos, ltAvg := waitLtPositionFill(rt.Sym, m.MinB, 1450*time.Millisecond)
+			iocCOI, iocSent := placeLtHedgeIOC(rt.Sym, rt.LtSide, iocPx, execQ, false)
+			var ltPos, ltAvg float64
+			if iocSent {
+				ltPos, ltAvg = waitLtPositionFill(rt.Sym, iocCOI, m.MinB, 3200*time.Millisecond)
+			}
 			ltLatMs := time.Since(tIoc0).Milliseconds()
 
 			// 850ms Unhedged Fallback: if Lighter IOC missed due to speed-bump book move, immediately flatten BN/Aster leg (<8ms)!
@@ -2104,8 +2106,11 @@ func stepLiveSlot(rt *LiveSlotRuntime, now time.Time) {
 		liveMu.Unlock()
 
 		tIoc0 := time.Now()
-		placeLtHedgeIOC(gSym, gLtSide, iocLimitPx, gQty, false)
-		ltPos, ltAvg := waitLtPositionFill(gSym, m.MinB, 950*time.Millisecond)
+		iocCOI, iocSent := placeLtHedgeIOC(gSym, gLtSide, iocLimitPx, gQty, false)
+		var ltPos, ltAvg float64
+		if iocSent {
+			ltPos, ltAvg = waitLtPositionFill(gSym, iocCOI, m.MinB, 1800*time.Millisecond)
+		}
 		ltIocLatMs := time.Since(tIoc0).Milliseconds()
 		if math.Abs(ltPos) < m.MinB {
 			liveMu.Lock()
@@ -3155,7 +3160,7 @@ func runLiveMicroArenaLoop() {
 	// Staggered Lighter REST BBO resync (1 coin / 950ms = ~15s cycle across universe, 0 TX quota!) so WS books NEVER hold stale un-deleted levels:
 	go func() {
 		idx := 0
-		syms := []string{"UNI", "HYPE", "ENA", "NEAR", "WLD", "AAVE", "SUI", "ARB", "AVAX", "TRUMP", "TIA", "CRV", "ETHFI", "LINK", "DOGE", "XRP", "NVDA", "TSLA", "COIN", "HOOD", "SPY", "QQQ"}
+		syms := []string{"UNI", "HYPE", "ENA", "NEAR", "WLD", "AAVE", "SUI", "ARB", "AVAX", "TRUMP", "TIA", "CRV", "ETHFI", "LINK", "DOGE", "XRP"}
 		t := time.NewTicker(950 * time.Millisecond)
 		defer t.Stop()
 		for {
