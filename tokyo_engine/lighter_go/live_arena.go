@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"math"
-	"net/http"
 	"net/url"
 	"os"
 	"strconv"
