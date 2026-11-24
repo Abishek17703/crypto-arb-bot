@@ -26,6 +26,10 @@ LIGHTER_BASE = "https://mainnet.zklighter.elliot.ai"
 LIGHTER_GO_BIN = "/opt/crypto-arb-bot/lighter_go_bot"
 LIGHTER_GO_URL = "https://github.com/Abishek17703/crypto-arb-bot/releases/download/lighter-go-latest/lighter_go_bot"
 ARENA_GO_BIN = "/opt/crypto-arb-bot/arena_go"
+TICK_GO_BIN = "/opt/crypto-arb-bot/tick_collector_go"
+TICK_DIR = "/opt/crypto-arb-bot/ticks"
+TICK_LOG_PATH = "/tmp/tick_collector.log"
+TICK_MANIFEST_KEY = "ticks/manifest.json"
 ARENA_JSON_PATH = "/tmp/forward_arena.json"
 LIVE_ARENA_JSON_PATH = "/tmp/live_arena.json"
 ASTER_ACCT_JSON_PATH = "/tmp/aster_acct.json"
@@ -244,6 +248,70 @@ def ensure_arena_running():
             pass
 
 
+def ensure_tick_collector_running():
+    if not os.path.exists(TICK_GO_BIN):
+        return
+    r = subprocess.run(["pgrep", "-f", "/opt/crypto-arb-bot/tick_collector_go"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if r.returncode != 0:
+        try:
+            os.makedirs(TICK_DIR, exist_ok=True)
+            with open(TICK_LOG_PATH, "a", encoding="utf-8", errors="replace") as tf:
+                subprocess.Popen([TICK_GO_BIN], stdout=tf, stderr=subprocess.STDOUT)
+        except Exception:
+            pass
+
+
+def sync_ticks_to_s3(s3, uploaded_files, lock):
+    if not lock.acquire(blocking=False):
+        return
+    try:
+        if not os.path.isdir(TICK_DIR):
+            return
+        files = sorted(
+            f for f in os.listdir(TICK_DIR)
+            if f.endswith(".ndjson.gz") and os.path.isfile(os.path.join(TICK_DIR, f))
+        )
+        chunks = []
+        base_url = f"https://{S3_BUCKET}.s3.{AWS_REGION}.amazonaws.com/ticks"
+        for fname in files:
+            fpath = os.path.join(TICK_DIR, fname)
+            size = os.path.getsize(fpath)
+            if size <= 20:
+                continue
+            if fname not in uploaded_files:
+                with open(fpath, "rb") as fh:
+                    s3.put_object(
+                        Bucket=S3_BUCKET,
+                        Key=f"ticks/{fname}",
+                        Body=fh.read(),
+                        ContentType="application/gzip",
+                    )
+                uploaded_files.add(fname)
+            chunks.append({
+                "file": fname,
+                "url": f"{base_url}/{fname}",
+                "bytes": size,
+            })
+        status_obj = read_json_safe(os.path.join(TICK_DIR, "collector_status.json"), {})
+        manifest = {
+            "updatedAtMs": int(time.time() * 1000),
+            "collectorStatus": status_obj,
+            "chunkCount": len(chunks),
+            "chunks": chunks[-576:],
+        }
+        s3.put_object(
+            Bucket=S3_BUCKET,
+            Key=TICK_MANIFEST_KEY,
+            Body=json.dumps(manifest, separators=(",", ":")).encode("utf-8"),
+            ContentType="application/json",
+            CacheControl="no-store, no-cache, must-revalidate, max-age=0",
+        )
+    except Exception as e:
+        append_log(f"[TICK_S3_ERR] {e}")
+    finally:
+        lock.release()
+
+
 def stop_go_bot_gracefully():
     write_flag(True)
     deadline = time.time() + 12.0
@@ -437,6 +505,9 @@ def main():
     last_s3_push = 0.0
     last_pause_poll = 0.0
     last_proc_chk = 0.0
+    last_tick_sync = 0.0
+    uploaded_tick_files = set()
+    tick_sync_lock = threading.Lock()
 
     while True:
         now = time.time()
@@ -465,6 +536,7 @@ def main():
             if now - last_proc_chk >= 5.0:
                 last_proc_chk = now
                 ensure_arena_running()
+                ensure_tick_collector_running()
                 if not state["user_paused"] and os.path.exists(PAUSE_FLAG_PATH) and not is_go_bot_running():
                     state["user_paused"] = True
                     append_log("[TELEMETRY] Detected local pause flag exit from Go engine; keeping paused.")
@@ -475,6 +547,14 @@ def main():
                     and not state["boot_lock"].locked()
                 ):
                     threading.Thread(target=boot_go_bot, args=(state,), daemon=True).start()
+
+            if now - last_tick_sync >= 15.0:
+                last_tick_sync = now
+                threading.Thread(
+                    target=sync_ticks_to_s3,
+                    args=(s3, uploaded_tick_files, tick_sync_lock),
+                    daemon=True,
+                ).start()
 
             if now - last_bn_poll >= 2.0:
                 last_bn_poll = now

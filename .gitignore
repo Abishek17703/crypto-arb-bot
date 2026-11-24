@@ -6,3 +6,4 @@ telemetry.json
 AGENTS.md
 _legacy_archive_do_not_access/
 .agent/
+research/tick_cache/
