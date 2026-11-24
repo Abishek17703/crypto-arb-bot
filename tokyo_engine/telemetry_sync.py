@@ -261,7 +261,7 @@ def ensure_tick_collector_running():
             pass
 
 
-def sync_ticks_to_s3(s3, uploaded_files, lock):
+def sync_ticks_to_s3(s3, uploaded_files, lock, state):
     if not lock.acquire(blocking=False):
         return
     try:
@@ -272,24 +272,32 @@ def sync_ticks_to_s3(s3, uploaded_files, lock):
             if f.endswith(".ndjson.gz") and os.path.isfile(os.path.join(TICK_DIR, f))
         )
         chunks = []
-        base_url = f"https://{S3_BUCKET}.s3.{AWS_REGION}.amazonaws.com/ticks"
         for fname in files:
             fpath = os.path.join(TICK_DIR, fname)
             size = os.path.getsize(fpath)
             if size <= 20:
                 continue
+            s3_key = f"ticks/{fname}"
             if fname not in uploaded_files:
                 with open(fpath, "rb") as fh:
                     s3.put_object(
                         Bucket=S3_BUCKET,
-                        Key=f"ticks/{fname}",
+                        Key=s3_key,
                         Body=fh.read(),
                         ContentType="application/gzip",
                     )
                 uploaded_files.add(fname)
+            try:
+                signed_url = s3.generate_presigned_url(
+                    "get_object",
+                    Params={"Bucket": S3_BUCKET, "Key": s3_key},
+                    ExpiresIn=604800,
+                )
+            except Exception:
+                signed_url = f"https://{S3_BUCKET}.s3.{AWS_REGION}.amazonaws.com/{s3_key}"
             chunks.append({
                 "file": fname,
-                "url": f"{base_url}/{fname}",
+                "url": signed_url,
                 "bytes": size,
             })
         status_obj = read_json_safe(os.path.join(TICK_DIR, "collector_status.json"), {})
@@ -297,8 +305,9 @@ def sync_ticks_to_s3(s3, uploaded_files, lock):
             "updatedAtMs": int(time.time() * 1000),
             "collectorStatus": status_obj,
             "chunkCount": len(chunks),
-            "chunks": chunks[-576:],
+            "chunks": chunks[-288:],
         }
+        state["tick_manifest"] = manifest
         s3.put_object(
             Bucket=S3_BUCKET,
             Key=TICK_MANIFEST_KEY,
@@ -552,7 +561,7 @@ def main():
                 last_tick_sync = now
                 threading.Thread(
                     target=sync_ticks_to_s3,
-                    args=(s3, uploaded_tick_files, tick_sync_lock),
+                    args=(s3, uploaded_tick_files, tick_sync_lock, state),
                     daemon=True,
                 ).start()
 
@@ -620,6 +629,7 @@ def main():
                     "lighterLog": read_log_tail(8000),
                     "forwardArena": arena_obj,
                     "liveArena": live_arena_obj,
+                    "tickCollector": state.get("tick_manifest"),
                     "pauseControlUrl": pause_url,
                     "pauseControlPost": pause_post,
                     "hftTest": {

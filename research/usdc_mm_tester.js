@@ -19,7 +19,7 @@ const https = require('https');
 const readline = require('readline');
 
 const DEFAULT_MANIFEST_URL =
-  'https://crypto-arb-bot-tokyo-bin-767579108352.s3.ap-northeast-1.amazonaws.com/ticks/manifest.json';
+  'https://crypto-arb-bot-tokyo-bin-767579108352.s3.ap-northeast-1.amazonaws.com/live-telemetry.json';
 
 const TICK_SIZE = {
   BTC: 0.1,
@@ -100,7 +100,8 @@ async function resolveInputFiles(cfg) {
 
   fs.mkdirSync(cfg.cacheDir, { recursive: true });
   const raw = await httpGetBuffer(cfg.manifestUrl);
-  const manifest = JSON.parse(raw.toString('utf8'));
+  const parsed = JSON.parse(raw.toString('utf8'));
+  const manifest = parsed.tickCollector || parsed;
   const chunks = Array.isArray(manifest.chunks) ? manifest.chunks : [];
   const sel = cfg.last > 0 ? chunks.slice(-cfg.last) : chunks;
   const files = [];
