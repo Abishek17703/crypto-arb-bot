@@ -30,6 +30,7 @@ type wsEnvelope struct {
 }
 
 type rawBookTicker struct {
+	EventType string `json:"e"`
 	EventTime int64  `json:"E"`
 	TransTime int64  `json:"T"`
 	Symbol    string `json:"s"`
@@ -40,6 +41,7 @@ type rawBookTicker struct {
 }
 
 type rawAggTrade struct {
+	EventType    string `json:"e"`
 	EventTime    int64  `json:"E"`
 	TradeTime    int64  `json:"T"`
 	Symbol       string `json:"s"`
@@ -456,7 +458,7 @@ func main() {
 				}
 				bErr, tErr := m.getErrs()
 				st := collectorStatus{
-					Version:         "TICK-v1.2-SHARDED-WS",
+					Version:         "TICK-v1.3-LIVE",
 					StartedAtMs:     startedAt.UnixMilli(),
 					UpdatedAtMs:     time.Now().UnixMilli(),
 					UptimeSec:       int64(up),
