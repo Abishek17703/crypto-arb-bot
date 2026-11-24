@@ -5,7 +5,6 @@ import (
 	"compress/gzip"
 	"encoding/json"
 	"fmt"
-	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -81,7 +80,8 @@ type collectorStatus struct {
 	EventsPerSec    float64  `json:"eventsPerSec"`
 	AvgWsLagMs      float64  `json:"avgWsLagMs"`
 	Reconnects      int64    `json:"reconnects"`
-	LastErr         string   `json:"lastErr,omitempty"`
+	BookErr         string   `json:"bookErr,omitempty"`
+	TradeErr        string   `json:"tradeErr,omitempty"`
 	CompletedChunks int64    `json:"completedChunks"`
 	ActiveFile      string   `json:"activeFile"`
 	LastEventRxMs   int64    `json:"lastEventRxMs"`
@@ -234,23 +234,20 @@ func envInt(key string, def int) int {
 	return def
 }
 
-func buildSymbolsAndURLs() ([]string, string, string) {
+func buildSymbols() ([]string, map[string]bool, []string) {
 	var syms []string
-	var bookStreams []string
+	want := make(map[string]bool)
 	var tradeStreams []string
 	for _, base := range baseCoins {
 		for _, quote := range []string{"USDC", "USDT"} {
 			sym := base + quote
 			syms = append(syms, sym)
-			low := strings.ToLower(sym)
-			bookStreams = append(bookStreams, low+"@bookTicker")
-			tradeStreams = append(tradeStreams, low+"@aggTrade")
+			want[sym] = true
+			tradeStreams = append(tradeStreams, strings.ToLower(sym)+"@aggTrade")
 		}
 	}
 	sort.Strings(syms)
-	bookURL := "wss://fstream.binance.com/public/stream?streams=" + strings.Join(bookStreams, "/")
-	tradeURL := "wss://fstream.binance.com/market/stream?streams=" + strings.Join(tradeStreams, "/")
-	return syms, bookURL, tradeURL
+	return syms, want, tradeStreams
 }
 
 func parseF(s string) float64 {
@@ -267,26 +264,27 @@ type metrics struct {
 	lagSumMs    atomic.Int64
 	lagCount    atomic.Int64
 	errMu       sync.Mutex
-	lastErr     string
+	bookErr     string
+	tradeErr    string
 }
 
-func (m *metrics) setErr(s string) {
+func (m *metrics) setErr(isBook bool, s string) {
 	m.errMu.Lock()
-	m.lastErr = s
+	if isBook {
+		m.bookErr = s
+	} else {
+		m.tradeErr = s
+	}
 	m.errMu.Unlock()
 }
 
-func (m *metrics) getErr() string {
+func (m *metrics) getErrs() (string, string) {
 	m.errMu.Lock()
 	defer m.errMu.Unlock()
-	return m.lastErr
+	return m.bookErr, m.tradeErr
 }
 
-func runStreamWorker(name, wsURL string, cw *chunkWriter, m *metrics, stopCh <-chan struct{}) {
-	dialer := websocket.Dialer{
-		HandshakeTimeout: 10 * time.Second,
-		Proxy:            http.ProxyFromEnvironment,
-	}
+func runStreamWorker(name string, isBook bool, wsURL string, want map[string]bool, cw *chunkWriter, m *metrics, stopCh <-chan struct{}) {
 	backoff := time.Second
 	for {
 		select {
@@ -295,9 +293,9 @@ func runStreamWorker(name, wsURL string, cw *chunkWriter, m *metrics, stopCh <-c
 		default:
 		}
 
-		conn, _, err := dialer.Dial(wsURL, nil)
+		conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
 		if err != nil {
-			m.setErr(name + " dial: " + err.Error())
+			m.setErr(isBook, name+" dial: "+err.Error())
 			m.reconnects.Add(1)
 			select {
 			case <-stopCh:
@@ -329,7 +327,7 @@ func runStreamWorker(name, wsURL string, cw *chunkWriter, m *metrics, stopCh <-c
 			_ = conn.SetReadDeadline(time.Now().Add(30 * time.Second))
 			_, msg, err := conn.ReadMessage()
 			if err != nil {
-				m.setErr(name + " read: " + err.Error())
+				m.setErr(isBook, name+" read: "+err.Error())
 				m.reconnects.Add(1)
 				break
 			}
@@ -338,9 +336,9 @@ func runStreamWorker(name, wsURL string, cw *chunkWriter, m *metrics, stopCh <-c
 			if err := json.Unmarshal(msg, &env); err != nil {
 				continue
 			}
-			if strings.HasSuffix(env.Stream, "@bookTicker") {
+			if env.Stream == "!bookTicker" || strings.HasSuffix(env.Stream, "@bookTicker") {
 				var bt rawBookTicker
-				if json.Unmarshal(env.Data, &bt) != nil {
+				if json.Unmarshal(env.Data, &bt) != nil || !want[bt.Symbol] {
 					continue
 				}
 				evMs := bt.EventTime
@@ -372,7 +370,7 @@ func runStreamWorker(name, wsURL string, cw *chunkWriter, m *metrics, stopCh <-c
 				}
 			} else if strings.HasSuffix(env.Stream, "@aggTrade") {
 				var at rawAggTrade
-				if json.Unmarshal(env.Data, &at) != nil {
+				if json.Unmarshal(env.Data, &at) != nil || !want[at.Symbol] {
 					continue
 				}
 				evMs := at.EventTime
@@ -405,6 +403,7 @@ func runStreamWorker(name, wsURL string, cw *chunkWriter, m *metrics, stopCh <-c
 		}
 		close(doneRead)
 		_ = conn.Close()
+		time.Sleep(time.Second)
 	}
 }
 
@@ -422,7 +421,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	syms, bookURL, tradeURL := buildSymbolsAndURLs()
+	syms, want, tradeStreams := buildSymbols()
 	startedAt := time.Now()
 	m := &metrics{}
 
@@ -455,8 +454,9 @@ func main() {
 				if lc > 0 {
 					avgLag = float64(m.lagSumMs.Load()) / float64(lc)
 				}
+				bErr, tErr := m.getErrs()
 				st := collectorStatus{
-					Version:         "TICK-v1.1-SPLIT-WS",
+					Version:         "TICK-v1.2-SHARDED-WS",
 					StartedAtMs:     startedAt.UnixMilli(),
 					UpdatedAtMs:     time.Now().UnixMilli(),
 					UptimeSec:       int64(up),
@@ -466,7 +466,8 @@ func main() {
 					EventsPerSec:    float64(tot) / up,
 					AvgWsLagMs:      avgLag,
 					Reconnects:      m.reconnects.Load(),
-					LastErr:         m.getErr(),
+					BookErr:         bErr,
+					TradeErr:        tErr,
 					CompletedChunks: cw.chunksDone.Load(),
 					ActiveFile:      cw.ActiveFile(),
 					LastEventRxMs:   m.lastEventRx.Load(),
@@ -483,18 +484,29 @@ func main() {
 		}
 	}()
 
-	fmt.Printf("[TICK_COLLECTOR] starting v1.1 dir=%s rotate=%ds symbols=%d\n", tickDir, rotateSec, len(syms))
+	fmt.Printf("[TICK_COLLECTOR] starting v1.2 dir=%s rotate=%ds symbols=%d\n", tickDir, rotateSec, len(syms))
 
 	var wg sync.WaitGroup
-	wg.Add(2)
+	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		runStreamWorker("BOOK", bookURL, cw, m, stopCh)
+		runStreamWorker("BOOK", true, "wss://fstream.binance.com/public/stream?streams=!bookTicker", want, cw, m, stopCh)
 	}()
-	go func() {
-		defer wg.Done()
-		runStreamWorker("TRADE", tradeURL, cw, m, stopCh)
-	}()
+
+	for i := 0; i < len(tradeStreams); i += 10 {
+		end := i + 10
+		if end > len(tradeStreams) {
+			end = len(tradeStreams)
+		}
+		shardURL := "wss://fstream.binance.com/market/stream?streams=" + strings.Join(tradeStreams[i:end], "/")
+		shardName := fmt.Sprintf("TRADE_%d", i/10)
+		wg.Add(1)
+		go func(n, u string) {
+			defer wg.Done()
+			runStreamWorker(n, false, u, want, cw, m, stopCh)
+		}(shardName, shardURL)
+		time.Sleep(200 * time.Millisecond)
+	}
 
 	wg.Wait()
 	cw.Close()
