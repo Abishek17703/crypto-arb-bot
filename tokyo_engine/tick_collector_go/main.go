@@ -81,6 +81,7 @@ type collectorStatus struct {
 	EventsPerSec    float64  `json:"eventsPerSec"`
 	AvgWsLagMs      float64  `json:"avgWsLagMs"`
 	Reconnects      int64    `json:"reconnects"`
+	LastErr         string   `json:"lastErr,omitempty"`
 	CompletedChunks int64    `json:"completedChunks"`
 	ActiveFile      string   `json:"activeFile"`
 	LastEventRxMs   int64    `json:"lastEventRxMs"`
@@ -233,20 +234,23 @@ func envInt(key string, def int) int {
 	return def
 }
 
-func buildSymbolsAndURL() ([]string, string) {
+func buildSymbolsAndURLs() ([]string, string, string) {
 	var syms []string
-	var streams []string
+	var bookStreams []string
+	var tradeStreams []string
 	for _, base := range baseCoins {
 		for _, quote := range []string{"USDC", "USDT"} {
 			sym := base + quote
 			syms = append(syms, sym)
 			low := strings.ToLower(sym)
-			streams = append(streams, low+"@bookTicker", low+"@aggTrade")
+			bookStreams = append(bookStreams, low+"@bookTicker")
+			tradeStreams = append(tradeStreams, low+"@aggTrade")
 		}
 	}
 	sort.Strings(syms)
-	wsURL := "wss://fstream.binance.com/stream?streams=" + strings.Join(streams, "/")
-	return syms, wsURL
+	bookURL := "wss://fstream.binance.com/public/stream?streams=" + strings.Join(bookStreams, "/")
+	tradeURL := "wss://fstream.binance.com/market/stream?streams=" + strings.Join(tradeStreams, "/")
+	return syms, bookURL, tradeURL
 }
 
 func parseF(s string) float64 {
@@ -254,111 +258,49 @@ func parseF(s string) float64 {
 	return v
 }
 
-func main() {
-	tickDir := strings.TrimSpace(os.Getenv("TICK_DIR"))
-	if tickDir == "" {
-		tickDir = "/opt/crypto-arb-bot/ticks"
-	}
-	rotateSec := envInt("ROTATE_SEC", 300)
-	retainHours := envInt("RETAIN_HOURS", 72)
+type metrics struct {
+	eventsTotal atomic.Int64
+	bookTicks   atomic.Int64
+	aggTrades   atomic.Int64
+	reconnects  atomic.Int64
+	lastEventRx atomic.Int64
+	lagSumMs    atomic.Int64
+	lagCount    atomic.Int64
+	errMu       sync.Mutex
+	lastErr     string
+}
 
-	cw, err := newChunkWriter(tickDir, rotateSec, retainHours)
-	if err != nil {
-		fmt.Printf("[TICK_COLLECTOR] init failed: %v\n", err)
-		os.Exit(1)
-	}
+func (m *metrics) setErr(s string) {
+	m.errMu.Lock()
+	m.lastErr = s
+	m.errMu.Unlock()
+}
 
-	syms, wsURL := buildSymbolsAndURL()
-	startedAt := time.Now()
+func (m *metrics) getErr() string {
+	m.errMu.Lock()
+	defer m.errMu.Unlock()
+	return m.lastErr
+}
 
-	var eventsTotal atomic.Int64
-	var bookTicks atomic.Int64
-	var aggTrades atomic.Int64
-	var reconnects atomic.Int64
-	var lastEventRx atomic.Int64
-	var lagSumMs atomic.Int64
-	var lagCount atomic.Int64
-
-	stopCh := make(chan struct{})
-	sigCh := make(chan os.Signal, 2)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	go func() {
-		<-sigCh
-		fmt.Println("[TICK_COLLECTOR] shutdown signal received, finalizing chunk...")
-		close(stopCh)
-	}()
-
-	// Status & rotation goroutine
-	go func() {
-		statusPath := filepath.Join(tickDir, "collector_status.json")
-		ticker := time.NewTicker(5 * time.Second)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-stopCh:
-				return
-			case <-ticker.C:
-				cw.RotateIfDue()
-				up := time.Since(startedAt).Seconds()
-				if up < 1 {
-					up = 1
-				}
-				tot := eventsTotal.Load()
-				lc := lagCount.Load()
-				avgLag := 0.0
-				if lc > 0 {
-					avgLag = float64(lagSumMs.Load()) / float64(lc)
-				}
-				st := collectorStatus{
-					Version:         "TICK-v1.0-BINANCE-USDC-USDT",
-					StartedAtMs:     startedAt.UnixMilli(),
-					UpdatedAtMs:     time.Now().UnixMilli(),
-					UptimeSec:       int64(up),
-					EventsTotal:     tot,
-					BookTicks:       bookTicks.Load(),
-					AggTrades:       aggTrades.Load(),
-					EventsPerSec:    float64(tot) / up,
-					AvgWsLagMs:      avgLag,
-					Reconnects:      reconnects.Load(),
-					CompletedChunks: cw.chunksDone.Load(),
-					ActiveFile:      cw.ActiveFile(),
-					LastEventRxMs:   lastEventRx.Load(),
-					RotateSec:       rotateSec,
-					Symbols:         syms,
-				}
-				if b, err := json.MarshalIndent(st, "", "  "); err == nil {
-					tmp := statusPath + ".tmp"
-					if os.WriteFile(tmp, b, 0o644) == nil {
-						_ = os.Rename(tmp, statusPath)
-					}
-				}
-			}
-		}
-	}()
-
-	fmt.Printf("[TICK_COLLECTOR] starting dir=%s rotate=%ds symbols=%d\n", tickDir, rotateSec, len(syms))
-
+func runStreamWorker(name, wsURL string, cw *chunkWriter, m *metrics, stopCh <-chan struct{}) {
 	dialer := websocket.Dialer{
 		HandshakeTimeout: 10 * time.Second,
 		Proxy:            http.ProxyFromEnvironment,
 	}
-
 	backoff := time.Second
 	for {
 		select {
 		case <-stopCh:
-			cw.Close()
 			return
 		default:
 		}
 
 		conn, _, err := dialer.Dial(wsURL, nil)
 		if err != nil {
-			fmt.Printf("[TICK_COLLECTOR] dial err: %v (retry %v)\n", err, backoff)
-			reconnects.Add(1)
+			m.setErr(name + " dial: " + err.Error())
+			m.reconnects.Add(1)
 			select {
 			case <-stopCh:
-				cw.Close()
 				return
 			case <-time.After(backoff):
 			}
@@ -368,11 +310,10 @@ func main() {
 			continue
 		}
 		backoff = time.Second
-		fmt.Printf("[TICK_COLLECTOR] connected to Binance Futures combined WS (%d streams)\n", len(syms)*2)
+		fmt.Printf("[TICK_COLLECTOR] %s connected\n", name)
 
 		conn.SetPingHandler(func(appData string) error {
-			_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
-			return conn.WriteMessage(websocket.PongMessage, []byte(appData))
+			return conn.WriteControl(websocket.PongMessage, []byte(appData), time.Now().Add(5*time.Second))
 		})
 
 		doneRead := make(chan struct{})
@@ -385,11 +326,11 @@ func main() {
 		}()
 
 		for {
-			_ = conn.SetReadDeadline(time.Now().Add(20 * time.Second))
+			_ = conn.SetReadDeadline(time.Now().Add(30 * time.Second))
 			_, msg, err := conn.ReadMessage()
 			if err != nil {
-				fmt.Printf("[TICK_COLLECTOR] read err: %v\n", err)
-				reconnects.Add(1)
+				m.setErr(name + " read: " + err.Error())
+				m.reconnects.Add(1)
 				break
 			}
 			rxMs := time.Now().UnixMilli()
@@ -418,14 +359,14 @@ func main() {
 				}
 				if b, err := json.Marshal(rec); err == nil {
 					_ = cw.WriteLine(b)
-					eventsTotal.Add(1)
-					bookTicks.Add(1)
-					lastEventRx.Store(rxMs)
+					m.eventsTotal.Add(1)
+					m.bookTicks.Add(1)
+					m.lastEventRx.Store(rxMs)
 					if evMs > 0 {
 						lag := rxMs - evMs
 						if lag >= -500 && lag <= 5000 {
-							lagSumMs.Add(lag)
-							lagCount.Add(1)
+							m.lagSumMs.Add(lag)
+							m.lagCount.Add(1)
 						}
 					}
 				}
@@ -449,14 +390,14 @@ func main() {
 				}
 				if b, err := json.Marshal(rec); err == nil {
 					_ = cw.WriteLine(b)
-					eventsTotal.Add(1)
-					aggTrades.Add(1)
-					lastEventRx.Store(rxMs)
+					m.eventsTotal.Add(1)
+					m.aggTrades.Add(1)
+					m.lastEventRx.Store(rxMs)
 					if evMs > 0 {
 						lag := rxMs - evMs
 						if lag >= -500 && lag <= 5000 {
-							lagSumMs.Add(lag)
-							lagCount.Add(1)
+							m.lagSumMs.Add(lag)
+							m.lagCount.Add(1)
 						}
 					}
 				}
@@ -465,4 +406,96 @@ func main() {
 		close(doneRead)
 		_ = conn.Close()
 	}
+}
+
+func main() {
+	tickDir := strings.TrimSpace(os.Getenv("TICK_DIR"))
+	if tickDir == "" {
+		tickDir = "/opt/crypto-arb-bot/ticks"
+	}
+	rotateSec := envInt("ROTATE_SEC", 300)
+	retainHours := envInt("RETAIN_HOURS", 72)
+
+	cw, err := newChunkWriter(tickDir, rotateSec, retainHours)
+	if err != nil {
+		fmt.Printf("[TICK_COLLECTOR] init failed: %v\n", err)
+		os.Exit(1)
+	}
+
+	syms, bookURL, tradeURL := buildSymbolsAndURLs()
+	startedAt := time.Now()
+	m := &metrics{}
+
+	stopCh := make(chan struct{})
+	sigCh := make(chan os.Signal, 2)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		<-sigCh
+		fmt.Println("[TICK_COLLECTOR] shutdown signal received, finalizing chunk...")
+		close(stopCh)
+	}()
+
+	go func() {
+		statusPath := filepath.Join(tickDir, "collector_status.json")
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stopCh:
+				return
+			case <-ticker.C:
+				cw.RotateIfDue()
+				up := time.Since(startedAt).Seconds()
+				if up < 1 {
+					up = 1
+				}
+				tot := m.eventsTotal.Load()
+				lc := m.lagCount.Load()
+				avgLag := 0.0
+				if lc > 0 {
+					avgLag = float64(m.lagSumMs.Load()) / float64(lc)
+				}
+				st := collectorStatus{
+					Version:         "TICK-v1.1-SPLIT-WS",
+					StartedAtMs:     startedAt.UnixMilli(),
+					UpdatedAtMs:     time.Now().UnixMilli(),
+					UptimeSec:       int64(up),
+					EventsTotal:     tot,
+					BookTicks:       m.bookTicks.Load(),
+					AggTrades:       m.aggTrades.Load(),
+					EventsPerSec:    float64(tot) / up,
+					AvgWsLagMs:      avgLag,
+					Reconnects:      m.reconnects.Load(),
+					LastErr:         m.getErr(),
+					CompletedChunks: cw.chunksDone.Load(),
+					ActiveFile:      cw.ActiveFile(),
+					LastEventRxMs:   m.lastEventRx.Load(),
+					RotateSec:       rotateSec,
+					Symbols:         syms,
+				}
+				if b, err := json.MarshalIndent(st, "", "  "); err == nil {
+					tmp := statusPath + ".tmp"
+					if os.WriteFile(tmp, b, 0o644) == nil {
+						_ = os.Rename(tmp, statusPath)
+					}
+				}
+			}
+		}
+	}()
+
+	fmt.Printf("[TICK_COLLECTOR] starting v1.1 dir=%s rotate=%ds symbols=%d\n", tickDir, rotateSec, len(syms))
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		runStreamWorker("BOOK", bookURL, cw, m, stopCh)
+	}()
+	go func() {
+		defer wg.Done()
+		runStreamWorker("TRADE", tradeURL, cw, m, stopCh)
+	}()
+
+	wg.Wait()
+	cw.Close()
 }
