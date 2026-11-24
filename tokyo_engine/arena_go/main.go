@@ -26,7 +26,7 @@ const (
 	TargetHourly   = 5.00
 	ArenaOutPath   = "/tmp/forward_arena.json"
 	ArenaStatePath = "/opt/crypto-arb-bot/forward_arena_state.json"
-	ArenaVer       = "ARENA-v7.1-MATCHED"
+	ArenaVer       = "ARENA-v7.2-4BP-DEEP"
 
 	VenueBnUsdc   = "BN_USDC"
 	VenueBnUsdt   = "BN_USDT"
@@ -1429,7 +1429,7 @@ func runCrossVenuePairArbLocked(cfg PairArbCfg, commonQtyDec int, minBase float6
 		if slBp <= 0 {
 			slBp = 75.0
 		}
-		if (heldMs >= 60000 && takerExitBp <= -slBp) || (cfg.MaxHoldMs > 0 && heldMs >= cfg.MaxHoldMs) {
+		if heldMs >= 60000 && takerExitBp <= -slBp {
 			cancelAllMakersForSymLocked(cfg.StratID, cfg.MakerVenue, cfg.MakerSym, nowMs)
 			cancelAllMakersForSymLocked(cfg.StratID, cfg.HedgeVenue, cfg.HedgeSym, nowMs)
 			sM, pxM := "SELL", bM.Bid
@@ -1440,12 +1440,8 @@ func runCrossVenuePairArbLocked(cfg PairArbCfg, commonQtyDec int, minBase float6
 			if posH.Qty < 0 {
 				sH, pxH = "BUY", bH.Ask
 			}
-			closeTag := pfx + "_SL_CLOSE"
-			if takerExitBp > -slBp {
-				closeTag = pfx + "_TIME_CLOSE"
-			}
-			placeTakerLocked(cfg.StratID, cfg.MakerVenue, cfg.MakerSym, sM, math.Abs(posM.Qty), pxM, 25.0, true, closeTag, nowMs)
-			placeTakerLocked(cfg.StratID, cfg.HedgeVenue, cfg.HedgeSym, sH, math.Abs(posH.Qty), pxH, 25.0, true, closeTag, nowMs)
+			placeTakerLocked(cfg.StratID, cfg.MakerVenue, cfg.MakerSym, sM, math.Abs(posM.Qty), pxM, 25.0, true, pfx+"_SL_CLOSE", nowMs)
+			placeTakerLocked(cfg.StratID, cfg.HedgeVenue, cfg.HedgeSym, sH, math.Abs(posH.Qty), pxH, 25.0, true, pfx+"_SL_CLOSE", nowMs)
 			stratCoolMap[cfg.StratID+":COOL:"+cfg.MakerSym] = nowMs + 25000
 			return
 		}
@@ -1812,18 +1808,18 @@ func evalStrategiesLocked(nowMs int64) {
 	// 2. PEAK VOL (Trending Moves): P1_0FEE_IMPULSE_SNIPER
 	runBnLeadLtLagSniperLocked(nowMs)
 
-	// 3. MID VOL + PEAK VOL (Hedged LT 0% <-> BN_USDC with Lighter-First ExitOnMaker = ZERO 3s exit slippage!)
-	bnLiquidSyms := []string{"BTC", "ETH", "SOL", "BNB", "UNI", "HYPE", "ENA", "NEAR", "WLD", "AAVE", "SUI", "ARB", "AVAX", "TRUMP", "TIA", "CRV", "ETHFI", "LINK", "DOGE", "XRP"}
+	// 3. MID VOL + PEAK VOL (Deep-Liquid Coins ONLY: BTC, ETH, SOL, BNB, XRP, DOGE | True 4.0bp Round-Trip Fee via 0% BN Maker Exit + 75bp Emergency Stop!)
+	bnLiquidSyms := []string{"BTC", "ETH", "SOL", "BNB", "XRP", "DOGE"}
 	for _, sym := range bnLiquidSyms {
 		sp := ltSpecs[sym]
-		if sp == nil || sp.BnUsdcSym == "" || (sp.DailyTrades > 0 && sp.DailyTrades < 2000) {
+		if sp == nil || sp.BnUsdcSym == "" {
 			continue
 		}
 		dec := sp.SizeDecimals
 		if sp.BnQtyDec < dec {
 			dec = sp.BnQtyDec
 		}
-		// MID VOL: Fast small-spread turnover ($180 live-matched clips, 120s step-down, 6m hard recycle!)
+		// MID VOL: Fast small-spread turnover (4.0bp fee + >=2.5bp = >=6.5bp raw, 90s step-down, 0% BN Maker Exit!)
 		runCrossVenuePairArbLocked(PairArbCfg{
 			StratID:         "M1_LT_BN_FAST_SMALL",
 			MakerVenue:      VenueLtStd,
@@ -1832,19 +1828,19 @@ func evalStrategiesLocked(nowMs int64) {
 			HedgeSym:        sp.BnUsdcSym,
 			SlotUsd:         180.0,
 			MaxOpenPairs:    3,
-			MinRawEdgeBp:    1.5, // 8.0bp full round-trip + 1.5bp = >= 9.5bp raw spread!
-			EntryDislocBp:   9.5,
-			NetTargetBp:     1.8,
-			DecayAfterMs:    120000, // 2m rapid step-down
-			MaxHoldMs:       360000, // 6m hard recycle (maximizes turnover, prevents hidden open bags!)
-			StopLossBp:      35.0,
+			MinRawEdgeBp:    2.5, // 4.0bp fee + 2.5bp = >= 6.5bp raw spread!
+			EntryDislocBp:   6.5,
+			NetTargetBp:     2.2,
+			DecayAfterMs:    90000,
+			MaxHoldMs:       600000,
+			StopLossBp:      75.0,
 			MinPeerDepthMul: 2.5,
-			CancelTolBp:     1.5,
-			MaxAgeMs:        15000,
-			ExitOnMaker:     true, // Slow 0% Lighter Maker exit FIRST -> <8ms BN Taker close!
+			CancelTolBp:     1.8,
+			MaxAgeMs:        18000,
+			ExitOnMaker:     false, // 0% BN GTX Maker Exit -> true 4.0bp round-trip fee!
 		}, dec, sp.MinBase, nowMs)
 
-		// MID VOL: High-conviction wider spread harvester ($180 live-matched clips, 9m hard recycle)
+		// MID VOL: High-conviction wider spread harvester (>= 8.5bp raw, +3.0bp net target, 4.0bp fee!)
 		runCrossVenuePairArbLocked(PairArbCfg{
 			StratID:         "M2_LT_BN_HIGH_CONV",
 			MakerVenue:      VenueLtStd,
@@ -1853,19 +1849,19 @@ func evalStrategiesLocked(nowMs int64) {
 			HedgeSym:        sp.BnUsdcSym,
 			SlotUsd:         180.0,
 			MaxOpenPairs:    3,
-			MinRawEdgeBp:    3.5, // 8.0bp full round-trip + 3.5bp = >= 11.5bp raw spread!
-			EntryDislocBp:   11.5,
+			MinRawEdgeBp:    4.5, // 4.0bp fee + 4.5bp = >= 8.5bp raw spread!
+			EntryDislocBp:   8.5,
 			NetTargetBp:     3.0,
 			DecayAfterMs:    240000,
-			MaxHoldMs:       540000, // 9m hard recycle
-			StopLossBp:      35.0,
+			MaxHoldMs:       900000,
+			StopLossBp:      75.0,
 			MinPeerDepthMul: 2.5,
-			CancelTolBp:     1.8,
-			MaxAgeMs:        20000,
-			ExitOnMaker:     true,
+			CancelTolBp:     2.0,
+			MaxAgeMs:        25000,
+			ExitOnMaker:     false,
 		}, dec, sp.MinBase, nowMs)
 
-		// PEAK VOL: Sharp crossed-book dislocation grab ($180 live-matched clips, >= 10.5bp IOC, 8m hard recycle!)
+		// PEAK VOL: Pure Crossed-Book IOC Grab (>= 8.5bp crossed, ZERO resting Lighter order = ZERO 300ms pickoff, 4.0bp total fee!)
 		runCrossVenuePairArbLocked(PairArbCfg{
 			StratID:         "P2_CROSSED_BOOK_GRAB",
 			MakerVenue:      VenueLtStd,
@@ -1874,13 +1870,13 @@ func evalStrategiesLocked(nowMs int64) {
 			HedgeSym:        sp.BnUsdcSym,
 			SlotUsd:         180.0,
 			MaxOpenPairs:    3,
-			TakerGrabMinBp:  10.5,
-			NetTargetBp:     2.2,
+			TakerGrabMinBp:  8.5,
+			NetTargetBp:     2.5,
 			DecayAfterMs:    180000,
-			MaxHoldMs:       480000, // 8m hard recycle
-			StopLossBp:      35.0,
+			MaxHoldMs:       900000,
+			StopLossBp:      75.0,
 			MinPeerDepthMul: 2.5,
-			ExitOnMaker:     true,
+			ExitOnMaker:     false,
 		}, dec, sp.MinBase, nowMs)
 	}
 }
@@ -2157,7 +2153,7 @@ func loadCheckpoint() {
 	}
 	var tel ArenaTelemetry
 	// Clean zero-history cutover to ARENA-v6.3-PARITY (fresh 0m 00s clock & $489.12 clean slate!):
-	if json.Unmarshal(raw, &tel) != nil || !strings.HasPrefix(tel.Version, "ARENA-v7.1") || tel.BootTsMs <= 0 {
+	if json.Unmarshal(raw, &tel) != nil || !strings.HasPrefix(tel.Version, "ARENA-v7.2") || tel.BootTsMs <= 0 {
 		return
 	}
 	mu.Lock()

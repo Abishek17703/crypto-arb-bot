@@ -17,7 +17,7 @@ import (
 )
 
 const (
-	LiveArenaVer         = "LIVE-v110.0-ACCURATE"
+	LiveArenaVer         = "LIVE-v111.0-4BP-DEEP"
 	Baseline3VenueUSD    = 476.2300 // Exact 100%-flat 3-venue Perp cash ($203.14 LT + $225.49 BN + $47.60 AS)
 	MaxDemoteDrawdownUSD = 8.00     // -$8.00 strategy MaxDD demotes back to Tier 0 ($0)
 	GlobalStopLossUSD    = -8.00    // -$8.00 real 3-venue equity stop flattens & pauses
@@ -245,24 +245,24 @@ var (
 			Symbols: []string{"ETH", "SOL", "BNB", "HYPE", "XRP", "NEAR", "SUI", "ENA", "AVAX", "AAVE", "UNI", "DOGE", "WLD", "ARB", "LINK"},
 		},
 		"M1_LT_BN_FAST_SMALL": {
-			ForwardID: "M1_LT_BN_FAST_SMALL", Regime: "MID VOL", Label: "MID VOL | Fast Small-Spread Arb (Lighter-First Exit)",
-			MinRawEdgeBp: 1.5, EntryDisloc: 9.5, TakerGrabBp: 0, ExitNetBp: 1.8, DecaySec: 120, MaxHoldSec: 360,
-			Symbols: []string{"BTC", "ETH", "SOL", "BNB", "UNI", "HYPE", "ENA", "NEAR", "WLD", "AAVE", "SUI", "ARB", "AVAX", "LINK", "DOGE", "XRP"},
+			ForwardID: "M1_LT_BN_FAST_SMALL", Regime: "MID VOL", Label: "MID VOL | Fast Small-Spread Arb (4bp Deep Books)",
+			MinRawEdgeBp: 2.5, EntryDisloc: 6.5, TakerGrabBp: 0, ExitNetBp: 2.2, DecaySec: 90, MaxHoldSec: 600,
+			Symbols: []string{"BTC", "ETH", "SOL", "BNB", "XRP", "DOGE"},
 		},
 		"M2_LT_BN_HIGH_CONV": {
-			ForwardID: "M2_LT_BN_HIGH_CONV", Regime: "MID VOL", Label: "MID VOL | High-Conviction Spread Harvester (>=11.5bp)",
-			MinRawEdgeBp: 3.5, EntryDisloc: 11.5, TakerGrabBp: 0, ExitNetBp: 3.0, DecaySec: 240, MaxHoldSec: 540,
-			Symbols: []string{"BTC", "ETH", "SOL", "BNB", "UNI", "HYPE", "ENA", "NEAR", "WLD", "AAVE", "SUI", "ARB", "AVAX", "LINK", "DOGE", "XRP"},
+			ForwardID: "M2_LT_BN_HIGH_CONV", Regime: "MID VOL", Label: "MID VOL | High-Conviction Spread Harvester (4bp Deep Books)",
+			MinRawEdgeBp: 4.5, EntryDisloc: 8.5, TakerGrabBp: 0, ExitNetBp: 3.0, DecaySec: 240, MaxHoldSec: 900,
+			Symbols: []string{"BTC", "ETH", "SOL", "BNB", "XRP", "DOGE"},
 		},
 		"P1_0FEE_IMPULSE_SNIPER": {
 			ForwardID: "P1_0FEE_IMPULSE_SNIPER", Regime: "PEAK VOL", Label: "PEAK VOL | 0%-Fee Binance-Lead -> Lighter-Lag Sniper",
 			SingleLegLt: true, MinRawEdgeBp: 1.2, EntryDisloc: 2.0, TakerGrabBp: 2.0, ExitNetBp: 2.5, DecaySec: 9, MaxHoldSec: 20,
-			Symbols: []string{"BTC", "ETH", "SOL", "BNB", "HYPE", "XRP", "NEAR", "SUI", "ENA", "AVAX"},
+			Symbols: []string{"BTC", "ETH", "SOL", "BNB", "XRP", "DOGE"},
 		},
 		"P2_CROSSED_BOOK_GRAB": {
-			ForwardID: "P2_CROSSED_BOOK_GRAB", Regime: "PEAK VOL", Label: "PEAK VOL | Crossed-Book Grab (>=10.5bp IOC, LT-First Exit)",
-			MinRawEdgeBp: 2.5, EntryDisloc: 10.5, TakerGrabBp: 10.5, ExitNetBp: 2.2, DecaySec: 180, MaxHoldSec: 480,
-			Symbols: []string{"BTC", "ETH", "SOL", "BNB", "UNI", "HYPE", "ENA", "NEAR", "WLD", "AAVE", "SUI", "ARB", "AVAX", "TRUMP", "TIA", "CRV", "ETHFI", "LINK", "DOGE", "XRP"},
+			ForwardID: "P2_CROSSED_BOOK_GRAB", Regime: "PEAK VOL", Label: "PEAK VOL | Crossed-Book IOC Grab (>=8.5bp, 4bp Deep Books)",
+			MinRawEdgeBp: 4.5, EntryDisloc: 8.5, TakerGrabBp: 8.5, ExitNetBp: 2.5, DecaySec: 180, MaxHoldSec: 900,
+			Symbols: []string{"BTC", "ETH", "SOL", "BNB", "XRP", "DOGE"},
 		},
 	}
 )
@@ -369,7 +369,7 @@ func loadLiveArenaState() {
 		return
 	}
 	var saved LiveArenaTelemetry
-	if json.Unmarshal(raw, &saved) != nil || saved.BootTsMs <= 0 || (!strings.HasPrefix(saved.Version, "LIVE-v109.") && !strings.HasPrefix(saved.Version, "LIVE-v110.")) {
+	if json.Unmarshal(raw, &saved) != nil || saved.BootTsMs <= 0 || !strings.HasPrefix(saved.Version, "LIVE-v111.") {
 		return
 	}
 	liveMu.Lock()
@@ -1254,21 +1254,17 @@ func stepSimpleSlot(sl *SimpleSlot, now time.Time) {
 			}
 			return
 		}
-		// 2b. Hedged LT 0% <-> BN_USDC position: Exit with SLOW 0% Lighter Maker FIRST -> INSTANT <8ms Binance Taker SECOND!
-		bnSym, qDec, _, _, _, pBid, pAsk, _, jumpBps, _, _, _, okB := getBnUsdcBook(sl.Sym, now)
+		// 2b. Hedged LT 0% <-> BN_USDC position: Exit via 0% Binance GTX Maker FIRST -> 0% Lighter IOC close (TRUE 4.0bp total round-trip fee!)
+		bnSym, qDec, pxDec, _, _, pBid, pAsk, _, jumpBps, _, _, _, okB := getBnUsdcBook(sl.Sym, now)
 		if !okB {
 			return
 		}
-		closeBnSide, closeLtSide := "SELL", "BID"
-		ltExitPx, bnCloseRef := lb, pBid
+		closeBnSide, exitPx := "SELL", roundTo(pAsk, pxDec)
+		// True USDC-to-USDC (fx=1.0) net PnL after 4.0bp round-trip fee (4bp entry + 0bp BN Maker exit + 0bp Lighter):
+		combNetBp := ((exitPx-sl.EntryPeerPx)+(sl.EntryLtPx-la))/math.Max(sl.EntryLtPx, 1e-9)*10000.0 - 4.0
 		if sl.PeerSide == "SELL" {
-			closeBnSide, closeLtSide = "BUY", "ASK"
-			ltExitPx, bnCloseRef = la, pAsk
-		}
-		// True USDC-to-USDC net PnL after FULL 8.0bp round-trip Binance fee (4bp in + 4bp out, 0bp Lighter):
-		combNetBp := ((bnCloseRef-sl.EntryPeerPx)+(sl.EntryLtPx-ltExitPx))/math.Max(sl.EntryLtPx, 1e-9)*10000.0 - 8.0
-		if sl.PeerSide == "SELL" {
-			combNetBp = ((sl.EntryPeerPx-bnCloseRef)+(ltExitPx-sl.EntryLtPx))/math.Max(sl.EntryLtPx, 1e-9)*10000.0 - 8.0
+			closeBnSide, exitPx = "BUY", roundTo(pBid, pxDec)
+			combNetBp = ((sl.EntryPeerPx-exitPx)+(lb-sl.EntryLtPx))/math.Max(sl.EntryLtPx, 1e-9)*10000.0 - 4.0
 		}
 		legDrift := math.Abs(0.5*(lb+la)-sl.EntryLtPx) / math.Max(sl.EntryLtPx, 1e-9)
 		if liveAcct.Halted || legDrift >= 0.10 {
@@ -1282,45 +1278,28 @@ func stepSimpleSlot(sl *SimpleSlot, now time.Time) {
 		}
 		reqNetBp := preset.ExitNetBp
 		if halted {
-			reqNetBp = 0.0
-		} else if holdS >= preset.MaxHoldSec+300 {
-			reqNetBp = -3.5 // Hard stuck-slot recycle after MaxHold + 5m so 1 coin never freezes a slot!
+			reqNetBp = 0.15
 		} else if holdS >= preset.MaxHoldSec {
-			reqNetBp = 0.0
+			reqNetBp = 0.30
 		} else if holdS >= preset.DecaySec {
-			reqNetBp = math.Max(0.6, preset.ExitNetBp-1.2)
+			reqNetBp = math.Max(0.8, preset.ExitNetBp-1.2)
 		}
-		if combNetBp >= reqNetBp && math.Abs(jumpBps) <= 2.0 && !anySlotRestingLt() {
-			liveMu.Lock()
-			canTx := canSendLtTxLocked(now.UnixMilli(), false)
-			liveMu.Unlock()
-			if !canTx {
-				return
-			}
+		if combNetBp >= reqNetBp && math.Abs(jumpBps) <= 1.5 {
 			if rb, ra := fetchLtBookREST(markets[sl.Sym].ID); rb > 0 && ra > rb {
-				ltExitPx = rb
-				if closeLtSide == "ASK" {
-					ltExitPx = ra
-				}
 				if sl.PeerSide == "BUY" {
-					combNetBp = ((bnCloseRef-sl.EntryPeerPx)+(sl.EntryLtPx-ltExitPx))/math.Max(sl.EntryLtPx, 1e-9)*10000.0 - 8.0
+					combNetBp = ((exitPx-sl.EntryPeerPx)+(sl.EntryLtPx-ra))/math.Max(sl.EntryLtPx, 1e-9)*10000.0 - 4.0
 				} else {
-					combNetBp = ((sl.EntryPeerPx-bnCloseRef)+(ltExitPx-sl.EntryLtPx))/math.Max(sl.EntryLtPx, 1e-9)*10000.0 - 8.0
+					combNetBp = ((sl.EntryPeerPx-exitPx)+(rb-sl.EntryLtPx))/math.Max(sl.EntryLtPx, 1e-9)*10000.0 - 4.0
 				}
 				if combNetBp >= reqNetBp {
-					liveMu.Lock()
-					recordLtTxLocked(time.Now().UnixMilli())
-					liveMu.Unlock()
-					if coi, okE := placeLtPostOnlyMakerSync(sl.Sym, closeLtSide, ltExitPx, sl.HedgedQty, true); okE {
-						liveMu.Lock()
+					if oid, okE := placeBnMakerExit(bnSym, closeBnSide, sl.HedgedQty, exitPx, qDec, pxDec); okE {
 						liveAcct.MakerPlaced++
-						sl.State = "LT_EXIT_OPEN"
-						sl.LtCOI = coi
-						sl.LtLimitPx = ltExitPx
-						sl.ExitPlaced = time.Now()
-						sl.LastOrdPoll = time.Now()
-						sl.CancelSent = false
-						liveMu.Unlock()
+						sl.State = "PEER_EXIT_OPEN"
+						sl.ExitPeerOid = oid
+						sl.ExitPeerPx = exitPx
+						sl.ExitPlaced = now
+						sl.LastOrdPoll = time.Time{}
+						sl.LastLtRestBBO = now
 					}
 				}
 			}
@@ -1328,106 +1307,62 @@ func stepSimpleSlot(sl *SimpleSlot, now time.Time) {
 		return
 	}
 
-	// 3. STATE: LT_EXIT_OPEN (0% Lighter ReduceOnly Maker Exit FIRST -> <8ms Binance Taker Close!)
-	if sl.State == "LT_EXIT_OPEN" {
-		m := markets[sl.Sym]
-		st := mktStates[sl.Sym]
-		if st == nil {
-			return
+	// 3. STATE: PEER_EXIT_OPEN (Resting 0% Binance GTX Maker Exit -> 0% Lighter IOC close = 4.0bp total fee!)
+	if sl.State == "PEER_EXIT_OPEN" {
+		lb, la := refreshSlotLtBBO(sl)
+		bnSym, qDec, _, _, _, _, _, _, _, _, _, _, okB := getBnUsdcBook(sl.Sym, now)
+		if !okB {
+			bnSym = sl.PeerSym
 		}
-		st.mu.Lock()
-		ltPos, lb, la := st.pos, st.ltBid, st.ltAsk
-		st.mu.Unlock()
-		if now.Sub(sl.LastOrdPoll) >= 2500*time.Millisecond {
+		status, _, avgP, polled, okQ := queryBnOrder(bnSym, sl.ExitPeerOid, sl.LastOrdPoll, false)
+		if polled {
 			sl.LastOrdPoll = now
-			if rp, _, okR := fetchLtPosRESTChecked(sl.Sym); okR {
-				ltPos = rp
-			}
 		}
-		// Lighter position closed! Immediately close Binance leg in <8ms (ZERO 3-second Lighter exit slippage!)
-		if math.Abs(ltPos) < m.MinB {
-			cancelAll()
-			liveMu.Lock()
-			recordLtTxLocked(time.Now().UnixMilli())
-			liveMu.Unlock()
-			bnSym, qDec, _, _, _, pBid, pAsk, _, _, _, _, _, okB := getBnUsdcBook(sl.Sym, now)
-			if !okB {
-				bnSym = sl.PeerSym
-			}
-			closeBnSide := "SELL"
-			refPx := pBid
-			if sl.PeerSide == "SELL" {
-				closeBnSide = "BUY"
-				refPx = pAsk
-			}
-			_, ap, latMs, okM := executeBnMarketOrder(bnSym, closeBnSide, sl.HedgedQty, qDec, true)
-			if !okM || ap <= 0 {
-				ap = refPx
-			}
-			finalizeLtFirstClose(sl, sl.LtLimitPx, ap, 4.0, "LT_MAKER_0FEE_EXIT", "LT_FIRST_4LEG_TP", latMs, now)
+		if !okQ {
 			return
 		}
-		if sl.CancelSent {
-			if time.Since(sl.CancelAt) >= 4500*time.Millisecond {
-				rp, _, okP := fetchLtPosRESTChecked(sl.Sym)
-				oo, okOO := fetchLtMarketOpenOrderCountREST(sl.Sym)
-				if !okP || !okOO {
-					return
-				}
-				if math.Abs(rp) < m.MinB {
-					sl.CancelSent = false
-					return
-				}
-				if oo > 0 {
-					cancelAll()
-					sl.CancelAt = time.Now()
-					return
-				}
-				sl.State = "HEDGED"
-				sl.CancelSent = false
-			}
+		if avgP <= 0 {
+			avgP = sl.ExitPeerPx
+		}
+		if status == "FILLED" {
+			finalizeSimpleClose(sl, avgP, 0.0, "MAKER_GTX_EXIT", "ZERO_FEE_4LEG_TP", now.Sub(sl.ExitPlaced).Milliseconds(), now)
 			return
 		}
-		_, _, _, _, _, pBid, pAsk, _, jumpBps, _, _, _, okB := getBnUsdcBook(sl.Sym, now)
-		shouldCancel := liveAcct.Halted || now.Sub(sl.ExitPlaced) >= 16*time.Second
-		if !shouldCancel && okB && lb > 0 && la > lb {
-			bnRef, refBbo := pBid, lb
-			curNetBp := ((bnRef-sl.EntryPeerPx)+(sl.EntryLtPx-sl.LtLimitPx))/math.Max(sl.EntryLtPx, 1e-9)*10000.0 - 8.0
-			if sl.PeerSide == "SELL" {
-				bnRef, refBbo = pAsk, la
-				curNetBp = ((sl.EntryPeerPx-bnRef)+(sl.LtLimitPx-sl.EntryLtPx))/math.Max(sl.EntryLtPx, 1e-9)*10000.0 - 8.0
-			}
-			driftBp := math.Abs(sl.LtLimitPx-refBbo) / math.Max(refBbo, 1e-9) * 10000.0
-			minKeep := 0.25
-			if now.Sub(sl.OpenedAt).Seconds() >= preset.MaxHoldSec {
-				minKeep = -4.0
-			}
-			if curNetBp < minKeep || driftBp > 2.0 || math.Abs(jumpBps) > 2.5 {
-				shouldCancel = true
-			}
+		if status == "CANCELED" || status == "EXPIRED" {
+			sl.State = "HEDGED"
+			sl.ExitPeerOid = 0
+			return
 		}
-		if shouldCancel {
-			liveMu.Lock()
-			if !canSendLtTxLocked(now.UnixMilli(), true) {
-				liveMu.Unlock()
+		curNetBp := ((sl.ExitPeerPx-sl.EntryPeerPx)+(sl.EntryLtPx-la))/math.Max(sl.EntryLtPx, 1e-9)*10000.0 - 4.0
+		if sl.PeerSide == "SELL" {
+			curNetBp = ((sl.EntryPeerPx-sl.ExitPeerPx)+(lb-sl.EntryLtPx))/math.Max(sl.EntryLtPx, 1e-9)*10000.0 - 4.0
+		}
+		minKeep := 0.50
+		if now.Sub(sl.OpenedAt).Seconds() >= preset.MaxHoldSec {
+			minKeep = 0.0
+		}
+		if liveAcct.Halted || curNetBp < minKeep || now.Sub(sl.ExitPlaced) >= 20*time.Second {
+			cSt, cQty, cPx := cancelBnOrder(bnSym, sl.ExitPeerOid)
+			liveAcct.MakerCancelled++
+			if cPx <= 0 {
+				cPx = avgP
+			}
+			m := markets[sl.Sym]
+			if cSt == "FILLED" || cQty >= sl.HedgedQty-m.MinB*0.5 {
+				finalizeSimpleClose(sl, cPx, 0.0, "MAKER_GTX_EXIT", "ZERO_FEE_4LEG_TP", now.Sub(sl.ExitPlaced).Milliseconds(), now)
 				return
 			}
-			recordLtTxLocked(now.UnixMilli())
-			liveAcct.MakerCancelled++
-			liveMu.Unlock()
-			cancelAll()
-			sl.CancelSent = true
-			sl.CancelAt = time.Now()
+			if cQty >= m.MinB {
+				partPos := -cQty
+				if sl.LtSide == "BID" {
+					partPos = cQty
+				}
+				_, _ = closeLtLegSync(sl.Sym, partPos, lb, la)
+				sl.HedgedQty = roundTo(sl.HedgedQty-cQty, qDec)
+			}
+			sl.State = "HEDGED"
+			sl.ExitPeerOid = 0
 		}
-		return
-	}
-	// Legacy hot-reload safety: if a slot was saved in PEER_EXIT_OPEN, cancel BN order and switch to HEDGED (Lighter-First exit)
-	if sl.State == "PEER_EXIT_OPEN" {
-		if sl.ExitPeerOid > 0 {
-			_, _, _ = cancelBnOrder(sl.PeerSym, sl.ExitPeerOid)
-		}
-		sl.State = "HEDGED"
-		sl.ExitPeerOid = 0
 		return
 	}
 
@@ -1760,7 +1695,7 @@ func stepSimpleSlot(sl *SimpleSlot, now time.Time) {
 	}
 	bSym, bBnSym, bLtSide, bBnSide := "", "", "", ""
 	bDisloc, bLtPx, bQty := -999.0, 0.0, 0.0
-	minRaw := 8.0 + math.Max(preset.MinRawEdgeBp, 1.5)
+	minRaw := 4.0 + math.Max(preset.MinRawEdgeBp, 2.0)
 	for _, sym := range preset.Symbols {
 		if symUsedInSlots(sym, sl.Idx) {
 			continue
