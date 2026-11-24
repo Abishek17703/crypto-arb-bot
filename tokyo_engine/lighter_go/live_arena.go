@@ -17,7 +17,7 @@ import (
 )
 
 const (
-	LiveArenaVer         = "LIVE-v111.0-4BP-DEEP"
+	LiveArenaVer         = "LIVE-v111.1-FAST"
 	Baseline3VenueUSD    = 476.2300 // Exact 100%-flat 3-venue Perp cash ($203.14 LT + $225.49 BN + $47.60 AS)
 	MaxDemoteDrawdownUSD = 8.00     // -$8.00 strategy MaxDD demotes back to Tier 0 ($0)
 	GlobalStopLossUSD    = -8.00    // -$8.00 real 3-venue equity stop flattens & pauses
@@ -487,6 +487,18 @@ func getBnUsdcBook(sym string, now time.Time) (bnSym string, qDec, pxDec int, st
 	}
 	// Both Lighter #770015 and Binance USDC-M settle 1:1 in USDC — exact FX is 1.0 (never multiply by USDC/USDT!).
 	return pSym, sp.QDec, sp.PxDec, sp.Step, sp.MinNot, bid, ask, emaBps, jumpBps, 1.0, warm, age, true
+}
+
+// getUsdtUsdcEquilFx returns live BTCUSDT/BTCUSDC (~1.0010) ONLY for entry dislocation anchoring
+// so we never enter right on top of the permanent USDT/USDC equilibrium; exit P&L always uses fx = 1.0!
+func getUsdtUsdcEquilFx(now time.Time) float64 {
+	dnMu.Lock()
+	fx, ok := dnQuoteFxToUsdtLocked("USDC", now)
+	dnMu.Unlock()
+	if !ok || fx < 0.985 || fx > 1.015 {
+		return 1.0
+	}
+	return fx
 }
 
 func bnTopDepthUsd(bnSym, side string) float64 {
@@ -1276,32 +1288,43 @@ func stepSimpleSlot(sl *SimpleSlot, now time.Time) {
 			}
 			return
 		}
+		// Fast profit-taking step-down: captures full edge early, never leaves money on the table or stalls!
 		reqNetBp := preset.ExitNetBp
 		if halted {
 			reqNetBp = 0.15
-		} else if holdS >= preset.MaxHoldSec {
-			reqNetBp = 0.30
-		} else if holdS >= preset.DecaySec {
-			reqNetBp = math.Max(0.8, preset.ExitNetBp-1.2)
+		} else if holdS >= 300 {
+			reqNetBp = 0.25
+		} else if holdS >= 180 {
+			reqNetBp = 0.55
+		} else if holdS >= 60 {
+			reqNetBp = 1.20
 		}
-		if combNetBp >= reqNetBp && math.Abs(jumpBps) <= 1.5 {
-			if rb, ra := fetchLtBookREST(markets[sl.Sym].ID); rb > 0 && ra > rb {
-				if sl.PeerSide == "BUY" {
-					combNetBp = ((exitPx-sl.EntryPeerPx)+(sl.EntryLtPx-ra))/math.Max(sl.EntryLtPx, 1e-9)*10000.0 - 4.0
-				} else {
-					combNetBp = ((sl.EntryPeerPx-exitPx)+(rb-sl.EntryLtPx))/math.Max(sl.EntryLtPx, 1e-9)*10000.0 - 4.0
+		// Check fresh WS book age (NO 300ms blocking REST call before exiting -> <15ms reaction time!)
+		ltFresh := false
+		if stM := mktStates[sl.Sym]; stM != nil {
+			stM.mu.Lock()
+			ltFresh = now.Sub(stM.lastBookTS) <= 2500*time.Millisecond
+			stM.mu.Unlock()
+		}
+		// Fast Taker Grab: if convergence surge gives >= +3.0bp NET even after 4bp taker exit fee (combNetBp >= 7.0bp), lock it in <8ms!
+		if ltFresh && combNetBp >= 7.0 && math.Abs(jumpBps) <= 2.5 {
+			if _, ap, latMs, okM := executeBnMarketOrder(bnSym, closeBnSide, sl.HedgedQty, qDec, true); okM {
+				if ap <= 0 {
+					ap = 0.5 * (pBid + pAsk)
 				}
-				if combNetBp >= reqNetBp {
-					if oid, okE := placeBnMakerExit(bnSym, closeBnSide, sl.HedgedQty, exitPx, qDec, pxDec); okE {
-						liveAcct.MakerPlaced++
-						sl.State = "PEER_EXIT_OPEN"
-						sl.ExitPeerOid = oid
-						sl.ExitPeerPx = exitPx
-						sl.ExitPlaced = now
-						sl.LastOrdPoll = time.Time{}
-						sl.LastLtRestBBO = now
-					}
-				}
+				finalizeSimpleClose(sl, ap, 4.0, "TAKER_SURGE_TP", "FAST_SURGE_LOCK", latMs, now)
+				return
+			}
+		}
+		if ltFresh && combNetBp >= reqNetBp && math.Abs(jumpBps) <= 1.8 {
+			if oid, okE := placeBnMakerExit(bnSym, closeBnSide, sl.HedgedQty, exitPx, qDec, pxDec); okE {
+				liveAcct.MakerPlaced++
+				sl.State = "PEER_EXIT_OPEN"
+				sl.ExitPeerOid = oid
+				sl.ExitPeerPx = exitPx
+				sl.ExitPlaced = now
+				sl.LastOrdPoll = time.Time{}
+				sl.LastLtRestBBO = now
 			}
 		}
 		return
@@ -1337,11 +1360,11 @@ func stepSimpleSlot(sl *SimpleSlot, now time.Time) {
 		if sl.PeerSide == "SELL" {
 			curNetBp = ((sl.EntryPeerPx-sl.ExitPeerPx)+(lb-sl.EntryLtPx))/math.Max(sl.EntryLtPx, 1e-9)*10000.0 - 4.0
 		}
-		minKeep := 0.50
-		if now.Sub(sl.OpenedAt).Seconds() >= preset.MaxHoldSec {
+		minKeep := 0.20
+		if now.Sub(sl.OpenedAt).Seconds() >= 180 {
 			minKeep = 0.0
 		}
-		if liveAcct.Halted || curNetBp < minKeep || now.Sub(sl.ExitPlaced) >= 20*time.Second {
+		if liveAcct.Halted || curNetBp < minKeep || now.Sub(sl.ExitPlaced) >= 8*time.Second {
 			cSt, cQty, cPx := cancelBnOrder(bnSym, sl.ExitPeerOid)
 			liveAcct.MakerCancelled++
 			if cPx <= 0 {
@@ -1711,7 +1734,7 @@ func stepSimpleSlot(sl *SimpleSlot, now time.Time) {
 		if math.Abs(ltPos) >= m.MinB || lb <= 0 || la <= lb || now.Sub(lTS) > 8*time.Second || (la-lb)/lb*10000.0 > 10.0 {
 			continue
 		}
-		bnSym, qDec, _, step, minNot, pBid, pAsk, emaBps, jumpBps, fx, warm, age, okB := getBnUsdcBook(sym, now)
+		bnSym, qDec, _, step, minNot, pBid, pAsk, emaBps, jumpBps, _, warm, age, okB := getBnUsdcBook(sym, now)
 		if !okB || warm < 8 || age > 8*time.Second || math.Abs(jumpBps) > 1.0 || (pAsk-pBid)/pBid*10000.0 > 8.0 {
 			continue
 		}
@@ -1725,11 +1748,12 @@ func stepSimpleSlot(sl *SimpleSlot, now time.Time) {
 		if qty < m.MinB || qty*ltMid < math.Max(10.5, minNot) {
 			continue
 		}
-		rawS := ((la - pAsk*fx) / (pAsk * fx)) * 10000.0
+		fxEq := getUsdtUsdcEquilFx(now)
+		rawS := ((la - pAsk*fxEq) / (pAsk * fxEq)) * 10000.0
 		if rawS >= minRaw && (rawS >= preset.EntryDisloc || rawS-emaBps >= preset.EntryDisloc) && rawS > bDisloc && bnTopDepthUsd(bnSym, "BUY") >= clipUsd*2.5 {
 			bDisloc, bSym, bBnSym, bLtSide, bBnSide, bLtPx, bQty = rawS, sym, bnSym, "ASK", "BUY", la, qty
 		}
-		rawL := ((pBid*fx - lb) / (pBid * fx)) * 10000.0
+		rawL := ((pBid*fxEq - lb) / (pBid * fxEq)) * 10000.0
 		if rawL >= minRaw && (rawL >= preset.EntryDisloc || rawL+emaBps >= preset.EntryDisloc) && rawL > bDisloc && bnTopDepthUsd(bnSym, "SELL") >= clipUsd*2.5 {
 			bDisloc, bSym, bBnSym, bLtSide, bBnSide, bLtPx, bQty = rawL, sym, bnSym, "BID", "SELL", lb, qty
 		}
@@ -1741,19 +1765,20 @@ func stepSimpleSlot(sl *SimpleSlot, now time.Time) {
 	if rb <= 0 || ra <= rb {
 		return
 	}
-	_, _, _, _, _, pBidC, pAskC, _, _, fxC, _, _, okC := getBnUsdcBook(bSym, now)
+	_, _, _, _, _, pBidC, pAskC, _, _, _, _, _, okC := getBnUsdcBook(bSym, now)
 	if !okC {
 		return
 	}
+	fxEqC := getUsdtUsdcEquilFx(now)
 	if bLtSide == "ASK" {
 		bLtPx = ra
-		bDisloc = ((ra - pAskC*fxC) / (pAskC * fxC)) * 10000.0
+		bDisloc = ((ra - pAskC*fxEqC) / (pAskC * fxEqC)) * 10000.0
 		if bDisloc < minRaw {
 			return
 		}
 	} else {
 		bLtPx = rb
-		bDisloc = ((pBidC*fxC - rb) / (pBidC * fxC)) * 10000.0
+		bDisloc = ((pBidC*fxEqC - rb) / (pBidC * fxEqC)) * 10000.0
 		if bDisloc < minRaw {
 			return
 		}
@@ -2280,7 +2305,7 @@ func runLiveMicroArenaLoop() {
 	evaluateForwardWinnerAndTiers()
 	writeLiveArenaTelemetry(time.Now())
 
-	tick := time.NewTicker(150 * time.Millisecond)
+	tick := time.NewTicker(50 * time.Millisecond)
 	defer tick.Stop()
 	lastMargin, lastOrphan, lastEval, lastTel := time.Now(), time.Now(), time.Now(), time.Now()
 
