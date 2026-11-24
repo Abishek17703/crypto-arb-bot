@@ -245,24 +245,24 @@ var (
 			Symbols: []string{"ETH", "SOL", "BNB", "HYPE", "XRP", "NEAR", "SUI", "ENA", "AVAX", "AAVE", "UNI", "DOGE", "WLD", "ARB", "LINK"},
 		},
 		"M1_LT_BN_FAST_SMALL": {
-			ForwardID: "M1_LT_BN_FAST_SMALL", Regime: "MID VOL", Label: "MID VOL | Fast Small-Spread Arb (4bp Deep Books)",
+			ForwardID: "M1_LT_BN_FAST_SMALL", Regime: "MID VOL", Label: "MID VOL | Fast Small-Spread Arb (4bp ETH/BTC/SOL/XRP)",
 			MinRawEdgeBp: 2.5, EntryDisloc: 6.5, TakerGrabBp: 0, ExitNetBp: 2.2, DecaySec: 90, MaxHoldSec: 600,
-			Symbols: []string{"BTC", "ETH", "SOL", "BNB", "XRP", "DOGE"},
+			Symbols: []string{"ETH", "BTC", "SOL", "XRP"},
 		},
 		"M2_LT_BN_HIGH_CONV": {
-			ForwardID: "M2_LT_BN_HIGH_CONV", Regime: "MID VOL", Label: "MID VOL | High-Conviction Spread Harvester (4bp Deep Books)",
+			ForwardID: "M2_LT_BN_HIGH_CONV", Regime: "MID VOL", Label: "MID VOL | High-Conviction Spread Harvester (4bp ETH/BTC/SOL/XRP)",
 			MinRawEdgeBp: 4.5, EntryDisloc: 8.5, TakerGrabBp: 0, ExitNetBp: 3.0, DecaySec: 240, MaxHoldSec: 900,
-			Symbols: []string{"BTC", "ETH", "SOL", "BNB", "XRP", "DOGE"},
+			Symbols: []string{"ETH", "BTC", "SOL", "XRP"},
 		},
 		"P1_0FEE_IMPULSE_SNIPER": {
 			ForwardID: "P1_0FEE_IMPULSE_SNIPER", Regime: "PEAK VOL", Label: "PEAK VOL | 0%-Fee Binance-Lead -> Lighter-Lag Sniper",
 			SingleLegLt: true, MinRawEdgeBp: 1.2, EntryDisloc: 2.0, TakerGrabBp: 2.0, ExitNetBp: 2.5, DecaySec: 9, MaxHoldSec: 20,
-			Symbols: []string{"BTC", "ETH", "SOL", "BNB", "XRP", "DOGE"},
+			Symbols: []string{"ETH", "BTC", "SOL", "XRP"},
 		},
 		"P2_CROSSED_BOOK_GRAB": {
-			ForwardID: "P2_CROSSED_BOOK_GRAB", Regime: "PEAK VOL", Label: "PEAK VOL | Crossed-Book IOC Grab (>=8.5bp, 4bp Deep Books)",
+			ForwardID: "P2_CROSSED_BOOK_GRAB", Regime: "PEAK VOL", Label: "PEAK VOL | Crossed-Book IOC Grab (4bp ETH/BTC/SOL/XRP)",
 			MinRawEdgeBp: 4.5, EntryDisloc: 8.5, TakerGrabBp: 8.5, ExitNetBp: 2.5, DecaySec: 180, MaxHoldSec: 900,
-			Symbols: []string{"BTC", "ETH", "SOL", "BNB", "XRP", "DOGE"},
+			Symbols: []string{"ETH", "BTC", "SOL", "XRP"},
 		},
 	}
 )
@@ -310,9 +310,9 @@ func wakeAllLiveSlots() {
 func tierSpec(tier int) (slots int, clip float64, label string) {
 	switch tier {
 	case 1:
-		return 3, 18.0, "Tier 1: Micro Fill-Test (3x $18)"
+		return 3, 26.0, "Tier 1: Micro ETH+SOL+XRP (3x $26)"
 	case 2:
-		return 3, 80.0, "Tier 2: Scaled (3x $80)"
+		return 3, 80.0, "Tier 2: Scaled + BTC (3x $80)"
 	case 3:
 		return 3, 180.0, "Tier 3: Full Safe (3x $180)"
 	default:
@@ -1747,12 +1747,14 @@ func stepSimpleSlot(sl *SimpleSlot, now time.Time) {
 	}
 	if bLtSide == "ASK" {
 		bLtPx = ra
-		if ((ra-pAskC*fxC)/(pAskC*fxC))*10000.0 < minRaw {
+		bDisloc = ((ra - pAskC*fxC) / (pAskC * fxC)) * 10000.0
+		if bDisloc < minRaw {
 			return
 		}
 	} else {
 		bLtPx = rb
-		if ((pBidC*fxC-rb)/(pBidC*fxC))*10000.0 < minRaw {
+		bDisloc = ((pBidC*fxC - rb) / (pBidC * fxC)) * 10000.0
+		if bDisloc < minRaw {
 			return
 		}
 	}
@@ -1829,8 +1831,8 @@ func evaluateForwardWinnerAndTiers() {
 		if s.StratBootMs > 0 {
 			ageM = float64(refNow-s.StratBootMs) / 60000.0
 		}
-		// 15-minute empirical sweet spot (85-89% hit rate, $2.36/hr vs 45m $1.86/hr)
-		if ageM >= 15.0 && hr >= 1.5 && s.ProfitFactor >= 1.35 && s.RoundTrips >= 4 && s.MaxDrawdownUsd < 40.0 {
+		// 15-minute empirical sweet spot (stay active whenever >= +$0.50/hr with PF >= 1.35; only go Cash Standby if all < +$0.50/hr)
+		if ageM >= 15.0 && hr >= 0.50 && s.ProfitFactor >= 1.35 && s.RoundTrips >= 4 && s.MaxDrawdownUsd < 40.0 {
 			if hr > bestHr {
 				if bestID != "" && bestHr > secHr {
 					secID, secHr = bestID, bestHr
@@ -1898,13 +1900,13 @@ func evaluateForwardWinnerAndTiers() {
 	if liveAcct.Halted {
 		return
 	}
-	// Auto-Sit in Cash Standby (Tier 0) if ALL Forward Lab strategies are below +$1.50/hr over 15m!
+	// Auto-Sit in Cash Standby (Tier 0) if ALL Forward Lab strategies are below +$0.50/hr over 15m!
 	if bestID == "" && liveAcct.Tier > 0 {
 		liveAcct.Tier = 0
 		liveAcct.TierChangedMs = nowMs
-		liveAcct.HaltReason = "Cash standby: no Forward strategy >= +$1.50/hr (15m)"
+		liveAcct.HaltReason = "Cash standby: no Forward strategy >= +$0.50/hr (15m)"
 		applyTierLocked()
-		fmt.Printf("[AUTO_CASH_STANDBY] No strategy >= +$1.50/hr over 15m; sitting safely in cash until a regime turns profitable.\n")
+		fmt.Printf("[AUTO_CASH_STANDBY] No strategy >= +$0.50/hr over 15m; sitting safely in cash until a regime turns profitable.\n")
 		return
 	}
 	// Strict -$8.00 MaxDD or 6-trip PF < 0.95 demotion back to Tier 0 ($0):
