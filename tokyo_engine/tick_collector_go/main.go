@@ -236,20 +236,23 @@ func envInt(key string, def int) int {
 	return def
 }
 
-func buildSymbols() ([]string, map[string]bool, []string) {
+func buildSymbols() ([]string, map[string]bool, []string, []string) {
 	var syms []string
 	want := make(map[string]bool)
+	var bookStreams []string
 	var tradeStreams []string
 	for _, base := range baseCoins {
 		for _, quote := range []string{"USDC", "USDT"} {
 			sym := base + quote
 			syms = append(syms, sym)
 			want[sym] = true
-			tradeStreams = append(tradeStreams, strings.ToLower(sym)+"@aggTrade")
+			low := strings.ToLower(sym)
+			bookStreams = append(bookStreams, low+"@bookTicker")
+			tradeStreams = append(tradeStreams, low+"@aggTrade")
 		}
 	}
 	sort.Strings(syms)
-	return syms, want, tradeStreams
+	return syms, want, bookStreams, tradeStreams
 }
 
 func parseF(s string) float64 {
@@ -423,7 +426,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	syms, want, tradeStreams := buildSymbols()
+	syms, want, bookStreams, tradeStreams := buildSymbols()
 	startedAt := time.Now()
 	m := &metrics{}
 
@@ -458,7 +461,7 @@ func main() {
 				}
 				bErr, tErr := m.getErrs()
 				st := collectorStatus{
-					Version:         "TICK-v1.3-LIVE",
+					Version:         "TICK-v1.4-FULL-BBO",
 					StartedAtMs:     startedAt.UnixMilli(),
 					UpdatedAtMs:     time.Now().UnixMilli(),
 					UptimeSec:       int64(up),
@@ -489,11 +492,20 @@ func main() {
 	fmt.Printf("[TICK_COLLECTOR] starting v1.2 dir=%s rotate=%ds symbols=%d\n", tickDir, rotateSec, len(syms))
 
 	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		runStreamWorker("BOOK", true, "wss://fstream.binance.com/public/stream?streams=!bookTicker", want, cw, m, stopCh)
-	}()
+	for i := 0; i < len(bookStreams); i += 10 {
+		end := i + 10
+		if end > len(bookStreams) {
+			end = len(bookStreams)
+		}
+		shardURL := "wss://fstream.binance.com/public/stream?streams=" + strings.Join(bookStreams[i:end], "/")
+		shardName := fmt.Sprintf("BOOK_%d", i/10)
+		wg.Add(1)
+		go func(n, u string) {
+			defer wg.Done()
+			runStreamWorker(n, true, u, want, cw, m, stopCh)
+		}(shardName, shardURL)
+		time.Sleep(200 * time.Millisecond)
+	}
 
 	for i := 0; i < len(tradeStreams); i += 10 {
 		end := i + 10
