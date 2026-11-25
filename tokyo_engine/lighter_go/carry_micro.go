@@ -11,7 +11,7 @@ import (
 )
 
 const (
-	CarryMicroVer      = "CARRY-v1.0-MICRO-3X25"
+	CarryMicroVer      = "CARRY-v1.1-CRYPTO-3X25"
 	CarryClipUSD       = 25.0
 	CarryHardStopUSD   = -4.00
 	CarryMinEntryAPR   = 20.0
@@ -24,15 +24,16 @@ var carryTargets = []struct {
 	Sym   string
 	BnSym string
 }{
-	{Sym: "MRNA", BnSym: "MRNAUSDT"},
 	{Sym: "WLFI", BnSym: "WLFIUSDC"},
 	{Sym: "ZEC", BnSym: "ZECUSDC"},
+	{Sym: "CC", BnSym: "CCUSDT"},
 }
 
 type carrySlot struct {
 	Sym         string
 	BnSym       string
 	Open        bool
+	Disabled    bool
 	Dir         string // "LONG_LT" or "SHORT_LT"
 	Qty         float64
 	LtEntryPx   float64
@@ -139,7 +140,7 @@ func syncCarryToLiveSlots(slots []*carrySlot) {
 	liveAcct.ID = "CARRY_MICRO_3X25"
 	liveAcct.ForwardStratID = "CARRY_MICRO_3X25"
 	liveAcct.Regime = "FUNDING CARRY"
-	liveAcct.Name = "Micro Funding Carry ($25x3: MRNA, WLFI, ZEC)"
+	liveAcct.Name = "Micro Funding Carry ($25x3: WLFI, ZEC, CC)"
 	liveAcct.Desc = "1:1 hedged Lighter 0%-fee <-> Binance funding carry micro test ($25/coin, -$4 hard stop)."
 	liveAcct.VenueDesc = "LT 0% IOC + BN Hedge | Micro Carry"
 	liveAcct.Tier = 1
@@ -177,7 +178,7 @@ func syncCarryToLiveSlots(slots []*carrySlot) {
 }
 
 func runMicroCarryTestLoop() {
-	fmt.Printf("[%s] Booting safe micro funding-carry test ($%.0f x 3: MRNA, WLFI, ZEC | Stop=$%.2f)\n",
+	fmt.Printf("[%s] Booting safe micro funding-carry test ($%.0f x 3: WLFI, ZEC, CC | Stop=$%.2f)\n",
 		CarryMicroVer, CarryClipUSD, CarryHardStopUSD)
 
 	slots := make([]*carrySlot, len(carryTargets))
@@ -185,21 +186,53 @@ func runMicroCarryTestLoop() {
 		slots[i] = &carrySlot{Sym: t.Sym, BnSym: t.BnSym}
 	}
 
-	// Capture starting 3-venue flat equity baseline for hard stop
-	_, _, _, _ = fetchBnAccountMargin()
+	// Capture starting 2-venue equity baseline for hard stop (with retries so BN != 0)
+	bootBnEq := 0.0
+	for k := 0; k < 4 && bootBnEq <= 0; k++ {
+		if _, _, _, ok := fetchBnAccountMargin(); ok {
+			dnMu.Lock()
+			bootBnEq = bnTotalMargin
+			if bootBnEq <= 0 {
+				bootBnEq = bnTotalWallet
+			}
+			dnMu.Unlock()
+		}
+		if bootBnEq <= 0 {
+			time.Sleep(500 * time.Millisecond)
+		}
+	}
 	bootLtEq := 0.0
 	if snap, ok := fetchLtAccountCached(2*time.Second, 3); ok && snap != nil {
 		bootLtEq, _ = strconv.ParseFloat(snap.TotalAssetValue, 64)
 	}
-	dnMu.Lock()
-	bootBnEq := bnTotalMargin
-	if bootBnEq <= 0 {
-		bootBnEq = bnTotalWallet
-	}
-	dnMu.Unlock()
 	bootTotalEq := bootLtEq + bootBnEq
 	fmt.Printf("[%s] Boot 2-venue equity baseline: LT=$%.2f + BN=$%.2f = $%.2f (hard stop at $%.2f)\n",
 		CarryMicroVer, bootLtEq, bootBnEq, bootTotalEq, bootTotalEq+CarryHardStopUSD)
+
+	// Seamlessly adopt any already-open target carry positions on Lighter (e.g. WLFI, ZEC across hot-reload!)
+	for _, cs := range slots {
+		m, okM := markets[cs.Sym]
+		if !okM {
+			continue
+		}
+		if rp, avg, okP := fetchLtPosRESTChecked(cs.Sym); okP && math.Abs(rp) >= m.MinB {
+			cs.Open = true
+			cs.Qty = math.Abs(rp)
+			if rp > 0 {
+				cs.Dir = "LONG_LT"
+			} else {
+				cs.Dir = "SHORT_LT"
+			}
+			cs.LtEntryPx = avg
+			cs.BnEntryPx = avg
+			if bb, ba, okB := fetchBnBookRESTSingle(cs.BnSym); okB {
+				cs.BnEntryPx = 0.5 * (bb + ba)
+			}
+			cs.OpenedAt = time.Now()
+			fmt.Printf("[%s] ADOPTED live carry position %s %s qty=%.5f @ %.5f\n", CarryMicroVer, cs.Sym, cs.Dir, cs.Qty, cs.LtEntryPx)
+		}
+	}
+	syncCarryToLiveSlots(slots)
 
 	var lastFundCheck time.Time
 	ltAprMap := map[string]float64{}
@@ -217,11 +250,11 @@ func runMicroCarryTestLoop() {
 			if ltm, bnm, ok := fetchLiveFundingDiffs(); ok {
 				ltAprMap, bnAprMap = ltm, bnm
 				lastFundCheck = now
-				fmt.Printf("[%s] Funding refresh: MRNA(LT=%+.1f%% BN=%+.1f%%) WLFI(LT=%+.1f%% BN=%+.1f%%) ZEC(LT=%+.1f%% BN=%+.1f%%)\n",
+				fmt.Printf("[%s] Funding refresh: WLFI(LT=%+.1f%% BN=%+.1f%%) ZEC(LT=%+.1f%% BN=%+.1f%%) CC(LT=%+.1f%% BN=%+.1f%%)\n",
 					CarryMicroVer,
-					ltAprMap["MRNA"], bnAprMap["MRNAUSDT"],
 					ltAprMap["WLFI"], bnAprMap["WLFIUSDT"],
-					ltAprMap["ZEC"], bnAprMap["ZECUSDT"])
+					ltAprMap["ZEC"], bnAprMap["ZECUSDT"],
+					ltAprMap["CC"], bnAprMap["CCUSDT"])
 			}
 		}
 
@@ -268,7 +301,7 @@ func runMicroCarryTestLoop() {
 			diffApr := ltApr - bnApr // >0 => SHORT_LT+LONG_BN; <0 => LONG_LT+SHORT_BN
 
 			if !cs.Open {
-				if now.Sub(cs.LastTry) < 20*time.Second {
+				if cs.Disabled || now.Sub(cs.LastTry) < 20*time.Second {
 					continue
 				}
 				cs.LastTry = now
@@ -352,8 +385,9 @@ func runMicroCarryTestLoop() {
 				hQty := roundTo(math.Floor(math.Abs(ltPos)/sp.Step+1e-9)*sp.Step, sp.QDec)
 				fq, ap, latMs, okH := executeBnMarketOrder(cs.BnSym, actualBnSide, hQty, sp.QDec, false)
 				if !okH || fq <= 0 {
-					fmt.Printf("[%s] %s BN hedge FAILED -> immediately closing LT pos %.5f!\n", CarryMicroVer, cs.Sym, ltPos)
+					fmt.Printf("[%s] %s BN hedge FAILED -> closing LT pos %.5f and DISABLING %s to prevent retry churn!\n", CarryMicroVer, cs.Sym, ltPos, cs.Sym)
 					_, _ = closeLtLegSync(cs.Sym, ltPos, rb, ra)
+					cs.Disabled = true
 					continue
 				}
 
