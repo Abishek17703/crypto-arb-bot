@@ -241,7 +241,7 @@ func runMicroCarryTestLoop() {
 				if dd <= CarryHardStopUSD {
 					fmt.Printf("[%s] HARD STOP HIT: cur=$%.2f vs boot=$%.2f (delta=$%+.2f <= $%.2f) -> FLATTENING ALL!\n",
 						CarryMicroVer, curEq, bootTotalEq, dd, CarryHardStopUSD)
-					flattenAndExitPause("CARRY_HARD_STOP")
+					flattenAndExitPause("STOP-LOSS CARRY")
 					return
 				}
 			}
@@ -302,13 +302,11 @@ func runMicroCarryTestLoop() {
 
 				wantDir := "LONG_LT"
 				ltSide := "BID"
-				bnSide := "SELL"
 				entryCrossBp := ((bb - ra) / ra) * 10000.0
 				iocPx := roundTo(ra*1.0035, m.PxDec)
 				if diffApr > 0 {
 					wantDir = "SHORT_LT"
 					ltSide = "ASK"
-					bnSide = "BUY"
 					entryCrossBp = ((rb - ba) / ba) * 10000.0
 					iocPx = roundTo(rb*0.9965, m.PxDec)
 				}
