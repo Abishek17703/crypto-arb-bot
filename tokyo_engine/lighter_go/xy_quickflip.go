@@ -102,8 +102,9 @@ func runXYQuickFlipLoop() {
 	liveAcct.RealizedGross = 0
 	liveAcct.FeesPaid = 0
 	liveAcct.RoundTrips = 0
-	liveAcct.Wins = 0
-	liveAcct.Losses = 0
+	liveAcct.WinTrips = 0
+	liveAcct.GrossWinUsd = 0
+	liveAcct.GrossLossUsd = 0
 	liveAcct.GrossVolumeUsd = 0
 	liveAcct.MakerFills = 0
 	liveAcct.TakerFills = 0
@@ -451,7 +452,7 @@ func runXYQuickFlipLoop() {
 				}
 			}
 			liveMu.Lock()
-			cNet, tr, w := liveAcct.ClosedNetUsd, liveAcct.RoundTrips, liveAcct.Wins
+			cNet, tr, w := liveAcct.ClosedNetUsd, liveAcct.RoundTrips, liveAcct.WinTrips
 			liveMu.Unlock()
 			fmt.Printf("[%s] Heartbeat | fxEq=%.5f | open=%d/3 | closed=%d (%dW) net=$%+.4f\n",
 				XYQuickFlipVer, fx, openCnt, tr, w, cNet)
@@ -493,9 +494,10 @@ func recordXYClose(xs *xySlot, ltExitPx, bnExitPx, exitFeeBps float64, reason st
 	liveMu.Lock()
 	liveAcct.RoundTrips++
 	if net > 0 {
-		liveAcct.Wins++
+		liveAcct.WinTrips++
+		liveAcct.GrossWinUsd = roundTo(liveAcct.GrossWinUsd+net, 6)
 	} else {
-		liveAcct.Losses++
+		liveAcct.GrossLossUsd = roundTo(liveAcct.GrossLossUsd+math.Abs(net), 6)
 	}
 	liveAcct.RealizedGross = roundTo(liveAcct.RealizedGross+gross, 6)
 	liveAcct.FeesPaid = roundTo(liveAcct.FeesPaid+totFee, 6)
