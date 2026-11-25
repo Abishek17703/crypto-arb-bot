@@ -2459,8 +2459,8 @@ func main() {
 
 	go runBnUserWS()
 	go runAsterUserWS()
-	go runMicroCarryTestLoop()
-	fmt.Printf("GO-TOKYO %s LIVE | MICRO FUNDING CARRY ($25x3: MRNA, WLFI, ZEC) | Stop=$%.2f\n", CarryMicroVer, CarryHardStopUSD)
+	go runXYQuickFlipLoop()
+	fmt.Printf("GO-TOKYO %s LIVE | X+Y QUICK-FLIP IOC ($26x3: ETH, SOL, XRP) | Stop=$%.2f\n", XYQuickFlipVer, XYHardStopUSD)
 	go syncAccountLoop()
 	select {}
 }
