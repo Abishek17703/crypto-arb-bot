@@ -8,16 +8,27 @@ import (
 )
 
 const (
-	XYQuickFlipVer     = "XY-v1.0-QUICKFLIP-3X26"
+	XYQuickFlipVer     = "XY-v1.1-QUICKFLIP-3X26"
 	XYClipUSD          = 26.0
 	XYHardStopUSD      = -4.00
 	XYMinEntryCrossBp  = 8.5   // Fresh REST cross >= +8.5bp beyond live USDT/USDC equilibrium (+4.5bp net above 4bp fee!)
-	XYExitStartBp      = 4.5   // Target +4.5bp net early
+	XYExitStartBp      = 4.5   // Target +4.5bp net early (0% BN Maker exit)
 	XYExitFloorBp      = 2.5   // Never exit below +2.5bp buffer (absorbs Lighter 300ms-2s IOC exit lag!)
+	XYInstantTakerNet  = 3.0   // If instant BN Taker exit (8bp RT total) STILL locks >= +3.0bp net, take it immediately!
 	XYEmergencyStopBp  = 75.0  // Wide hedged basis emergency stop (never tight 35bp!)
 	XYMaxBnJumpBp      = 1.2   // Skip unstable 1s Binance jumps
 	XYMinBnDepthMult   = 3.0   // Require >= 3x clip ($78) top-of-book depth on Binance
 )
+
+func getUsdtUsdcEquilFxChecked(now time.Time) (float64, bool) {
+	dnMu.Lock()
+	fx, ok := dnQuoteFxToUsdtLocked("USDC", now)
+	dnMu.Unlock()
+	if !ok || fx < 0.985 || fx > 1.015 {
+		return 1.0, false
+	}
+	return fx, true
+}
 
 var xySymbols = []string{"ETH", "SOL", "XRP"}
 
@@ -93,27 +104,64 @@ func xySymActive(slots []*xySlot, sym string) bool {
 }
 
 func runXYQuickFlipLoop() {
-	fmt.Printf("[%s] Booting pure X+Y Quick-Flip IOC bot ($%.0f x 3: ETH, SOL, XRP | Entry>=+%.1fbp beyond fxEq | Exit>=+%.1fbp REST | Stop=$%.2f)\n",
-		XYQuickFlipVer, XYClipUSD, XYMinEntryCrossBp, XYExitFloorBp, XYHardStopUSD)
-
-	// Reset live account stats cleanly for this micro profitability test
-	liveMu.Lock()
-	liveAcct.ClosedNetUsd = 0
-	liveAcct.RealizedGross = 0
-	liveAcct.FeesPaid = 0
-	liveAcct.RoundTrips = 0
-	liveAcct.WinTrips = 0
-	liveAcct.GrossWinUsd = 0
-	liveAcct.GrossLossUsd = 0
-	liveAcct.GrossVolumeUsd = 0
-	liveAcct.MakerFills = 0
-	liveAcct.TakerFills = 0
-	liveMu.Unlock()
+	fmt.Printf("[%s] Booting pure X+Y Quick-Flip IOC bot ($%.0f x 3: ETH, SOL, XRP | Entry>=+%.1fbp beyond fxEq | Maker>=+%.1fbp / InstantTaker>=+%.1fbp net | Stop=$%.2f)\n",
+		XYQuickFlipVer, XYClipUSD, XYMinEntryCrossBp, XYExitFloorBp, XYInstantTakerNet, XYHardStopUSD)
 
 	slots := make([]*xySlot, MaxLiveSlots)
+	adoptedCnt := 0
+	liveMu.Lock()
 	for i := 0; i < MaxLiveSlots; i++ {
-		slots[i] = &xySlot{Idx: i, State: "IDLE"}
+		xs := &xySlot{Idx: i, State: "IDLE"}
+		if sl := liveSlots[i]; sl != nil && (sl.State == "HEDGED" || sl.State == "BN_EXIT_OPEN") && sl.Sym != "" && sl.HedgedQty > 0 {
+			xs.State = "HEDGED"
+			xs.Sym = sl.Sym
+			xs.BnSym = sl.PeerSym
+			if xs.BnSym == "" {
+				xs.BnSym = sl.Sym + "USDC"
+			}
+			xs.LtSide = sl.LtSide
+			xs.BnSide = sl.PeerSide
+			xs.Qty = sl.HedgedQty
+			xs.LtEntryPx = sl.EntryLtPx
+			xs.BnEntryPx = sl.EntryPeerPx
+			xs.EntryFeeUsd = sl.EntryFeeUsd
+			if xs.EntryFeeUsd <= 0 {
+				xs.EntryFeeUsd = xs.Qty * xs.BnEntryPx * 0.0004
+			}
+			xs.OpenedAt = sl.OpenedAt
+			if xs.OpenedAt.IsZero() {
+				xs.OpenedAt = time.Now()
+			}
+			xs.TradeID = sl.TradeID
+			if xs.TradeID == 0 {
+				xs.TradeID = time.Now().UnixMilli()
+			}
+			adoptedCnt++
+		}
+		slots[i] = xs
 	}
+	if adoptedCnt == 0 {
+		liveAcct.ClosedNetUsd = 0
+		liveAcct.RealizedGross = 0
+		liveAcct.FeesPaid = 0
+		liveAcct.RoundTrips = 0
+		liveAcct.WinTrips = 0
+		liveAcct.GrossWinUsd = 0
+		liveAcct.GrossLossUsd = 0
+		liveAcct.GrossVolumeUsd = 0
+		liveAcct.MakerFills = 0
+		liveAcct.TakerFills = 0
+	}
+	liveMu.Unlock()
+	if adoptedCnt > 0 {
+		for _, xs := range slots {
+			if xs.State != "IDLE" {
+				fmt.Printf("[%s] ADOPTED open slot=%d %s LT_%s@%.5f + BN_%s@%.5f qty=%.4f\n",
+					XYQuickFlipVer, xs.Idx, xs.Sym, xs.LtSide, xs.LtEntryPx, xs.BnSide, xs.BnEntryPx, xs.Qty)
+			}
+		}
+	}
+	xyBootAt := time.Now()
 
 	// Capture exact flat 2-venue equity baseline for -$4.00 hard stop
 	bootBnEq := 0.0
@@ -205,21 +253,24 @@ func runXYQuickFlipLoop() {
 					continue
 				}
 
-				// Compute true fx = 1.0 USDC exit P&L (0% BN GTX Maker exit + 0% LT IOC close = 4.0bp total fee!)
-				var grossBp, exitBnPx float64
+				// Compute true fx = 1.0 USDC exit P&L for BOTH 0% BN Maker (4bp RT) AND Instant BN Taker (8bp RT)!
+				var grossBp, grossTakerBp, exitBnPx float64
 				var bnCloseSide string
 				if xs.LtSide == "BID" {
-					// Long LT / Short BN -> Buy back BN at pBid (0% GTX Maker) + Sell LT at rb (0% IOC)
+					// Long LT / Short BN -> Buy back BN (Maker @ pBid, Taker @ pAsk) + Sell LT @ rb (0% IOC)
 					bnCloseSide = "BUY"
 					exitBnPx = pBid
 					grossBp = ((rb-xs.LtEntryPx)/xs.LtEntryPx + (xs.BnEntryPx-pBid)/xs.BnEntryPx) * 10000.0
+					grossTakerBp = ((rb-xs.LtEntryPx)/xs.LtEntryPx + (xs.BnEntryPx-pAsk)/xs.BnEntryPx) * 10000.0
 				} else {
-					// Short LT / Long BN -> Sell BN at pAsk (0% GTX Maker) + Buy LT at ra (0% IOC)
+					// Short LT / Long BN -> Sell BN (Maker @ pAsk, Taker @ pBid) + Buy LT @ ra (0% IOC)
 					bnCloseSide = "SELL"
 					exitBnPx = pAsk
 					grossBp = ((xs.LtEntryPx-ra)/xs.LtEntryPx + (pAsk-xs.BnEntryPx)/xs.BnEntryPx) * 10000.0
+					grossTakerBp = ((xs.LtEntryPx-ra)/xs.LtEntryPx + (pBid-xs.BnEntryPx)/xs.BnEntryPx) * 10000.0
 				}
 				netBp := grossBp - 4.0
+				netTakerBp := grossTakerBp - 8.0
 				heldSec := time.Since(xs.OpenedAt).Seconds()
 
 				// Emergency wide 75bp hedge-break stop
@@ -235,6 +286,23 @@ func runXYQuickFlipLoop() {
 					recordXYClose(xs, ltClosePx, bnClosePx, 4.0, "EMERGENCY_75BP")
 					syncXYToTelemetry(slots)
 					continue
+				}
+
+				// Instant Guaranteed Taker Take-Profit: close Lighter 0% IOC FIRST (zero unhedged 300ms lag), then <8ms Binance Market!
+				if netTakerBp >= XYInstantTakerNet {
+					fmt.Printf("[%s] Y_INSTANT_TAKER_TP slot=%d %s netTaker=%+.2fbp (>=+%.1fbp) -> closing LT first, then BN!\n",
+						XYQuickFlipVer, xs.Idx, xs.Sym, netTakerBp, XYInstantTakerNet)
+					ltSigned := xs.Qty
+					if xs.LtSide == "ASK" {
+						ltSigned = -xs.Qty
+					}
+					ltClosePx, _ := closeLtLegSync(xs.Sym, ltSigned, rb, ra)
+					if rpChk, _, okChk := fetchLtPosRESTChecked(xs.Sym); okChk && math.Abs(rpChk) < m.MinB {
+						_, bnClosePx, _, _ := executeBnMarketOrder(xs.BnSym, bnCloseSide, xs.Qty, qDec, true)
+						recordXYClose(xs, ltClosePx, bnClosePx, 4.0, "XY_INSTANT_TAKER_TP")
+						syncXYToTelemetry(slots)
+						continue
+					}
 				}
 
 				// Dynamic buffered target: +4.5bp early -> decays gently over 180s -> HARD FLOOR +2.5bp!
@@ -271,9 +339,9 @@ func runXYQuickFlipLoop() {
 					syncXYToTelemetry(slots)
 					continue
 				}
-				// If order expired/canceled or drifted off BBO after 3s, cancel and return to HEDGED
+				// If order expired/canceled or drifted off BBO after 6s, cancel and return to HEDGED
 				drifted := (xs.LtSide == "BID" && pBid > xs.ExitBnPx*1.00005) || (xs.LtSide == "ASK" && pAsk < xs.ExitBnPx*0.99995)
-				if stStr == "CANCELED" || stStr == "EXPIRED" || stStr == "REJECTED" || (time.Since(xs.ExitPlaced) >= 3*time.Second && drifted) || time.Since(xs.ExitPlaced) >= 12*time.Second {
+				if stStr == "CANCELED" || stStr == "EXPIRED" || stStr == "REJECTED" || (time.Since(xs.ExitPlaced) >= 6*time.Second && drifted) || time.Since(xs.ExitPlaced) >= 15*time.Second {
 					if stStr == "NEW" || stStr == "PARTIALLY_FILLED" {
 						_, fq2, ap2 := cancelBnOrder(xs.BnSym, xs.ExitBnOid)
 						if fq2 >= m.MinB {
@@ -303,13 +371,13 @@ func runXYQuickFlipLoop() {
 			}
 		}
 
-		if idleSlot != nil {
+		if idleSlot != nil && time.Since(xyBootAt) >= 10*time.Second {
 			liveMu.Lock()
 			txCount := countLtTxLastMinLocked(now.UnixMilli())
 			liveMu.Unlock()
 
-			if txCount < MaxLtTxPerMin-6 {
-				fxEq := getUsdtUsdcEquilFx(now)
+			fxEq, okFx := getUsdtUsdcEquilFxChecked(now)
+			if txCount < MaxLtTxPerMin-6 && okFx {
 				bestCross := -999.0
 				bestSym, bestBnSym, bestLtSide := "", "", ""
 				bestQty, bestStep := 0.0, 0.0
@@ -363,11 +431,11 @@ func runXYQuickFlipLoop() {
 					m := markets[bestSym]
 					rb, ra := fetchLtBookREST(m.ID)
 					_, _, _, _, _, pBidC, pAskC, _, jumpC, _, _, _, okC := getBnUsdcBook(bestSym, time.Now())
-					fxEqC := getUsdtUsdcEquilFx(time.Now())
+					fxEqC, okFxC := getUsdtUsdcEquilFxChecked(time.Now())
 					confirmed := false
 					confCross := 0.0
 					iocPx := 0.0
-					if rb > 0 && ra > rb && okC && math.Abs(jumpC) <= XYMaxBnJumpBp {
+					if rb > 0 && ra > rb && okC && okFxC && math.Abs(jumpC) <= XYMaxBnJumpBp {
 						if bestLtSide == "BID" {
 							confCross = ((pBidC*fxEqC - ra) / (pBidC * fxEqC)) * 10000.0
 							iocPx = roundTo(ra*1.0012, m.PxDec)
