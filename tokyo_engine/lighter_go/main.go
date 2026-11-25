@@ -2459,8 +2459,8 @@ func main() {
 
 	go runBnUserWS()
 	go runAsterUserWS()
-	go runLiveMicroArenaLoop()
-	fmt.Printf("GO-TOKYO %s LIVE | 4-STRATEGY MICRO-CAPITAL ARENA | Lighter+Binance+AsterDEX | Stop=$%.2f\n", BotVersion, StopEqUSD)
+	go runMicroCarryTestLoop()
+	fmt.Printf("GO-TOKYO %s LIVE | MICRO FUNDING CARRY ($25x3: MRNA, WLFI, ZEC) | Stop=$%.2f\n", CarryMicroVer, CarryHardStopUSD)
 	go syncAccountLoop()
 	select {}
 }
